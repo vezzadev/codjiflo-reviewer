@@ -59,6 +59,21 @@ Existing CLI authentication is independent of the GitHub token. Subscription/API
 
 Provider calls have a 45-minute limit; the review job has a 55-minute limit, below the GitHub App token's one-hour lifetime. A provider timeout terminates its process group on Linux and enters the normal failure-reporting path. A runner shutdown or forced workflow cancellation may prevent the failure comment and temporary-checkout cleanup; check the workflow logs in that case.
 
+### Prepare offline review prerequisites
+
+Use the optional `prepare-command` input for trusted host-side setup. It runs from the bot checkout after authorization and before the App token is minted or either reviewer CLI starts. A nonzero exit stops the job without submitting a review. Preparation has a five-minute limit; commands come from the consumer's trusted workflow, not PR content.
+
+For repositories requiring the `developing-solidworks` reference:
+
+```yaml
+with:
+  prepare-command: node scripts/prepare-solidworks-docs.mjs
+```
+
+The helper resolves the enabled Codex plugin through `codex plugin list --json` and provisions its exact versioned skill directory from an installed Claude offline bundle. It copies reference data only, preserving skill instructions, scripts, and learnings. A valid target is reused without requiring the source cache; an absent or incomplete bundle fails preparation. Plugin-version changes select a new target automatically.
+
+Install the source bundle once as the runner user before enabling this input. Preparation does not download documentation or invoke PowerShell. Codex retains `--sandbox read-only`, and reviews can read the prepared docs even when the skill's optional online freshness check is unavailable. Local CLI users should run the same preparation command before invoking the reviewer.
+
 ## Incremental review and fail-closed publication
 
 Incremental is the default. Each successful native review includes a machine-readable marker:
@@ -97,7 +112,7 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 
 Local `--requester` is an operator assertion, not remote authentication. Do not expose this CLI as an unauthenticated service. Event-based runs always use the original event author instead.
 
-Other environment: `GH_TOKEN` is a fallback for `GITHUB_TOKEN`; `GITHUB_API_URL` supports GitHub Enterprise/the fixture server; PR metadata supplies its clone URL. `CODJIFLO_CODEX_BIN`/`CODJIFLO_CLAUDE_BIN` override executable paths (also used by fixtures). `GITHUB_RUN_ID`/`GITHUB_SERVER_URL` build kickoff links. The reusable workflow exposes `sol-model`, `opus-model`, `runner-label`, and optional `app-id` inputs.
+Other environment: `GH_TOKEN` is a fallback for `GITHUB_TOKEN`; `GITHUB_API_URL` supports GitHub Enterprise/the fixture server; PR metadata supplies its clone URL. `CODJIFLO_CODEX_BIN`/`CODJIFLO_CLAUDE_BIN` override executable paths (also used by fixtures). `GITHUB_RUN_ID`/`GITHUB_SERVER_URL` build kickoff links. The reusable workflow exposes `sol-model`, `opus-model`, `runner-label`, optional `app-id`, and optional `prepare-command` inputs.
 
 Provider flags were checked against installed help: Codex `exec --model -c model_reasoning_effort=... --sandbox read-only --json --output-schema --output-last-message`, prompt on closed stdin; Claude `--print --model --effort --output-format stream-json --verbose --json-schema --no-session-persistence --strict-mcp-config --allowedTools Read,Grep,Glob,Bash --permission-mode dontAsk`. Claude result events require `subtype: success`, no `is_error`, and `structured_output`. No interactive stdin is left open. Keep CLIs recent enough to support these flags; unsupported flags fail the run. Claude uses existing auth/settings, but external MCP configurations are not loaded.
 

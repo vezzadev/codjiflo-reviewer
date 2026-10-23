@@ -18,6 +18,8 @@ jobs:
       approved-users: ${{ vars.CODJIFLO_APPROVED_USERS }}
       bot-ref: main
       runner-label: self-hosted
+      # Optional for SolidWorks repositories; provision docs outside the model sandbox.
+      # prepare-command: node scripts/prepare-solidworks-docs.mjs
       # Optional: register/install an App and set variable + secret as in README.
       app-id: ${{ vars.CODJIFLO_APP_ID }}
     secrets:
