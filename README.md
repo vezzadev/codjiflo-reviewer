@@ -77,6 +77,12 @@ The helper resolves the enabled Codex plugin through `codex plugin list --json` 
 
 Install the source bundle once as the runner user before enabling this input. Preparation does not download documentation or invoke PowerShell. Codex retains `--sandbox read-only`, and reviews can read the prepared docs even when the skill's optional online freshness check is unavailable. Local CLI users should run the same preparation command before invoking the reviewer.
 
+Concurrent preparation waits up to 30 seconds for a live lock owner, then checks the cache again. A stale lock fails with cleanup instructions instead of silently accepting unfinished data.
+
+### Review parallelism
+
+Each self-hosted runner process executes one job at a time. To allow more simultaneous reviews, register additional runners with the same configured label and separate installation/work directories and services. They may share a machine, subject to its resources and the provider account's quotas. The per-PR concurrency group still serializes reviews of the same PR. `strategy.max-parallel` applies to matrix jobs and does not control this workflow.
+
 ## Incremental review and fail-closed publication
 
 Incremental is the default. Each successful native review includes a machine-readable marker:

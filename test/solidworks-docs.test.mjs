@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { once } from 'node:events';
 
 const execFileAsync = promisify(execFile);
 const script = fileURLToPath(new URL('../scripts/prepare-solidworks-docs.mjs', import.meta.url));
@@ -49,9 +50,13 @@ async function fixture(t) {
       version: 2, plugins: { [pluginKey]: [{ scope: 'project', projectPath: '/some/other/project', installPath: sourcePlugin, version: '0.9.9', lastUpdated: '2026-09-27T00:26:34.503Z' }] },
     }));
   };
-  const run = () => execFileAsync(process.execPath, [script, '--home', home], {
-    env: { ...process.env, HOME: home, CODEX_HOME: codexHome, CODJIFLO_CODEX_BIN: cli }, timeout: 10000,
-  });
+  const run = onOutput => {
+    const result = execFileAsync(process.execPath, [script, '--home', home], {
+      env: { ...process.env, HOME: home, CODEX_HOME: codexHome, CODJIFLO_CODEX_BIN: cli }, timeout: 10000,
+    });
+    if (onOutput) result.child.stdout.on('data', chunk => onOutput(chunk.toString()));
+    return result;
+  };
   return { home, codexHome, target, targetFor, source, activate, registerSource, run };
 }
 
@@ -180,5 +185,57 @@ for (const selection of ['disabled', 'ambiguous', 'invalid version']) {
       return true;
     });
     await noMarker(f.target);
+  });
+}
+
+for (const identifyImmediately of [true, false]) {
+  test(`waits for a real lock owner and reuses its ready cache (${identifyImmediately ? 'live PID' : 'create-before-PID gap'})`, { timeout: 15000 }, async t => {
+    const f = await fixture(t);
+    await bundle(f.target);
+    const marker = path.join(f.target, '.bundle-version');
+    const before = await stat(marker);
+    const lock = `${f.target}.prepare-lock`;
+    const ownerScript = `
+      import { open, rm } from 'node:fs/promises';
+      const lock = process.argv[1];
+      const handle = await open(lock, 'wx');
+      if (${identifyImmediately}) await handle.writeFile('pid=' + process.pid + '\\n');
+      process.on('message', async message => {
+        if (message !== 'release') return;
+        if (!${identifyImmediately}) await handle.writeFile('pid=' + process.pid + '\\n');
+        await handle.close();
+        await rm(lock);
+        process.disconnect();
+      });
+      process.send('locked');
+    `;
+    const owner = spawn(process.execPath, ['--input-type=module', '-e', ownerScript, lock], {
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    });
+    t.after(() => {
+      if (owner.exitCode === null) owner.kill('SIGKILL');
+    });
+    const ownerClosed = once(owner, 'close');
+    assert.equal((await once(owner, 'message'))[0], 'locked');
+    let waitingMessages = 0;
+    let output = '';
+    const result = await f.run(chunk => {
+      output += chunk;
+      if (waitingMessages === 0 && output.includes('SolidWorks docs waiting for preparation lock=')) {
+        waitingMessages++;
+        assert.doesNotMatch(output, /SolidWorks docs reused|SolidWorks docs provisioned/);
+        // Release is driven by the contender's observed wait, not a sleep.
+        owner.send('release');
+      }
+    });
+    assert.equal(waitingMessages, 1);
+    assert.equal((result.stdout.match(/SolidWorks docs waiting for preparation lock=/g) || []).length, 1);
+    assert.match(result.stdout, /SolidWorks docs reused/);
+    assert.doesNotMatch(result.stdout, /SolidWorks docs provisioned/);
+    assert.deepEqual(await ownerClosed, [0, null]);
+    const after = await stat(marker);
+    assert.equal(after.mtimeMs, before.mtimeMs);
+    assert.equal(after.ino, before.ino);
+    assert.deepEqual(await readdir(path.dirname(f.target)), [skill]);
   });
 }
