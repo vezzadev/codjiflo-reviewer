@@ -34,6 +34,42 @@ test('commands support four presets, aliases, explicit full and default incremen
   assert.throws(() => parseCommand('@codjiflo review turbo'));
   assert.throws(() => parseCommand('@codjiflo review full incremental'));
 });
+test('profile shorthand normalizes aliases and canonical names with optional mode', () => {
+  for (const [name, preset] of [...Object.keys(PRESETS).map(preset => [preset, preset]), ['codex', 'sol-xhigh'], ['claude', 'opus-xhigh']]) {
+    for (const mention of ['@codjiflo', '@codjiflo-reviewer']) {
+      assert.deepEqual(parseCommand(`${mention} ${name}`), { preset, mode: 'incremental' });
+      assert.deepEqual(parseCommand(`Context\n \t${mention.toUpperCase()} ${name.toUpperCase()} FULL\nThanks`), { preset, mode: 'full' });
+      assert.deepEqual(parseCommand(`${mention} ${name} incremental`), { preset, mode: 'incremental' });
+    }
+    for (const options of [`${name} ${name}`, `${name} ${preset}`, `${name} claude`, `${name} full incremental`, `${name} full full`, `${name} turbo`, `${name} review`]) {
+      assert.throws(() => parseCommand(`@codjiflo ${options}`));
+    }
+  }
+});
+test('only line-start review or known profile commands trigger reviews', () => {
+  for (const body of [undefined, '', '@codjiflo', '@codjiflo-reviewer', '@codjiflo thanks', '@codjiflo turbo', '@codjiflo sol-high full', '@codjiflo full', 'Thanks @codjiflo codex', '> @codjiflo claude full', '@codjiflo-other codex', '@codjiflo codexish', '@codjiflo\ncodex', '@codjiflo\nreview']) {
+    assert.equal(parseCommand(body), null);
+  }
+  assert.deepEqual(parseCommand('@codjiflo thanks\n@codjiflo codex'), { preset: 'sol-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('@codjiflo review'), { preset: 'sol-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('@codjiflo review FULL'), { preset: 'sol-xhigh', mode: 'full' });
+});
+test('shorthand events require an approved original author and a newly created PR comment', () => {
+  const event = { action: 'created', sender: { login: 'admin' }, comment: { body: '@codjiflo codex', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1853, pull_request: {} } };
+  assert.equal(requestFromEvent(event, 'admin'), null);
+  assert.equal(requestFromEvent(event, ''), null);
+  event.comment.user.login = 'ADMIN';
+  for (const [body, preset, mode] of [['@codjiflo codex', 'sol-xhigh', 'incremental'], ['@codjiflo claude full', 'opus-xhigh', 'full'], ['@codjiflo SOL-MEDIUM', 'sol-medium', 'incremental']]) {
+    event.comment.body = body;
+    assert.deepEqual(requestFromEvent(event, 'admin'), { preset, mode, repo: 'org/repo', number: 1853, requester: 'ADMIN' });
+    assert.equal(requestFromEvent({ ...event, action: 'edited' }, 'admin'), null);
+    assert.equal(requestFromEvent({ ...event, issue: { number: 1853 } }, 'admin'), null);
+  }
+  event.comment.body = '@codjiflo codex claude';
+  assert.throws(() => requestFromEvent(event, 'admin'));
+  event.comment.user.login = 'stranger';
+  assert.equal(requestFromEvent(event, 'admin'), null);
+});
 test('event authorization uses original comment sender, not rerunner actor', () => {
   const event = { action: 'created', sender: { login: 'admin' }, comment: { body: '@codjiflo-reviewer review', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1, pull_request: {} } };
   assert.equal(requestFromEvent(event, 'admin'), null);

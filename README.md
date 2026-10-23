@@ -10,9 +10,14 @@ Comment on an open PR:
 @codjiflo-reviewer review sol-medium
 @codjiflo-reviewer review codex
 @codjiflo-reviewer review claude full
+@codjiflo codex
+@codjiflo claude full
+@codjiflo sol-medium incremental
 ```
 
-`@codjiflo` is also accepted. The mention must begin a line. Options are optional, order-independent, and limited to one preset plus one mode (`full` or `incremental`). Only newly created issue comments trigger work; editing an existing comment does not.
+`@codjiflo` and `@codjiflo-reviewer` are both accepted. The mention must begin a line (leading spaces/tabs are allowed), and the command must stay on that line. Use `@codjiflo review [preset] [full|incremental]` or the shorthand `@codjiflo <preset> [full|incremental]`. Explicit `review` defaults to `sol-xhigh` when no preset is supplied; shorthand requires a known canonical preset or alias immediately after the mention. Commands, presets, aliases, and modes are case-insensitive. After `review`, options are optional and order-independent; both forms allow at most one preset and one mode, and duplicate arguments are rejected. Only newly created issue comments trigger work; editing an existing comment does not.
+
+Bare mentions, casual mentions, unknown shorthand profiles, and mentions inside a sentence do not trigger a review. Once a command starts with `review` or a known profile, unknown options are rejected rather than ignored. For example, `@codjiflo turbo` is ignored, while `@codjiflo review turbo` and `@codjiflo codex turbo` are invalid. Both forms require the same approved original comment author.
 
 ## Presets
 

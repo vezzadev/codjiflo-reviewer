@@ -18,22 +18,26 @@ export function isApproved(login, configured = '') {
 }
 
 export function parseCommand(body) {
-  const match = /(?:^|\n)\s*@codjiflo(?:-reviewer)?\s+review\b([^\n]*)/i.exec(body ?? '');
-  if (!match) return null;
-  const words = match[1].trim().split(/\s+/).filter(Boolean);
-  let preset = 'sol-xhigh';
-  let mode = 'incremental';
-  const seen = new Set();
-  for (const word of words) {
-    const value = word.toLowerCase();
-    const canonical = normalizePreset(value);
-    const kind = canonical ? 'preset' : ['full', 'incremental'].includes(value) ? 'mode' : null;
-    if (!kind || seen.has(kind)) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [sol-xhigh|opus-xhigh|sol-medium|opus-medium|codex|claude] [full|incremental]`);
-    seen.add(kind);
-    if (kind === 'preset') preset = canonical;
-    else mode = value;
+  const mentions = /(?:^|\n)[^\S\n]*@codjiflo(?:-reviewer)?[^\S\n]+(\S+)([^\n]*)/gi;
+  for (const match of (body ?? '').matchAll(mentions)) {
+    const first = match[1].toLowerCase();
+    if (first !== 'review' && !normalizePreset(first)) continue;
+    const words = (first === 'review' ? match[2] : `${first}${match[2]}`).trim().split(/\s+/).filter(Boolean);
+    let preset = 'sol-xhigh';
+    let mode = 'incremental';
+    const seen = new Set();
+    for (const word of words) {
+      const value = word.toLowerCase();
+      const canonical = normalizePreset(value);
+      const kind = canonical ? 'preset' : ['full', 'incremental'].includes(value) ? 'mode' : null;
+      if (!kind || seen.has(kind)) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [sol-xhigh|opus-xhigh|sol-medium|opus-medium|codex|claude] [full|incremental] or @codjiflo <preset> [full|incremental]`);
+      seen.add(kind);
+      if (kind === 'preset') preset = canonical;
+      else mode = value;
+    }
+    return { preset, mode };
   }
-  return { preset, mode };
+  return null;
 }
 
 export function requestFromEvent(event, approved) {
