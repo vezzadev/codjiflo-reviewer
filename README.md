@@ -1,3 +1,6 @@
+> [!WARNING]
+> This is a proof-of-concept repo. Do not rely on it.
+
 # Codjiflo Reviewer
 
 A mention-triggered GitHub PR reviewer for trusted self-hosters. Node.js 22+, Git, native `fetch`, `node:test`, and your existing Codex/Claude CLI login. No runtime npm dependencies, hosted review service, or multi-tenant infrastructure.
