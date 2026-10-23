@@ -1,0 +1,77 @@
+import { createServer } from 'node:http';
+import { mkdtemp, mkdir, writeFile, readFile, chmod, rm } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { runProcess } from '../src/runner.mjs';
+
+export async function fixture() {
+  const temp = await mkdtemp(join(tmpdir(), 'codjiflo-fixture-'));
+  const repo = join(temp, 'repo');
+  await mkdir(repo);
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
+  const git = args => runProcess('git', args, { cwd: repo, env });
+  await git(['init', '-b', 'main']);
+  await writeFile(join(repo, 'a.js'), 'old\nsecond\n');
+  await git(['add', '.']); await git(['commit', '-m', 'base']);
+  const base = (await git(['rev-parse', 'HEAD'])).trim();
+  await writeFile(join(repo, 'a.js'), 'new\nsecond\n');
+  await git(['commit', '-am', 'first']);
+  const previous = (await git(['rev-parse', 'HEAD'])).trim();
+  await writeFile(join(repo, 'a.js'), 'new\nchanged\n');
+  await git(['commit', '-am', 'second']);
+  const head = (await git(['rev-parse', 'HEAD'])).trim();
+  const fake = join(temp, 'fake-cli.mjs');
+  const capture = join(temp, 'prompt.txt');
+  await writeFile(fake, `#!/usr/bin/env node
+import { writeFile } from 'node:fs/promises';
+let input = ''; for await (const chunk of process.stdin) input += chunk;
+await writeFile(process.env.FIXTURE_CAPTURE, input);
+process.stdout.write('fixture CLI streaming live\\n');
+process.stderr.write('fixture stderr streaming live\\n');
+if (process.env.FIXTURE_MODE === 'failure') process.exit(9);
+const findings = process.env.FIXTURE_MODE === 'findings' ? [
+ {path:'a.js',side:'LEFT',start_line:1,line:1,priority:'P1',disposition:'blocking',title:'Old-side bug',body:'Concrete failure scenario.'},
+ {path:'a.js',side:'RIGHT',start_line:1,line:2,priority:'P2',disposition:'blocking',title:'Range bug',body:'Concrete failure scenario.'}
+] : [];
+const result = {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings};
+if (process.argv.includes('exec')) {
+ const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
+ await writeFile(output, process.env.FIXTURE_MODE === 'malformed' ? '{' : JSON.stringify(result));
+} else {
+ // stdout is valid JSONL in Claude mode (no unstructured status lines).
+ console.log(JSON.stringify({type:'result',subtype:'success',is_error:process.env.FIXTURE_MODE === 'error-result',structured_output:result}));
+}
+`);
+  // Claude's real stream is JSONL, so keep fake status in stderr only in this mode.
+  const fakeClaude = join(temp, 'fake-claude.mjs');
+  const source = await readFile(fake, 'utf8');
+  await writeFile(fakeClaude, source.replace("process.stdout.write('fixture CLI streaming live\\n');", "console.log(JSON.stringify({type:'assistant',message:'fixture live'}));"));
+  await chmod(fake, 0o755); await chmod(fakeClaude, 0o755);
+  const state = { requests: [], posts: [], reviews: [], stale: false, reads: 0 };
+  const server = createServer(async (request, response) => {
+    let body = ''; for await (const chunk of request) body += chunk;
+    const parsed = body ? JSON.parse(body) : undefined;
+    state.requests.push({ path: request.url, method: request.method, body: parsed });
+    response.setHeader('Content-Type', 'application/json');
+    if (request.method === 'POST') {
+      state.posts.push({ path: request.url, body: parsed });
+      response.end(JSON.stringify({ id: state.posts.length }));
+    } else if (request.url.startsWith('/repos/org/repo/pulls/1/reviews')) {
+      response.end(JSON.stringify(state.reviews));
+    } else if (request.url === '/repos/org/repo/pulls/1') {
+      state.reads++;
+      response.end(JSON.stringify({ state: 'open', head: { sha: state.stale && state.reads > 1 ? previous : head }, base: { sha: base, repo: { clone_url: pathToFileURL(repo).href } } }));
+    } else { response.statusCode = 404; response.end('{}'); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const api = `http://127.0.0.1:${server.address().port}`;
+  return { state, head, base, previous, temp, capture,
+    async run({ mode = 'approve', preset = 'sol-high', approved = 'alice', requester = 'Alice', full = false } = {}) {
+      return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
+        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: api, CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture },
+      });
+    },
+    async close() { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },
+  };
+}

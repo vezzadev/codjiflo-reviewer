@@ -1,0 +1,22 @@
+# Copy to .github/workflows/codjiflo-reviewer.yml on your DEFAULT branch.
+name: Review on mention
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+jobs:
+  review:
+    if: github.event.issue.pull_request
+    # Pin both this reference and bot-ref to the SAME trusted release commit SHA.
+    uses: vezzadev/codjiflo-reviewer/.github/workflows/review.yml@main
+    with:
+      approved-users: ${{ vars.CODJIFLO_APPROVED_USERS }}
+      bot-ref: main
+      runner-label: self-hosted
+      # Optional: register/install an App and set variable + secret as in README.
+      app-id: ${{ vars.CODJIFLO_APP_ID }}
+    secrets:
+      app-private-key: ${{ secrets.CODJIFLO_APP_PRIVATE_KEY }}

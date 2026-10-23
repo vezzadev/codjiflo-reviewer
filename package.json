@@ -1,0 +1,9 @@
+{
+  "name": "codjiflo-reviewer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test/*.test.mjs", "smoke": "node test/smoke.mjs" },
+  "bin": { "codjiflo-reviewer": "bin/codjiflo-reviewer.mjs" }
+}

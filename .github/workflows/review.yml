@@ -1,0 +1,83 @@
+name: Codjiflo Reviewer
+on:
+  workflow_call:
+    inputs:
+      approved-users:
+        type: string
+        required: true
+      bot-ref:
+        description: Trusted Codjiflo source revision; pin to the same SHA as the reusable workflow
+        type: string
+        default: main
+      runner-label:
+        type: string
+        default: self-hosted
+      sol-model:
+        type: string
+        default: gpt-6.1-sol
+      opus-model:
+        type: string
+        default: opus
+      app-id:
+        type: string
+        default: ''
+    secrets:
+      app-private-key:
+        required: false
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+concurrency:
+  group: codjiflo-${{ github.repository }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  gate:
+    if: github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ steps.gate.outputs.allowed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: vezzadev/codjiflo-reviewer
+          ref: ${{ inputs.bot-ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - id: gate
+        run: node bin/codjiflo-reviewer.mjs --gate
+        env:
+          CODJIFLO_APPROVED_USERS: ${{ inputs.approved-users }}
+  review:
+    needs: gate
+    if: needs.gate.outputs.allowed == 'true'
+    runs-on: ${{ inputs.runner-label }}
+    timeout-minutes: 90
+    steps:
+      # Never checkout or run the PR branch as the bot implementation.
+      - uses: actions/checkout@v4
+        with:
+          repository: vezzadev/codjiflo-reviewer
+          ref: ${{ inputs.bot-ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Mint GitHub App installation token (optional)
+        id: app
+        if: inputs.app-id != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+      - name: Review pull request
+        run: node bin/codjiflo-reviewer.mjs
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          CODJIFLO_APPROVED_USERS: ${{ inputs.approved-users }}
+          CODJIFLO_SOL_MODEL: ${{ inputs.sol-model }}
+          CODJIFLO_OPUS_MODEL: ${{ inputs.opus-model }}
