@@ -7,7 +7,7 @@ import { fixture } from './fixture.mjs';
 
 const metadata = [{ filename: 'a.js', additions: 2, deletions: 2, patch: '@@ -1,3 +1,3 @@\n-old\n+new\n same\n last\n@@ -20 +20 @@\n-before\n+after\n' }];
 const finding = { path: 'a.js', side: 'RIGHT', start_line: 1, line: 2, priority: 'P1', disposition: 'blocking', title: 'Broken result', body: 'Fails for zero. Category: correctness.' };
-const marker = (head, base, preset = 'sol-high') => `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head, base, preset })} -->`;
+const marker = (head, base, preset = 'sol-xhigh') => `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head, base, preset })} -->`;
 const sha = 'a'.repeat(40);
 
 test('authorization denies empty, absent and non-exact users; normalizes login case', () => {
@@ -18,8 +18,18 @@ test('authorization denies empty, absent and non-exact users; normalizes login c
   assert.equal(isApproved(undefined, 'alice'), false);
 });
 test('commands support four presets, aliases, explicit full and default incremental', () => {
-  assert.deepEqual(parseCommand('@codjiflo-reviewer review'), { preset: 'sol-high', mode: 'incremental' });
+  assert.deepEqual(Object.keys(PRESETS), ['sol-xhigh', 'opus-xhigh', 'sol-medium', 'opus-medium']);
+  assert.deepEqual(parseCommand('@codjiflo-reviewer review'), { preset: 'sol-xhigh', mode: 'incremental' });
   for (const preset of Object.keys(PRESETS)) assert.deepEqual(parseCommand(`@codjiflo review ${preset} full`), { preset, mode: 'full' });
+  for (const [alias, preset] of [['CoDeX', 'sol-xhigh'], ['CLAUDE', 'opus-xhigh']]) {
+    assert.deepEqual(parseCommand(`@codjiflo review ${alias}`), { preset, mode: 'incremental' });
+    assert.deepEqual(parseCommand(`@codjiflo review FULL ${alias}`), { preset, mode: 'full' });
+    for (const options of [`${alias} ${preset}`, `${preset} ${alias}`, `${alias} ${alias}`, `${alias} sol-medium`]) {
+      assert.throws(() => parseCommand(`@codjiflo review ${options}`));
+    }
+  }
+  assert.throws(() => parseCommand('@codjiflo review codex claude'));
+  for (const preset of ['sol-high', 'opus-high']) assert.throws(() => parseCommand(`@codjiflo review ${preset}`));
   assert.equal(parseCommand('not a review'), null);
   assert.throws(() => parseCommand('@codjiflo review turbo'));
   assert.throws(() => parseCommand('@codjiflo review full incremental'));
@@ -29,6 +39,8 @@ test('event authorization uses original comment sender, not rerunner actor', () 
   assert.equal(requestFromEvent(event, 'admin'), null);
   event.comment.user.login = 'ADMIN';
   assert.equal(requestFromEvent(event, 'admin').requester, 'ADMIN');
+  event.comment.body = '@codjiflo-reviewer review CLAUDE';
+  assert.deepEqual(requestFromEvent(event, 'admin'), { preset: 'opus-xhigh', mode: 'incremental', repo: 'org/repo', number: 1, requester: 'ADMIN' });
   assert.equal(requestFromEvent({ ...event, action: 'edited' }, 'admin'), null);
 });
 test('ranged comments retain correct left and right coordinates', () => {
@@ -48,14 +60,17 @@ test('removed files retain legal left-side comments and reject right-side anchor
 });
 test('baseline accepts PAT or bot approval, pins commit/base/preset, and respects latest blockers', () => {
   const approved = { state: 'APPROVED', user: { type: 'Bot' }, body: marker(sha, 'base'), commit_id: sha };
-  assert.equal(baseline([approved], 'base', 'sol-high').head, sha);
-  assert.equal(baseline([approved], 'newbase', 'sol-high'), null);
-  assert.equal(baseline([approved], 'base', 'opus-high'), null);
+  assert.equal(baseline([approved], 'base', 'sol-xhigh').head, sha);
+  assert.equal(baseline([approved], 'newbase', 'sol-xhigh'), null);
+  assert.equal(baseline([approved], 'base', 'opus-xhigh'), null);
+  for (const preset of ['sol-high', 'opus-high', 'codex', 'claude']) {
+    assert.equal(baseline([{ ...approved, body: marker(sha, 'base', preset) }], 'base', 'sol-xhigh'), null);
+  }
   const pat = { ...approved, user: { type: 'User' } };
-  assert.equal(baseline([pat], 'base', 'sol-high').head, sha);
-  assert.equal(baseline([approved, { ...pat, state: 'CHANGES_REQUESTED' }], 'base', 'sol-high'), null);
-  assert.equal(baseline([approved, { ...approved, state: 'DISMISSED' }], 'base', 'sol-high'), null);
-  assert.equal(baseline([{ ...approved, commit_id: 'mismatch' }], 'base', 'sol-high'), null);
+  assert.equal(baseline([pat], 'base', 'sol-xhigh').head, sha);
+  assert.equal(baseline([approved, { ...pat, state: 'CHANGES_REQUESTED' }], 'base', 'sol-xhigh'), null);
+  assert.equal(baseline([approved, { ...approved, state: 'DISMISSED' }], 'base', 'sol-xhigh'), null);
+  assert.equal(baseline([{ ...approved, commit_id: 'mismatch' }], 'base', 'sol-xhigh'), null);
 });
 test('malformed or contradictory results cannot approve', () => {
   const files = filesFromApi(metadata);

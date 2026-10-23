@@ -1,9 +1,16 @@
 export const PRESETS = {
-  'sol-high': { cli: 'codex', model: 'gpt-6.1-sol', effort: 'high', level: 'xhigh' },
-  'opus-high': { cli: 'claude', model: 'opus', effort: 'high', level: 'xhigh' },
+  'sol-xhigh': { cli: 'codex', model: 'gpt-6.1-sol', effort: 'high', level: 'xhigh' },
+  'opus-xhigh': { cli: 'claude', model: 'opus', effort: 'high', level: 'xhigh' },
   'sol-medium': { cli: 'codex', model: 'gpt-6.1-sol', effort: 'medium', level: 'high' },
   'opus-medium': { cli: 'claude', model: 'opus', effort: 'medium', level: 'high' },
 };
+
+export function normalizePreset(value) {
+  const name = value.toLowerCase();
+  if (name === 'codex') return 'sol-xhigh';
+  if (name === 'claude') return 'opus-xhigh';
+  return Object.hasOwn(PRESETS, name) ? name : null;
+}
 
 export function isApproved(login, configured = '') {
   const users = configured.split(/[,\s]+/).filter(Boolean).map(value => value.toLowerCase());
@@ -14,15 +21,16 @@ export function parseCommand(body) {
   const match = /(?:^|\n)\s*@codjiflo(?:-reviewer)?\s+review\b([^\n]*)/i.exec(body ?? '');
   if (!match) return null;
   const words = match[1].trim().split(/\s+/).filter(Boolean);
-  let preset = 'sol-high';
+  let preset = 'sol-xhigh';
   let mode = 'incremental';
   const seen = new Set();
   for (const word of words) {
     const value = word.toLowerCase();
-    const kind = Object.hasOwn(PRESETS, value) ? 'preset' : ['full', 'incremental'].includes(value) ? 'mode' : null;
-    if (!kind || seen.has(kind)) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [sol-high|opus-high|sol-medium|opus-medium] [full|incremental]`);
+    const canonical = normalizePreset(value);
+    const kind = canonical ? 'preset' : ['full', 'incremental'].includes(value) ? 'mode' : null;
+    if (!kind || seen.has(kind)) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [sol-xhigh|opus-xhigh|sol-medium|opus-medium|codex|claude] [full|incremental]`);
     seen.add(kind);
-    if (kind === 'preset') preset = value;
+    if (kind === 'preset') preset = canonical;
     else mode = value;
   }
   return { preset, mode };

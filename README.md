@@ -6,8 +6,10 @@ Comment on an open PR:
 
 ```text
 @codjiflo-reviewer review
-@codjiflo-reviewer review opus-high full
+@codjiflo-reviewer review opus-xhigh full
 @codjiflo-reviewer review sol-medium
+@codjiflo-reviewer review codex
+@codjiflo-reviewer review claude full
 ```
 
 `@codjiflo` is also accepted. The mention must begin a line. Options are optional, order-independent, and limited to one preset plus one mode (`full` or `incremental`). Only newly created issue comments trigger work; editing an existing comment does not.
@@ -16,10 +18,12 @@ Comment on an open PR:
 
 | Preset | CLI/model default | Model effort | Embedded e-code-review recipe |
 | --- | --- | --- | --- |
-| `sol-high` (default) | Codex / `gpt-6.1-sol` | high | xhigh |
-| `opus-high` | Claude / `opus` | high | xhigh |
+| `sol-xhigh` (default; alias `codex`) | Codex / `gpt-6.1-sol` | high | xhigh |
+| `opus-xhigh` (alias `claude`) | Claude / `opus` | high | xhigh |
 | `sol-medium` | Codex / `gpt-6.1-sol` | medium | high |
 | `opus-medium` | Claude / `opus` | medium | high |
+
+Preset names and aliases are case-insensitive in mentions and local `--preset` arguments. Aliases resolve to their canonical preset before kickoff, review publication, and baseline selection; they do not add extra presets. An alias and its canonical name still count as two preset arguments and are rejected together in a mention. `sol-high` and `opus-high` have been replaced by `sol-xhigh` and `opus-xhigh`; the old names are no longer accepted. Model effort remains `high`, and medium presets are unchanged. Historical reviews marked with the old names do not match the new presets, so the next review falls back to full scope.
 
 `CODJIFLO_SOL_MODEL` and `CODJIFLO_OPUS_MODEL` override model IDs. There is no automatic substitution or cross-provider fallback: configure a model available to your account. Claude's `opus` is its supported Opus alias; use a full model ID to pin a release.
 
@@ -55,7 +59,7 @@ Provider calls have a 45-minute limit; the review job has a 55-minute limit, bel
 Incremental is the default. Each successful native review includes a machine-readable marker:
 
 ```html
-<!-- codjiflo-reviewer:v1 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-high"} -->
+<!-- codjiflo-reviewer:v1 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-xhigh"} -->
 ```
 
 The most recent marked review must be an approval whose marker matches its GitHub `commit_id`, current base, and requested preset. Both App/bot and PAT-authored reviews participate. Its head must be an available ancestor of the new head. Then only changes since that approval are reviewed. Missing baseline, changed base or preset, rewritten/unavailable history, a previous changes-requested verdict, or a same-head rerun forces a **full** review. Earlier blocking findings are revisited rather than discarded. `full` explicitly requests the merge-base-to-head diff. Full Git history is fetched as needed.
@@ -74,15 +78,15 @@ Malformed JSON, missing structured output, provider failure, contradictory appro
 # No npm install needed.
 export CODJIFLO_APPROVED_USERS='your-login'
 export GITHUB_TOKEN='your-app-installation-token-or-PAT'
-node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login --preset opus-high --full
+node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login --preset claude --full
 ```
 
 | Invocation | Behavior |
 | --- | --- |
 | `node bin/codjiflo-reviewer.mjs` | Uses `GITHUB_EVENT_PATH` for an issue_comment event |
 | `node bin/codjiflo-reviewer.mjs --gate` | Authorization/command check only; sets `allowed` in `GITHUB_OUTPUT`; no token/provider/API calls |
-| `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `sol-high` incremental; still requires allowlist |
-| `--preset PRESET` | Select one of the four presets |
+| `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `sol-xhigh` incremental; still requires allowlist |
+| `--preset PRESET` | Select one of the four canonical presets or the `codex`/`claude` aliases |
 | `--full` | Full review in local invocation |
 | `--help` | Print usage |
 
