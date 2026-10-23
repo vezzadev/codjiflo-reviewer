@@ -28,9 +28,6 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
-concurrency:
-  group: codjiflo-${{ github.repository }}-${{ github.event.issue.number }}
-  cancel-in-progress: false
 jobs:
   gate:
     if: github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request
@@ -54,7 +51,10 @@ jobs:
     needs: gate
     if: needs.gate.outputs.allowed == 'true'
     runs-on: ${{ inputs.runner-label }}
-    timeout-minutes: 90
+    concurrency:
+      group: codjiflo-${{ github.repository }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    timeout-minutes: 55
     steps:
       # Never checkout or run the PR branch as the bot implementation.
       - uses: actions/checkout@v4

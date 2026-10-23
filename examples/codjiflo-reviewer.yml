@@ -10,6 +10,8 @@ permissions:
 jobs:
   review:
     if: github.event.issue.pull_request
+    # Do not add caller/workflow concurrency: the reusable workflow queues only
+    # requests that pass its authorization gate, not unrelated PR comments.
     # Pin both this reference and bot-ref to the SAME trusted release commit SHA.
     uses: vezzadev/codjiflo-reviewer/.github/workflows/review.yml@main
     with:

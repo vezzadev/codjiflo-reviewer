@@ -52,17 +52,51 @@ test('denied and empty allowlists cause no HTTP requests or provider launch', as
   } finally { await f.close(); }
 });
 
-test('incremental ancestor approval, explicit full, blockers and changed base choose correct scope', async t => {
-  for (const scenario of ['incremental', 'full', 'blockers', 'base-change', 'rebase']) await t.test(scenario, async () => {
+test('ancestor approval, explicit full, PAT blockers, same head and changed preset choose correct scope', async t => {
+  for (const scenario of ['incremental', 'full', 'blockers', 'base-change', 'rebase', 'same-head', 'preset-change']) await t.test(scenario, async () => {
     const f = await fixture();
     try {
-      const prior = scenario === 'rebase' ? 'f'.repeat(40) : f.previous;
+      const prior = scenario === 'rebase' ? 'f'.repeat(40) : scenario === 'same-head' ? f.head : f.previous;
       const base = scenario === 'base-change' ? 'c'.repeat(40) : f.base;
-      f.state.reviews = [{ user: { type: 'Bot' }, state: scenario === 'blockers' ? 'CHANGES_REQUESTED' : 'APPROVED', commit_id: prior, body: `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head: prior, base })} -->` }];
-      await f.run({ full: scenario === 'full' });
-      const text = await readFile(f.capture, 'utf8');
-      assert.match(text, new RegExp(`Review scope: ${scenario === 'incremental' ? 'incremental' : 'full'}`));
+      const approved = { user: { type: 'Bot' }, state: 'APPROVED', commit_id: prior, body: `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head: prior, base, preset: 'sol-high' })} -->` };
+      f.state.reviews = [approved, ...(scenario === 'blockers' ? [{ ...approved, user: { type: 'User' }, state: 'CHANGES_REQUESTED' }] : [])];
+      await f.run({ full: scenario === 'full', preset: scenario === 'preset-change' ? 'opus-high' : 'sol-high' });
+      assert.match(verdicts(f)[0].body.body, new RegExp(`Scope: \\*\\*${scenario === 'incremental' ? 'incremental' : 'full'}\\*\\*`));
       assert.equal(verdicts(f).length, 1);
+    } finally { await f.close(); }
+  });
+});
+
+test('full and incremental native coordinates use API patches rather than local diff', async t => {
+  for (const full of [false, true]) await t.test(String(full), async () => {
+    const f = await fixture();
+    try {
+      f.state.reviews = [{ user: { type: 'User' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-high' })} -->` }];
+      f.state.files[0].patch = '@@ -20,2 +20,2 @@\n-old\n-second\n+new\n+changed';
+      await f.run({ mode: 'findings', full });
+      const result = verdicts(f)[0].body;
+      assert.equal(result.event, 'REQUEST_CHANGES');
+      assert.deepEqual(result.comments, []);
+      assert.match(result.body, /Old-side bug/);
+      assert.match(result.body, /Range bug/);
+    } finally { await f.close(); }
+  });
+});
+
+test('files metadata is paginated and incomplete or over-limit listings fail without verdict', async t => {
+  for (const scenario of ['pagination', 'incomplete', 'limit']) await t.test(scenario, async () => {
+    const f = await fixture();
+    try {
+      f.state.changedFiles = scenario === 'limit' ? 3001 : 101;
+      if (scenario === 'pagination') f.state.files = Array.from({ length: 101 }, (_, index) => ({ ...f.state.files[0], filename: `file-${index}.js` }));
+      if (scenario === 'pagination') {
+        await f.run();
+        assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+        assert.ok(f.state.requests.some(request => request.path.endsWith('/files?per_page=100&page=2')));
+      } else {
+        await assert.rejects(f.run());
+        assert.equal(verdicts(f).length, 0);
+      }
     } finally { await f.close(); }
   });
 });

@@ -29,7 +29,7 @@ The high and xhigh instructions are faithfully adapted from the e-code-review sk
 
 1. Make sure this public repository's Actions workflows are usable by your organization. Choose a trusted Codjiflo commit SHA. Copy [`examples/codjiflo-reviewer.yml`](examples/codjiflo-reviewer.yml) to `.github/workflows/codjiflo-reviewer.yml` on your repository's **default branch**. Replace both `@main` and `bot-ref: main` with the **same** trusted commit SHA. `main` is usable for development but follows future source changes.
 2. Under Settings → Secrets and variables → Actions → Variables, set **`CODJIFLO_APPROVED_USERS`** to comma-, whitespace-, or newline-separated GitHub logins, for example `alice,bob`. Matching is exact and case-insensitive. **Unset/empty means nobody is approved.** Repository ownership, association, collaborator status and write permission do not override this list.
-3. Register a trusted persistent self-hosted Actions runner with the consumer repository/organization (`self-hosted` label by default). Install Git, Node 22+, and current `codex` and/or `claude` executables on its PATH. Log in to each CLI **as the runner OS user**, using its normal interactive authentication setup. Do not copy auth files into this repository or Actions artifacts. Set `runner-label` in the caller if using a dedicated custom label.
+3. Register a trusted Linux self-hosted Actions runner with the consumer repository/organization (`self-hosted` label by default). Install Git, Node 22+, and current `codex` and/or `claude` executables on its PATH. Log in to each CLI **as the runner OS user**, using its normal interactive authentication setup. Do not copy auth files into this repository or Actions artifacts. Set `runner-label` in the caller if using a dedicated custom label.
 4. Grant the workflow `contents: read`, `issues: write`, `pull-requests: write` as shown. Organization policy must allow these permissions and bot approvals (see below).
 5. Optionally configure the GitHub App below for a dedicated bot identity. Otherwise the workflow uses `GITHUB_TOKEN`.
 6. Post an allowed mention on an open PR. A kickoff comment links the workflow run. CLI stdout **and stderr stream live** in the review step's logs. A successful run posts a native `APPROVE` or `REQUEST_CHANGES` review with validated single-/multi-line inline findings on the appropriate LEFT/RIGHT sides.
@@ -46,19 +46,25 @@ Bot implementation checkout always comes from trusted `vezzadev/codjiflo-reviewe
 
 Existing CLI authentication is independent of the GitHub token. Subscription/API access, usage limits and model availability remain your responsibility. The code checks provider exit status and structured completion; it does not turn quota/auth errors into a clean review.
 
+Provider calls have a 45-minute limit; the review job has a 55-minute limit, below the GitHub App token's one-hour lifetime. A provider timeout terminates its process group on Linux and enters the normal failure-reporting path. A runner shutdown or forced workflow cancellation may prevent the failure comment and temporary-checkout cleanup; check the workflow logs in that case.
+
 ## Incremental review and fail-closed publication
 
 Incremental is the default. Each successful native review includes a machine-readable marker:
 
 ```html
-<!-- codjiflo-reviewer:v1 {"head":"<40-character-sha>","base":"<40-character-sha>"} -->
+<!-- codjiflo-reviewer:v1 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-high"} -->
 ```
 
-The most recent marked bot review must be an approval whose marker matches its GitHub `commit_id`. Its base must still equal the current base, and its head must be an available ancestor of the new head. Then only changes since that approval are reviewed, with the full current PR diff provided separately for correct inline coordinates. Missing baseline, changed base, rewritten/unavailable history, or a previous changes-requested verdict forces a **full** review. In particular, earlier blocking findings are never silently dropped by incrementally reviewing only newer changes. `full` explicitly requests the merge-base-to-head diff. Full Git history is fetched as needed; there is no shallow-history shortcut.
+The most recent marked review must be an approval whose marker matches its GitHub `commit_id`, current base, and requested preset. Both App/bot and PAT-authored reviews participate. Its head must be an available ancestor of the new head. Then only changes since that approval are reviewed. Missing baseline, changed base or preset, rewritten/unavailable history, a previous changes-requested verdict, or a same-head rerun forces a **full** review. Earlier blocking findings are revisited rather than discarded. `full` explicitly requests the merge-base-to-head diff. Full Git history is fetched as needed.
 
-Each native review is pinned to the inspected head commit. Before publication the bot rereads the PR and rejects changed head/base or a closed PR. There is an unavoidable GitHub API race between that final read and creating the review; `commit_id` still records the exact inspected commit and never claims to have reviewed a newer one. Workflow runs serialize per PR. GitHub's branch protection should dismiss stale approvals if desired.
+Inline coordinates come from GitHub's paginated PR file patches, including the current filename for renamed files. LEFT endpoints must be deleted lines; RIGHT endpoints may be added or unchanged context lines. Local Git diffs supply review scope, not publication coordinates. Missing or truncated patches provide no valid anchors: findings on them go into the review summary and require changes. PRs exceeding GitHub's 3,000-file metadata limit fail without a verdict.
 
-Malformed JSON, missing structured output, provider failure, contradictory approval with blocking findings, invalid/out-of-hunk ranges, or a stale PR produce **no approval**. Invalid findings fail the entire review rather than being dropped. Failure is reported in a comment and Actions logs. A native changes-requested summary may report a real unanchorable issue without manufacturing a diff line. Each structured finding carries `disposition: "blocking" | "advisory"`; advisory findings may accompany approval.
+Each native review is pinned to the inspected head commit. Before publication the bot rereads the PR and rejects changed head/base or a closed PR. There is an unavoidable GitHub API race between that final read and creating the review; `commit_id` still records the exact inspected commit and never claims to have reviewed a newer one. GitHub's branch protection should dismiss stale approvals if desired.
+
+Only authorized review jobs enter the per-PR concurrency group. Unrelated comments and denied requests cannot displace queued reviews. GitHub retains one running and one pending job per group: a newer authorized request replaces an older pending request, without cancelling the running review.
+
+Malformed JSON, missing structured output, provider failure, contradictory approval with blocking findings, or a stale PR produce **no approval**. Invalid/out-of-hunk locations are preserved as summary findings and force `REQUEST_CHANGES`; they are not dropped or assigned invented coordinates. Failures are reported in a comment and Actions logs when the runner and API remain available. Each structured finding carries `disposition: "blocking" | "advisory"`; correctly anchored advisory findings may accompany approval.
 
 ## Local CLI
 
@@ -91,6 +97,6 @@ npm test
 npm run smoke
 ```
 
-Tests cover command parsing, deny-default/exact/case-insensitive authorization, original-sender identity, LEFT/RIGHT and multi-line hunk validation, successful baselines, changed base/history fallback, previous blockers, malformed/contradictory output, provider failures, Claude error events, and stale-head rejection.
+Tests cover command parsing, executable deny-default authorization, original-sender identity, GitHub patch coordinates and renames, split UTF-8 output, subprocess deadlines, baseline and preset transitions, previous blockers, malformed output, provider failures, and stale-head rejection.
 
 The smoke runs the **real entry point and orchestration**, native fetch against a loopback HTTP fixture server, Git fetch/checkout of a real temporary repository, and fake executable Codex/Claude CLIs. It asserts kickoff/native review payloads and range coordinates, exercises both provider adapters and stale-head failure, and performs **no remote writes or real model calls**. Everything is temporary and cleaned up. Hosted CI runs both commands on pushes and PRs; no self-hosted runner or auth is needed for tests.

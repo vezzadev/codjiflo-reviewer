@@ -5,22 +5,28 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { runProcess } from '../src/runner.mjs';
 
-export async function fixture() {
+export async function fixture({ filename = 'a.js', previousFilename = filename, oldLine = 'old', newLine = 'new' } = {}) {
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-fixture-'));
   const repo = join(temp, 'repo');
   await mkdir(repo);
   const env = { ...process.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
   const git = args => runProcess('git', args, { cwd: repo, env });
   await git(['init', '-b', 'main']);
-  await writeFile(join(repo, 'a.js'), 'old\nsecond\n');
+  const tail = 'context\n'.repeat(8);
+  await writeFile(join(repo, previousFilename), `${oldLine}\nsecond\n${tail}`);
   await git(['add', '.']); await git(['commit', '-m', 'base']);
   const base = (await git(['rev-parse', 'HEAD'])).trim();
-  await writeFile(join(repo, 'a.js'), 'new\nsecond\n');
+  if (filename !== previousFilename) await git(['mv', previousFilename, filename]);
+  await writeFile(join(repo, filename), `${newLine}\nsecond\n${tail}`);
   await git(['commit', '-am', 'first']);
   const previous = (await git(['rev-parse', 'HEAD'])).trim();
-  await writeFile(join(repo, 'a.js'), 'new\nchanged\n');
+  await writeFile(join(repo, filename), `${newLine}\nchanged\n${tail}`);
   await git(['commit', '-am', 'second']);
   const head = (await git(['rev-parse', 'HEAD'])).trim();
+  const diffArgs = ['diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', base, head];
+  const localDiff = await git(['-c', 'core.quotePath=false', ...diffArgs]);
+  const patch = localDiff.slice(localDiff.indexOf('@@ ')).trimEnd();
+  const files = [{ filename, ...(filename !== previousFilename ? { previous_filename: previousFilename } : {}), status: filename === previousFilename ? 'modified' : 'renamed', additions: patch.split('\n').filter(line => line.startsWith('+')).length, deletions: patch.split('\n').filter(line => line.startsWith('-')).length, patch }];
   const fake = join(temp, 'fake-cli.mjs');
   const capture = join(temp, 'prompt.txt');
   await writeFile(fake, `#!/usr/bin/env node
@@ -48,7 +54,7 @@ if (process.argv.includes('exec')) {
   const source = await readFile(fake, 'utf8');
   await writeFile(fakeClaude, source.replace("process.stdout.write('fixture CLI streaming live\\n');", "console.log(JSON.stringify({type:'assistant',message:'fixture live'}));"));
   await chmod(fake, 0o755); await chmod(fakeClaude, 0o755);
-  const state = { requests: [], posts: [], reviews: [], stale: false, reads: 0 };
+  const state = { requests: [], posts: [], reviews: [], files, changedFiles: files.length, stale: false, reads: 0 };
   const server = createServer(async (request, response) => {
     let body = ''; for await (const chunk of request) body += chunk;
     const parsed = body ? JSON.parse(body) : undefined;
@@ -59,14 +65,17 @@ if (process.argv.includes('exec')) {
       response.end(JSON.stringify({ id: state.posts.length }));
     } else if (request.url.startsWith('/repos/org/repo/pulls/1/reviews')) {
       response.end(JSON.stringify(state.reviews));
+    } else if (request.url.startsWith('/repos/org/repo/pulls/1/files?')) {
+      const page = Number(new URL(request.url, 'http://fixture').searchParams.get('page'));
+      response.end(JSON.stringify(state.files.slice((page - 1) * 100, page * 100)));
     } else if (request.url === '/repos/org/repo/pulls/1') {
       state.reads++;
-      response.end(JSON.stringify({ state: 'open', head: { sha: state.stale && state.reads > 1 ? previous : head }, base: { sha: base, repo: { clone_url: pathToFileURL(repo).href } } }));
+      response.end(JSON.stringify({ state: 'open', changed_files: state.changedFiles, head: { sha: state.stale && state.reads > 1 ? previous : head }, base: { sha: base, repo: { clone_url: pathToFileURL(repo).href } } }));
     } else { response.statusCode = 404; response.end('{}'); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const api = `http://127.0.0.1:${server.address().port}`;
-  return { state, head, base, previous, temp, capture,
+  return { state, head, base, previous, temp, capture, localDiff,
     async run({ mode = 'approve', preset = 'sol-high', approved = 'alice', requester = 'Alice', full = false } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
         env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: api, CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture },
