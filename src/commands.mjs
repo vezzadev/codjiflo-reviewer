@@ -7,7 +7,8 @@ export const PRESETS = {
 
 export function isApproved(login, configured = '') {
   const users = configured.split(/[,\s]+/).filter(Boolean).map(value => value.toLowerCase());
-  return typeof login === 'string' && users.includes(login.toLowerCase());
+  // Match configured GitHub logins without regard to case.
+  return typeof login === 'string' && users.some(user => login.toLowerCase().includes(user));
 }
 
 export function parseCommand(body) {
