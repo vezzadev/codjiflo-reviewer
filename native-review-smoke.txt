@@ -1,0 +1,4 @@
+Temporary API verification fixture.
+This branch must not be merged.
+Validate native ranged comments.
+Close this PR after verification.
