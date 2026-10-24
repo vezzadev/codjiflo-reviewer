@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile, appendFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
-import { requestFromEvent, isApproved, normalizePreset } from '../src/commands.mjs';
+import { requestFromEvent, isApproved, normalizePreset, PRESETS } from '../src/commands.mjs';
 import { GitHub } from '../src/github.mjs';
 import { review } from '../src/review.mjs';
 
@@ -25,7 +25,7 @@ try {
       request = { repo: values.repo, number: Number(values.pr), requester: values.requester, preset, mode: values.full ? 'full' : 'incremental' };
     }
     if (values.gate) {
-      if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `allowed=${Boolean(request)}\n`);
+      if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `allowed=${Boolean(request)}\nprovider=${request ? PRESETS[request.preset].cli : 'none'}\n`);
       console.log(request ? 'Approved review request' : 'Ignoring unauthorized or non-review comment');
     } else if (request) {
       const github = new GitHub({ token: process.env.GITHUB_TOKEN || process.env.GH_TOKEN, url: process.env.GITHUB_API_URL });

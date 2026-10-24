@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { schema } from './prompt.mjs';
 
-export async function runProcess(command, args, { cwd, env = process.env, input, stream = false, timeoutMs } = {}) {
+export async function runProcess(command, args, { cwd, env = process.env, input, stream = false, streamOutput, timeoutMs } = {}) {
   return new Promise((resolve, reject) => {
     // A separate process group lets a timeout stop CLI-spawned tools as well.
     const processGroup = process.platform !== 'win32';
@@ -22,8 +22,8 @@ export async function runProcess(command, args, { cwd, env = process.env, input,
     }, timeoutMs);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', data => { stdout += data; if (stream) process.stdout.write(data); });
-    child.stderr.on('data', data => { stderr += data; if (stream) process.stderr.write(data); });
+    child.stdout.on('data', data => { stdout += data; if (stream) (streamOutput?.stdout ?? (text => process.stdout.write(text)))(data); });
+    child.stderr.on('data', data => { stderr += data; if (stream) (streamOutput?.stderr ?? (text => process.stderr.write(text)))(data); });
     child.on('error', error => { clearTimeout(timer); reject(error); });
     child.stdin.on('error', error => { if (error.code !== 'EPIPE') reject(error); });
     child.stdin.end(input);
@@ -48,15 +48,6 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
     ], { cwd, env, input: prompt, stream: true, timeoutMs: 45 * 60 * 1000 });
     return JSON.parse(await readFile(output, 'utf8'));
   }
-  const stdout = await runProcess(env.CODJIFLO_CLAUDE_BIN || 'claude', [
-    '--print', '--model', env.CODJIFLO_OPUS_MODEL || preset.model, '--effort', preset.effort,
-    '--output-format', 'stream-json', '--verbose', '--json-schema', JSON.stringify(schema),
-    '--no-session-persistence', '--strict-mcp-config', '--allowedTools', 'Read,Grep,Glob,Bash',
-    '--permission-mode', 'dontAsk',
-  ], { cwd, env, input: prompt, stream: true, timeoutMs: 45 * 60 * 1000 });
-  const events = stdout.split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
-  const result = events.findLast(event => event.type === 'result');
-  if (!result || result.is_error || result.subtype !== 'success') throw new Error('Claude did not complete successfully');
-  if (!result.structured_output) throw new Error('Claude returned no structured_output');
-  return result.structured_output;
+  const { runClaudeReview } = await import('./claude.mjs');
+  return runClaudeReview({ preset, prompt, cwd, env, runProcess });
 }

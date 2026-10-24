@@ -1,10 +1,10 @@
 import { constants } from 'node:fs';
-import { cp, lstat, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { setTimeout as delay } from 'node:timers/promises';
+import { acquireLock } from '../src/file-lock.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -79,59 +79,6 @@ async function resolveSource(home, pluginKey) {
   throw new Error(`No complete Claude ${pluginKey} bundle: require a valid ${marker} and nonempty ${referenceDirs.join(', ')} directories`);
 }
 
-async function acquireLock(lock) {
-  const deadline = performance.now() + 30000;
-  let unidentifiedSince;
-  let waiting = false;
-  const stale = () => new Error(`Preparation lock exists: ${lock}. Its owner is dead or unidentified; confirm no preparation is running, remove this stale lock and retry.`);
-  while (true) {
-    if (performance.now() >= deadline) throw new Error(`Timed out waiting for SolidWorks docs preparation lock: ${lock}. Owner may still be running; do not remove a live owner's lock.`);
-    try {
-      return await open(lock, 'wx');
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-    }
-    let contents;
-    try {
-      contents = await readFile(lock, 'utf8');
-    } catch (error) {
-      if (error.code === 'ENOENT') {
-        unidentifiedSince = undefined;
-        continue;
-      }
-      throw error;
-    }
-    const match = contents.match(/^pid=([1-9]\d*)\n$/);
-    const pid = match && Number(match[1]);
-    if (!Number.isSafeInteger(pid) || pid > 2147483647) {
-      // open('wx') and writing the PID are separate operations.
-      unidentifiedSince ??= performance.now();
-      if (performance.now() - unidentifiedSince >= 1000) throw stale();
-    } else {
-      unidentifiedSince = undefined;
-      try {
-        process.kill(pid, 0);
-      } catch (error) {
-        if (error.code === 'ESRCH') {
-          // The previous owner may have released and exited after our read.
-          try {
-            if (await readFile(lock, 'utf8') !== contents) continue;
-          } catch (readError) {
-            if (readError.code === 'ENOENT') continue;
-            throw readError;
-          }
-          throw stale();
-        }
-        if (error.code !== 'EPERM') throw error;
-      }
-    }
-    if (!waiting) {
-      console.log(`SolidWorks docs waiting for preparation lock=${lock}`);
-      waiting = true;
-    }
-    await delay(100);
-  }
-}
 
 async function prepare(home) {
   const { target, pluginKey } = await resolveTarget(home);

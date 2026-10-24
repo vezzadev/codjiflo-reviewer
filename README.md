@@ -3,7 +3,7 @@
 
 # Codjiflo Reviewer
 
-A mention-triggered GitHub PR reviewer for trusted self-hosters. Node.js 22+, Git, native `fetch`, `node:test`, and your existing Codex/Claude CLI login. No runtime npm dependencies, hosted review service, or multi-tenant infrastructure.
+A mention-triggered GitHub PR reviewer for trusted self-hosters. Requires Node.js 22+, Git, and Codex or Claude access. Codex uses its CLI; Claude uses the Anthropic Agent SDK with API keys and falls back to an existing Claude CLI subscription login. No hosted review service or multi-tenant infrastructure.
 
 Comment on an open PR:
 
@@ -24,7 +24,7 @@ Bare mentions, casual mentions, unknown shorthand profiles, and mentions inside 
 
 ## Presets
 
-| Preset | CLI/model default | Model effort | Embedded e-code-review recipe |
+| Preset | Provider/model default | Model effort | Embedded e-code-review recipe |
 | --- | --- | --- | --- |
 | `sol-xhigh` (default; alias `codex`) | Codex / `gpt-6.1-sol` | high | xhigh |
 | `opus-xhigh` (alias `claude`) | Claude / `opus` | high | xhigh |
@@ -41,10 +41,10 @@ The high and xhigh instructions are faithfully adapted from the e-code-review sk
 
 1. Make sure this public repository's Actions workflows are usable by your organization. Choose a trusted Codjiflo commit SHA. Copy [`examples/codjiflo-reviewer.yml`](examples/codjiflo-reviewer.yml) to `.github/workflows/codjiflo-reviewer.yml` on your repository's **default branch**. Replace both `@main` and `bot-ref: main` with the **same** trusted commit SHA. `main` is usable for development but follows future source changes.
 2. Under Settings → Secrets and variables → Actions → Variables, set **`CODJIFLO_APPROVED_USERS`** to comma-, whitespace-, or newline-separated GitHub logins, for example `alice,bob`. Matching is exact and case-insensitive. **Unset/empty means nobody is approved.** Repository ownership, association, collaborator status and write permission do not override this list.
-3. Register a trusted Linux self-hosted Actions runner with the consumer repository/organization (`self-hosted` label by default). Install Git, Node 22+, and current `codex` and/or `claude` executables on its PATH. Log in to each CLI **as the runner OS user**, using its normal interactive authentication setup. Do not copy auth files into this repository or Actions artifacts. Set `runner-label` in the caller if using a dedicated custom label.
+3. Register a trusted Linux self-hosted Actions runner with the consumer repository/organization (`self-hosted` label by default). Install Git, Node 22+, and current `codex` and/or `claude` executables on its PATH. Log in to each CLI **as the runner OS user**, using its normal interactive authentication setup. For Claude API access, configure the local key pool below. Do not copy auth files into this repository or Actions artifacts. Set `runner-label` in the caller if using a dedicated custom label.
 4. Grant the workflow `contents: read`, `issues: write`, `pull-requests: write` as shown. Organization policy must allow these permissions and bot approvals (see below).
 5. Optionally configure the GitHub App below for a dedicated bot identity. Otherwise the workflow uses `GITHUB_TOKEN`.
-6. Post an allowed mention on an open PR. A kickoff comment links the workflow run. CLI stdout **and stderr stream live** in the review step's logs. A successful run posts a native `APPROVE` or `REQUEST_CHANGES` review with validated single-/multi-line inline findings on the appropriate LEFT/RIGHT sides.
+6. Post an allowed mention on an open PR. A kickoff comment links the workflow run. CLI stdout/stderr and SDK events stream live in the review step's logs. A successful run posts a native `APPROVE` or `REQUEST_CHANGES` review with validated single-/multi-line inline findings on the appropriate LEFT/RIGHT sides.
 
 The reusable workflow first runs an authorization gate on `ubuntu-latest`, **before scheduling self-hosted review work**. Both gate and CLI authorize the original `issue_comment.comment.user.login`, not the user who reruns the workflow. The CLI repeats authorization before any API mutation or provider invocation. The event JSON is the source of truth; workflow runs ignore local requester flags. No `workflow_dispatch` path or caller-supplied event login is supported.
 
@@ -60,7 +60,36 @@ This repository runs its own instance through [`.github/workflows/codjiflo.yml`]
 
 Existing CLI authentication is independent of the GitHub token. Subscription/API access, usage limits and model availability remain your responsibility. The code checks provider exit status and structured completion; it does not turn quota/auth errors into a clean review.
 
-Provider calls have a 45-minute limit; the review job has a 55-minute limit, below the GitHub App token's one-hour lifetime. A provider timeout terminates its process group on Linux and enters the normal failure-reporting path. A runner shutdown or forced workflow cancellation may prevent the failure comment and temporary-checkout cleanup; check the workflow logs in that case.
+Provider work has one 45-minute limit, including all Claude key attempts and CLI fallback; the review job has a 55-minute limit, below the GitHub App token's one-hour lifetime. Timeouts stop the provider and enter the normal failure-reporting path. A runner shutdown or forced workflow cancellation may prevent the failure comment and temporary-checkout cleanup; check the workflow logs in that case.
+
+### Claude API pool and subscription fallback
+
+Configure exactly three distinct Anthropic API keys **on the runner host, as the runner OS user**:
+
+```sh
+npm ci --omit=dev
+node scripts/claude-keys.mjs configure
+node scripts/claude-keys.mjs status
+```
+
+`configure` hides key input and writes `~/.config/codjiflo/anthropic-keys.json` with mode `0600`. Each entry has an `id`, `apiKey`, and optional `quotaGroup` (defaults to its ID). For automation, `configure --stdin` accepts `{"keys":[...]}` through a secure pipe; never put secrets in command arguments, Git, workflow YAML, or comments. A present but invalid or insufficiently private file fails the review. An absent file selects OAuth-only CLI mode.
+
+Keys sharing a quota must use the same quota group. Anthropic limits are organization-wide, with optional workspace limits: three keys from one pool do **not** triple capacity. See [Anthropic's rate-limit documentation](https://platform.claude.com/docs/en/api/rate-limits).
+
+All runners under the same OS account share `~/.local/state/codjiflo/claude-routing.json`. A short cross-process lock protects atomic round-robin selection and quota updates; it is not held during reviews. State contains fingerprints and availability metadata, not API keys. Concurrent jobs can use the same key after the cursor wraps.
+
+- Each review tries an eligible key through `@anthropic-ai/claude-agent-sdk`; each key is attempted at most once per review.
+- Recognized quota failures make that key's quota group unavailable. Temporary rate limits use the SDK's retry delay when exposed, otherwise a 60-second cooldown. The pinned SDK can emit terminal 429 errors without HTTP headers, so `Retry-After` is not always available. Explicit credit/spend exhaustion waits for a known reset, a replacement key, or operator reset.
+- When no eligible key remains, the review restarts through the installed Claude CLI using its subscription login. This includes a missing key file.
+- Authentication, model, network, schema, and unrelated provider errors fail the review; they do not silently switch credentials. Partial attempts never publish a review.
+
+Use `node scripts/claude-keys.mjs status` to inspect availability without exposing secrets. After replenishing credits or raising a cap, run `node scripts/claude-keys.mjs reset api-1` (or omit IDs to reset all blocks). Reset without IDs also recovers corrupt routing state. A stale lock requires confirming its owner is no longer running before removal.
+
+Override paths with `CODJIFLO_ANTHROPIC_KEYS_FILE` and `CODJIFLO_CLAUDE_STATE_FILE` in the runner service environment; every runner sharing a pool must use the same state file. No Actions secret is required for these API keys. Configured key values are redacted from provider logs. API mode honors an explicitly configured `ANTHROPIC_BASE_URL`; that endpoint receives the selected key and must be trusted. OAuth fallback removes this override and verifies the CLI's subscription authentication before use.
+
+The SDK receives API credentials only. OAuth fallback stays in the separately installed, normally authenticated Claude CLI; Codjiflo does not extract or reuse its OAuth tokens in the SDK. Anthropic restricts third-party use of claude.ai login in SDK products; see the [Agent SDK authentication guidance](https://code.claude.com/docs/en/agent-sdk/quickstart).
+
+The reusable workflow installs the pinned SDK only for authorized Claude jobs, before minting the GitHub App token. Codex jobs and the hosted authorization gate need no npm dependencies. Keep npm optional dependencies enabled: they include the SDK's native executable.
 
 ### Prepare offline review prerequisites
 
@@ -104,7 +133,8 @@ Malformed JSON, missing structured output, provider failure, contradictory appro
 ## Local CLI
 
 ```sh
-# No npm install needed.
+# Required for Claude SDK API-key reviews; Codex needs no npm install.
+npm ci --omit=dev
 export CODJIFLO_APPROVED_USERS='your-login'
 export GITHUB_TOKEN='your-app-installation-token-or-PAT'
 node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login --preset claude --full
@@ -113,7 +143,7 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 | Invocation | Behavior |
 | --- | --- |
 | `node bin/codjiflo-reviewer.mjs` | Uses `GITHUB_EVENT_PATH` for an issue_comment event |
-| `node bin/codjiflo-reviewer.mjs --gate` | Authorization/command check only; sets `allowed` in `GITHUB_OUTPUT`; no token/provider/API calls |
+| `node bin/codjiflo-reviewer.mjs --gate` | Authorization/command check only; sets `allowed` and `provider` in `GITHUB_OUTPUT`; no token/provider/API calls |
 | `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `sol-xhigh` incremental; still requires allowlist |
 | `--preset PRESET` | Select one of the four canonical presets or the `codex`/`claude` aliases |
 | `--full` | Full review in local invocation |
@@ -123,15 +153,18 @@ Local `--requester` is an operator assertion, not remote authentication. Do not 
 
 Other environment: `GH_TOKEN` is a fallback for `GITHUB_TOKEN`; `GITHUB_API_URL` supports GitHub Enterprise/the fixture server; PR metadata supplies its clone URL. `CODJIFLO_CODEX_BIN`/`CODJIFLO_CLAUDE_BIN` override executable paths (also used by fixtures). `GITHUB_RUN_ID`/`GITHUB_SERVER_URL` build kickoff links. The reusable workflow exposes `sol-model`, `opus-model`, `runner-label`, optional `app-id`, and optional `prepare-command` inputs.
 
-Provider flags were checked against installed help: Codex `exec --model -c model_reasoning_effort=... --sandbox read-only --json --output-schema --output-last-message`, prompt on closed stdin; Claude `--print --model --effort --output-format stream-json --verbose --json-schema --no-session-persistence --strict-mcp-config --allowedTools Read,Grep,Glob,Bash --permission-mode dontAsk`. Claude result events require `subtype: success`, no `is_error`, and `structured_output`. No interactive stdin is left open. Keep CLIs recent enough to support these flags; unsupported flags fail the run. Claude uses existing auth/settings, but external MCP configurations are not loaded.
+Codex uses `exec --model -c model_reasoning_effort=... --sandbox read-only --json --output-schema --output-last-message`, with its prompt on closed stdin. Claude SDK queries use the preset model/effort, JSON-schema output, `Read`, `Grep`, `Glob`, and `Bash` tools, `dontAsk` permissions, strict MCP configuration, and no session persistence. CLI fallback uses the equivalent `--print --output-format stream-json --verbose --json-schema` flags. Both Claude paths require a successful terminal result, no `is_error`, and `structured_output`; the orchestrator independently validates the review. Keep the installed CLIs recent enough to support these flags. External MCP configurations are not loaded.
 
 ## Development and deterministic verification
 
 ```sh
+npm ci
 npm test
 npm run smoke
 ```
 
-Tests cover command parsing, executable deny-default authorization, original-sender identity, GitHub patch coordinates and renames, split UTF-8 output, subprocess deadlines, baseline and preset transitions, previous blockers, malformed output, provider failures, and stale-head rejection.
+Tests cover authorization, native review coordinates, incremental baselines, malformed results, stale-head rejection, subprocess deadlines, cross-process key rotation, quota-group cooldowns, exhaustion/reset, key replacement, secret redaction, and non-quota failure handling.
 
-The smoke runs the **real entry point and orchestration**, native fetch against a loopback HTTP fixture server, Git fetch/checkout of a real temporary repository, and fake executable Codex/Claude CLIs. It asserts kickoff/native review payloads and range coordinates, exercises both provider adapters and stale-head failure, and performs **no remote writes or real model calls**. Everything is temporary and cleaned up. Hosted CI runs both commands on pushes and PRs; no self-hosted runner or auth is needed for tests.
+The smoke runs the **real entry point and orchestration**, native fetch against a loopback GitHub fixture, Git fetch/checkout of a temporary repository, and fixture Codex/Claude executables. It checks native review payloads and LEFT/RIGHT ranges, plus stale-head rejection.
+
+A second smoke runs the **installed Agent SDK and its native executable** against a local streaming Messages API. It covers structured review publication, three-key credit exhaustion, and HTTP 429 cooldown/rotation into fixture OAuth fallback, with exactly one native review per scenario. It does not replace the SDK with a mock. Both smokes use temporary credentials/state, make no paid model calls or remote writes, and clean up afterward. Hosted CI runs them with the test suite; no self-hosted runner or live authentication is needed.

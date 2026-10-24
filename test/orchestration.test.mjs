@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { fixture } from './fixture.mjs';
 
 const verdicts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
@@ -39,6 +39,30 @@ test('Claude structured stream produces native approval', async () => {
   try {
     await f.run({ preset: 'opus-medium' });
     assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+  } finally { await f.close(); }
+});
+
+test('Claude OAuth fallback clears inherited API and cloud-provider environment', async () => {
+  const f = await fixture();
+  try {
+    await f.run({ preset: 'claude', providerEnv: {
+      ANTHROPIC_API_KEY: 'host-key-must-not-be-used', ANTHROPIC_AUTH_TOKEN: 'host-token-must-not-be-used',
+      ANTHROPIC_BASE_URL: 'https://must-not-contact.invalid', CLAUDE_CODE_OAUTH_TOKEN: 'must-use-stored-login',
+      CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDE_CODE_USE_FOUNDRY: '1',
+    } });
+    assert.equal(verdicts(f).length, 1);
+    assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+  } finally { await f.close(); }
+});
+
+test('present invalid Claude key configuration fails closed before CLI launch or publication', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(f.env.CODJIFLO_ANTHROPIC_KEYS_FILE, '{', { mode: 0o600 });
+    await assert.rejects(f.run({ preset: 'claude' }));
+    assert.equal(verdicts(f).length, 0);
+    await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+    assert.match(f.state.posts.at(-1).body.body, /failed/);
   } finally { await f.close(); }
 });
 

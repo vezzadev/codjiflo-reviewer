@@ -38,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       allowed: ${{ steps.gate.outputs.allowed }}
+      provider: ${{ steps.gate.outputs.provider }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,6 +70,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install Claude Agent SDK
+        if: needs.gate.outputs.provider == 'claude'
+        timeout-minutes: 5
+        run: npm ci --omit=dev
       - name: Prepare review prerequisites
         if: inputs.prepare-command != ''
         timeout-minutes: 5

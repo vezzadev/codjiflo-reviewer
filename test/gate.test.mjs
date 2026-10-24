@@ -30,7 +30,8 @@ test('executable workflow gate authorizes only the original approved comment aut
           GITHUB_TOKEN: '', GH_TOKEN: '', CODJIFLO_APPROVED_USERS: approved,
         },
       });
-      assert.equal(await readFile(outputPath, 'utf8'), `allowed=${expected}\n`);
+      const outputs = Object.fromEntries((await readFile(outputPath, 'utf8')).trim().split('\n').map(line => line.split('=')));
+      assert.equal(outputs.allowed, expected);
     } finally {
       await rm(temp, { recursive: true, force: true });
     }

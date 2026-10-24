@@ -9,7 +9,9 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-fixture-'));
   const repo = join(temp, 'repo');
   await mkdir(repo);
-  const env = { ...process.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
+  const home = join(temp, 'home');
+  await mkdir(home, { mode: 0o700 });
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: join(home, '.claude'), CODJIFLO_ANTHROPIC_KEYS_FILE: join(temp, 'missing-keys.json'), CODJIFLO_CLAUDE_STATE_FILE: join(temp, 'claude-state.json'), GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
   const git = args => runProcess('git', args, { cwd: repo, env });
   await git(['init', '-b', 'main']);
   const tail = 'context\n'.repeat(8);
@@ -31,6 +33,11 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const capture = join(temp, 'prompt.txt');
   await writeFile(fake, `#!/usr/bin/env node
 import { writeFile } from 'node:fs/promises';
+if (process.argv[2] === 'auth') {
+ if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth status inherited provider credentials');
+ console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'}));
+ process.exit(0);
+}
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 await writeFile(process.env.FIXTURE_CAPTURE, input);
 process.stdout.write('fixture CLI streaming live\\n');
@@ -46,6 +53,7 @@ if (process.argv.includes('exec')) {
  await writeFile(output, process.env.FIXTURE_MODE === 'malformed' ? '{' : JSON.stringify(result));
 } else {
  // stdout is valid JSONL in Claude mode (no unstructured status lines).
+ if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth fixture inherited provider credentials');
  console.log(JSON.stringify({type:'result',subtype:'success',is_error:process.env.FIXTURE_MODE === 'error-result',structured_output:result}));
 }
 `);
@@ -75,10 +83,11 @@ if (process.argv.includes('exec')) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const api = `http://127.0.0.1:${server.address().port}`;
-  return { state, head, base, previous, temp, capture, localDiff,
-    async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false } = {}) {
+  return { state, head, base, previous, temp, capture, localDiff, env,
+    async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
-        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: api, CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture },
+        timeoutMs,
+        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: api, CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
       });
     },
     async close() { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },
