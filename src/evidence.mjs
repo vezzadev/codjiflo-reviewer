@@ -58,16 +58,38 @@ export async function reviewInput({ preset, options, temp, cwd, git }) {
   const fromCheckout = relative(checkout, directory);
   if (fromCheckout === '' || (!fromCheckout.startsWith('..' + sep) && fromCheckout !== '..' && !isAbsolute(fromCheckout))) throw new Error('Review evidence must be outside the checkout');
   const scope = scopeFiles(await git(['diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--numstat', '-z', options.scope, options.head, '--']));
-  const starts = [...options.diff.matchAll(/^diff --git /gm)].map(match => match.index);
-  if (starts.length !== scope.length || (starts.length && starts[0] !== 0)) throw new Error('Cannot index complete review scope');
-  let byte = 0;
-  const inventory = scope.map((file, index) => {
-    const end = starts[index + 1] ?? options.diff.length;
-    const bytes = Buffer.byteLength(options.diff.slice(starts[index], end));
+  // Git records are LF-delimited, not JavaScript multiline-regexp lines:
+  // CR and Unicode line/paragraph separators may occur inside blob content.
+  const starts = [...options.diff.matchAll(/(?:^|\n)diff --git /g)].map(match => match.index + (match[0].startsWith('\n') ? 1 : 0));
+  const typeDiffs = new Map();
+  if (starts.length !== scope.length) {
+    // A type change can emit multiple patch blocks for one numstat record.
+    // Ask Git for raw NUL-delimited paths, never decode its quoted headers.
+    const changedTypes = await git(['diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--diff-filter=T', '--name-only', '-z', options.scope, options.head, '--']);
+    for (const filename of changedTypes.split('\0').filter(Boolean)) {
+      typeDiffs.set(filename, await git(['-c', 'core.quotePath=false', '--literal-pathspecs', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', options.scope, options.head, '--', filename]));
+    }
+  }
+  let byte = 0, position = 0, block = 0;
+  const inventory = scope.map(file => {
+    if (starts[block] !== position) throw new Error('Cannot index complete review scope');
+    const typeDiff = typeDiffs.get(file.filename);
+    let end;
+    if (typeDiff !== undefined) {
+      if (!typeDiff || !options.diff.startsWith(typeDiff, position)) throw new Error('Cannot index complete review scope');
+      end = position + typeDiff.length;
+      while (block < starts.length && starts[block] < end) block++;
+      if (end !== (starts[block] ?? options.diff.length)) throw new Error('Cannot index complete review scope');
+    } else {
+      end = starts[++block] ?? options.diff.length;
+    }
+    const bytes = Buffer.byteLength(options.diff.slice(position, end));
     const entry = { ...file, scope: { start: byte, bytes } };
     byte += bytes;
+    position = end;
     return entry;
   });
+  if (position !== options.diff.length || block !== starts.length) throw new Error('Cannot index complete review scope');
   const records = JSON.parse(options.currentDiff);
   const chunks = ['[\n'];
   let patchBytes = 2;
