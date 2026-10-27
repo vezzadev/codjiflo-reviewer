@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
@@ -51,6 +51,79 @@ test('transient publication failures retry only after reconciliation, bounded to
   assert.equal(f.state.posts, 3);
   assert.equal(f.state.lists, 6);
   assert.deepEqual(delays, [1000, 2000]);
+});
+
+test('publication safety reads retry transient failures before any POST', async t => {
+  for (const operation of ['reconciliation', 'pull']) {
+    for (const recovered of [false, true]) await t.test(`${operation}, recovered=${recovered}`, async () => {
+      const f = setup();
+      const delays = [];
+      let reads = 0;
+      const failure = Object.assign(new Error('transient safety read'), { status: 503 });
+      const original = operation === 'reconciliation' ? f.github.list : f.github.request;
+      const read = async (...args) => {
+        if (args[1]?.method === 'POST') return original(...args);
+        reads++;
+        assert.equal(f.state.posts, 0);
+        if (!recovered || reads < 3) throw failure;
+        return original(...args);
+      };
+      if (operation === 'reconciliation') f.github.list = read;
+      else f.github.request = read;
+      const publication = publishReview({ ...f, env, delay: async ms => { delays.push(ms); } });
+      if (recovered) assert.equal(await publication, f.receipt);
+      else await assert.rejects(publication, error => error === failure);
+      assert.equal(reads, 3);
+      assert.equal(f.state.posts, recovered ? 1 : 0);
+      assert.deepEqual(delays, [1000, 2000]);
+    });
+  }
+});
+
+test('permanent safety read failures are not retried or followed by a POST', async t => {
+  for (const operation of ['reconciliation', 'pull']) await t.test(operation, async () => {
+    const f = setup();
+    let reads = 0;
+    const failure = Object.assign(new Error('forbidden safety read'), { status: 403 });
+    const read = async () => { reads++; throw failure; };
+    if (operation === 'reconciliation') f.github.list = read;
+    else f.github.request = read;
+    await assert.rejects(publishReview({ ...f, env, delay: async () => assert.fail('permanent failure must not back off') }), error => error === failure);
+    assert.equal(reads, 1);
+    assert.equal(f.state.posts, 0);
+  });
+});
+
+test('transient reconciliation after an ambiguous POST retries reads, not the POST', async t => {
+  for (const recovered of [false, true]) await t.test(`recovered=${recovered}`, async () => {
+    const f = setup();
+    const original = new TypeError('POST response lost');
+    const lookup = new TypeError('reconciliation connection lost');
+    let reads = 0;
+    const get = f.github.request;
+    f.github.request = async (path, options) => {
+      if (!options) return get(path);
+      f.state.posts++;
+      throw original;
+    };
+    f.github.list = async () => {
+      if (!f.state.posts) return [];
+      reads++;
+      if (!recovered || reads < 3) throw lookup;
+      return [f.receipt];
+    };
+    const delays = [];
+    const publication = publishReview({ ...f, env, delay: async ms => { delays.push(ms); } });
+    if (recovered) assert.equal(await publication, f.receipt);
+    else await assert.rejects(publication, error => {
+      assert.equal(error.cause, original);
+      assert.deepEqual(error.errors, [original, lookup]);
+      return true;
+    });
+    assert.equal(f.state.posts, 1);
+    assert.equal(reads, 3);
+    assert.deepEqual(delays, [1000, 2000]);
+  });
 });
 
 test('failed reconciliation, permanent rejection, stale head and unconfirmed receipt fail closed', async t => {
@@ -310,4 +383,65 @@ test('publication rejection retains result, reports failure and exits nonzero; l
     assert.equal(f.state.reviews.length, 1);
     assert.deepEqual(f.state.posts.findLast(post => post.path.endsWith('/reviews')).body, envelope.payload);
   } finally { await f.close(); }
+});
+
+test('default CLI result paths preserve a failed review when the next review succeeds', async () => {
+  const f = await fixture();
+  try {
+    const cli = resolve('bin/codjiflo-reviewer.mjs');
+    const run = () => runProcess(process.execPath, [cli, '--repo', 'org/repo', '--pr', '1', '--requester', 'alice', '--full'], {
+      cwd: f.temp,
+      env: {
+        ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
+        CODJIFLO_RESULT_PATH: '', CODJIFLO_APPROVED_USERS: 'alice',
+        CODJIFLO_CODEX_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
+      },
+    });
+    const results = async () => (await readdir(f.temp)).filter(name => /^codjiflo-result-[a-f0-9-]+\.json$/.test(name));
+    f.state.publicationStatus = 422;
+    await assert.rejects(run(), /Fixture publication rejected/);
+    const [first] = await results();
+    assert.ok(first, 'failed publication must retain a uniquely named result');
+    const retained = await readFile(join(f.temp, first), 'utf8');
+    f.state.publicationStatus = undefined;
+    const log = await run();
+    const paths = await results();
+    assert.equal(paths.length, 2);
+    const second = paths.find(name => name !== first);
+    assert.match(log, new RegExp(`Validated review retained at ${second.replaceAll('.', '\\.')}`));
+    assert.equal(await readFile(join(f.temp, first), 'utf8'), retained);
+    const earlier = JSON.parse(retained);
+    const later = JSON.parse(await readFile(join(f.temp, second), 'utf8'));
+    assert.notEqual(earlier.payload.body, later.payload.body);
+    for (const [name, envelope] of [[first, earlier], [second, later]]) {
+      const identity = /<!-- codjiflo-publication:([^ ]+) -->$/.exec(envelope.payload.body)[1];
+      assert.equal(name, `codjiflo-result-${identity}.json`);
+    }
+  } finally { await f.close(); }
+});
+
+test('explicit result path remains caller-selected and may overwrite an earlier review', async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.temp, 'operator-result.json');
+    f.state.publicationStatus = 422;
+    await assert.rejects(f.run({ providerEnv: { CODJIFLO_RESULT_PATH: path } }), /Fixture publication rejected/);
+    const earlier = await readFile(path, 'utf8');
+    f.state.publicationStatus = undefined;
+    await runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', 'alice', '--output', path], {
+      env: {
+        ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
+        CODJIFLO_RESULT_PATH: join(f.temp, 'ignored-result.json'), CODJIFLO_APPROVED_USERS: 'alice',
+        CODJIFLO_CODEX_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
+      },
+    });
+    assert.notEqual(await readFile(path, 'utf8'), earlier);
+    assert.ok(!(await readdir(f.temp)).includes('ignored-result.json'), '--output must take precedence over the environment');
+  } finally { await f.close(); }
+});
+
+test('workflow artifact name and result path are unique across run attempts', async () => {
+  const workflow = await readFile(resolve('.github/workflows/review.yml'), 'utf8');
+  assert.match(workflow, /name: codjiflo-review-result-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/codjiflo-result-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\.json/);
 });

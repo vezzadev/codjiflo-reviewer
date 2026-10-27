@@ -6,7 +6,7 @@ import { PRESETS, isApproved } from './commands.mjs';
 import { filesFromApi, inlineComment } from './diff.mjs';
 import { prompt } from './prompt.mjs';
 import { runProcess, runReviewer } from './runner.mjs';
-import { publishReview, reportPublicationFailure } from './publication.mjs';
+import { publishReview, reportPublicationFailure, workflowRunUrl } from './publication.mjs';
 
 export const MARKER = /<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/;
 export function baseline(reviews, base, preset) {
@@ -58,7 +58,7 @@ async function repositoryPromptBlob(git, revision) {
   }
 }
 
-export async function review({ request, github, env = process.env, reviewer = runReviewer, output = env.CODJIFLO_RESULT_PATH || 'codjiflo-result.json' }) {
+export async function review({ request, github, env = process.env, reviewer = runReviewer, output = env.CODJIFLO_RESULT_PATH || undefined }) {
   if (!isApproved(request.requester, env.CODJIFLO_APPROVED_USERS)) throw new Error('Review requester is not approved');
   const preset = PRESETS[request.preset];
   if (!Object.hasOwn(PRESETS, request.preset) || !['full', 'incremental'].includes(request.mode)) throw new Error('Unknown preset or review mode');
@@ -68,7 +68,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
   if (pr.state !== 'open') throw new Error('Pull request is not open');
   const head = pr.head.sha;
   const base = pr.base.sha;
-  const runUrl = env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${request.repo}/actions/runs/${env.GITHUB_RUN_ID}` : null;
+  const runUrl = workflowRunUrl(request, env);
   await github.request(`${root}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer starting **${request.preset}** (${request.mode}) at \`${head}\`, requested by @${request.requester}.${runUrl ? `\n\n[Live workflow logs](${runUrl})` : ''}` } });
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-'));
   try {
@@ -108,14 +108,16 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const customInstructions = currentPromptBlob === undefined ? undefined : await git(['cat-file', 'blob', currentPromptBlob]);
     const result = await reviewer({ preset, prompt: prompt({ level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions }), cwd, temp, env });
     const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10);
+    const publication = randomUUID();
+    const resultPath = output ?? `codjiflo-result-${publication}.json`;
     const marker = `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head, base, preset: request.preset })} -->`;
     const envelope = { version: 1, request, head, base, payload: {
       commit_id: head, event: result.verdict,
-      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nScope: **${mode}** (${reason}).\n\n${marker}\n<!-- codjiflo-publication:${randomUUID()} -->`,
+      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nScope: **${mode}** (${reason}).\n\n${marker}\n<!-- codjiflo-publication:${publication} -->`,
       comments,
     } };
-    await writeFile(output, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 });
-    console.log(`Validated review retained at ${output}`);
+    await writeFile(resultPath, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600, ...(output === undefined ? { flag: 'wx' } : {}) });
+    console.log(`Validated review retained at ${resultPath}`);
     return await publishReview({ envelope, github, env });
   } catch (error) {
     await reportPublicationFailure({ request, github, env, error });
