@@ -169,7 +169,7 @@ test('incomplete analysis and defect-free changes requests fail without a verdic
   for (const findings of [[], [finding]]) {
     assert.throws(() => validateResult({
       verdict: 'INCOMPLETE', summary: 'Required docs missing; pwsh.exe unavailable; DNS failed.', findings,
-    }, files, 15), /Review incomplete; no defect verdict/);
+    }, files, 15));
   }
   for (const findings of [[], [{ ...finding, disposition: 'advisory' }]]) {
     assert.throws(() => validateResult({

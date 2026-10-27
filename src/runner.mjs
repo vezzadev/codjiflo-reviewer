@@ -23,7 +23,13 @@ export async function runProcess(command, args, { cwd, env = process.env, input,
   return new Promise((resolve, reject) => {
     // A separate process group lets a timeout stop CLI-spawned tools as well.
     const processGroup = process.platform !== 'win32';
-    const child = spawn(command, args, { cwd, env, detached: processGroup, stdio: ['pipe', 'pipe', 'pipe'] });
+    let child;
+    try {
+      child = spawn(command, args, { cwd, env, detached: processGroup, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (error) {
+      reject(Object.assign(error, { termination: 'spawn' }));
+      return;
+    }
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -40,13 +46,13 @@ export async function runProcess(command, args, { cwd, env = process.env, input,
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', data => { stdout += data; if (stream) (streamOutput?.stdout ?? (text => process.stdout.write(text)))(data); });
     child.stderr.on('data', data => { stderr += data; if (stream) (streamOutput?.stderr ?? (text => process.stderr.write(text)))(data); });
-    child.on('error', error => { clearTimeout(timer); reject(error); });
-    child.stdin.on('error', error => { if (error.code !== 'EPIPE') reject(error); });
+    child.on('error', error => { clearTimeout(timer); reject(Object.assign(error, { stdout, termination: 'spawn' })); });
+    child.stdin.on('error', error => { if (error.code !== 'EPIPE') reject(Object.assign(error, { stdout, termination: 'spawn' })); });
     child.stdin.end(input);
     child.on('close', (code, signal) => {
       clearTimeout(timer);
-      if (timedOut) reject(Object.assign(new Error(`${command} timed out after ${timeoutMs}ms: ${stderr.slice(-2000)}`), { stdout, timedOut: true }));
-      else if (code !== 0) reject(Object.assign(new Error(`${command} failed (${signal ?? code}): ${stderr.slice(-2000)}`), { stdout, exitCode: code, signal }));
+      if (timedOut) reject(Object.assign(new Error(`${command} timed out after ${timeoutMs}ms: ${stderr.slice(-2000)}`), { stdout, termination: 'timeout', exitCode: code, signal }));
+      else if (code !== 0) reject(Object.assign(new Error(`${command} failed (${signal ?? code}): ${stderr.slice(-2000)}`), { stdout, termination: signal ? 'signal' : 'exit', exitCode: code, signal }));
       else resolve(stdout);
     });
   });
@@ -100,7 +106,7 @@ Do not skip, summarize away, or truncate any part of the review scope. If a read
       if (/input_too_large|Input exceeds the maximum length/i.test(diagnostic)) {
         throw new Error(`Codex rejected review input size (original ${prompt.length} UTF-16 code units / ${Buffer.byteLength(prompt)} UTF-8 bytes; stdin ${input.length} code units). No review completed; no scope was truncated and no preset was switched. ${diagnostic}`);
       }
-      const status = error.timedOut ? 'timed out' : Number.isInteger(error.exitCode) ? `failed (exit ${error.exitCode})` : error.signal ? `failed (${error.signal})` : 'could not run';
+      const status = error.termination === 'timeout' ? 'timed out' : error.termination === 'exit' ? `failed (exit ${error.exitCode})` : error.termination === 'signal' ? `failed (${error.signal})` : 'could not run';
       throw new Error(`Codex review ${status}.${diagnostic ? `\n${diagnostic}` : ' See process logs for details.'}`);
     }
     let events;

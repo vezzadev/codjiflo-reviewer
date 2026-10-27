@@ -21,7 +21,7 @@ export function baseline(reviews, base, preset) {
 
 export function validateResult(result, files, cap) {
   if (result?.verdict === 'INCOMPLETE') {
-    throw new Error(`Review incomplete; no defect verdict: ${typeof result.summary === 'string' ? result.summary.slice(0, 1500) : 'Required analysis could not be completed'}`);
+    throw new Error('Review incomplete; no defect verdict. Required analysis could not be completed. See provider logs for details.');
   }
   if (!result || !['APPROVE', 'REQUEST_CHANGES'].includes(result.verdict) || typeof result.summary !== 'string' || !result.summary.trim() || !Array.isArray(result.findings) || result.findings.length > cap) throw new Error('Malformed review output');
   for (const finding of result.findings) {

@@ -63,7 +63,6 @@ test('unread staged Codex input returns INCOMPLETE without publishing a defect v
   try {
     await assert.rejects(f.run({ mode: 'incomplete-input', full: true }));
     assert.equal(verdicts(f).length, 0);
-    assert.match(f.state.posts.at(-1).body.body, /Review incomplete; no defect verdict: A required review input part could not be read/);
   } finally { await f.close(); }
 });
 

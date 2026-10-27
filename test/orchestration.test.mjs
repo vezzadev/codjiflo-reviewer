@@ -60,13 +60,14 @@ test('environment-blocked and legacy defect-free outputs post only a neutral fai
         env: { ...f.env, CODJIFLO_APPROVED_USERS: 'alice' },
         reviewer: async () => ({
           verdict, findings: [],
-          summary: 'Review failed before analysis: required API docs missing; pwsh.exe unavailable; Could not resolve host: api.github.com.',
+          summary: 'Review failed before analysis: PRIVATE-INCOMPLETE-SUMMARY host-only-secret=not-a-configured-credential.',
         }),
-      }), /Review incomplete|no blocking defect findings/);
+      }));
       assert.equal(verdicts(f).length, 0);
       assert.equal(f.state.posts.length, 2);
       assert.match(f.state.posts.at(-1).body.body, /failed/);
       assert.ok(f.state.posts.every(post => !post.path.endsWith('/reviews')));
+      assert.doesNotMatch(f.state.posts.at(-1).body.body, /PRIVATE-INCOMPLETE-SUMMARY|host-only-secret|not-a-configured-credential/);
     } finally { await f.close(); }
   });
 });
