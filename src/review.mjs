@@ -6,7 +6,7 @@ import { filesFromApi, inlineComment } from './diff.mjs';
 import { prompt } from './prompt.mjs';
 import { runProcess, runReviewer } from './runner.mjs';
 
-export const MARKER = /<!-- codjiflo-reviewer:v2 (\{[^\n]+\}) -->/;
+export const MARKER = /<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/;
 export function baseline(reviews, base, preset) {
   // The latest marked review governs, including PAT-authored blockers.
   const prior = reviews.filter(review => MARKER.test(review.body ?? '')).at(-1);
@@ -35,7 +35,7 @@ export function validateResult(result, files, cap) {
 }
 
 // Walk Git objects, never the worktree: even an ancestor can be a host symlink.
-async function supplementalPromptBlob(git, revision) {
+async function repositoryPromptBlob(git, revision) {
   const parts = ['.codjiflo', 'code-review', 'PROMPT.md'];
   let tree = revision;
   for (const [index, name] of parts.entries()) {
@@ -44,7 +44,7 @@ async function supplementalPromptBlob(git, revision) {
     const match = /^([0-7]{6}) (blob|tree|commit) ([a-f0-9]+)\t([^\0]+)\0$/.exec(entry);
     const leaf = index === parts.length - 1;
     if (!match || match[4] !== name || (leaf ? !['100644', '100755'].includes(match[1]) || match[2] !== 'blob' : match[1] !== '040000' || match[2] !== 'tree')) {
-      throw new Error('Repository supplemental prompt must be a regular Git blob with tree-only ancestors; links, directories, and submodules are not allowed');
+      throw new Error('Repository review prompt must be a regular Git blob with tree-only ancestors; links, directories, and submodules are not allowed');
     }
     if (leaf) return match[3];
     tree = match[3];
@@ -73,7 +73,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     await git(['fetch', '--no-tags', 'origin', base, head]);
     await git(['checkout', '--detach', head]);
     const mergeBase = (await git(['merge-base', base, head])).trim();
-    const currentPromptBlob = await supplementalPromptBlob(git, head);
+    const currentPromptBlob = await repositoryPromptBlob(git, head);
     let scope = mergeBase;
     let mode = 'full';
     let reason = request.mode === 'full' ? 'explicit full review' : 'no usable successful baseline';
@@ -83,8 +83,8 @@ export async function review({ request, github, env = process.env, reviewer = ru
         try {
           await git(['fetch', '--no-tags', 'origin', previous.head]);
           if ((await git(['merge-base', previous.head, head])).trim() === previous.head) {
-            if (await supplementalPromptBlob(git, previous.head) !== currentPromptBlob) {
-              reason = 'repository supplemental instructions changed since the previous approval';
+            if (await repositoryPromptBlob(git, previous.head) !== currentPromptBlob) {
+              reason = 'repository review instructions changed since the previous approval';
             } else {
               scope = previous.head; mode = 'incremental'; reason = 'previous approval is an ancestor on the same base';
             }
@@ -104,7 +104,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     // Read immediately before publication. commit_id also pins the native review to the inspected head.
     const latest = await github.request(pullPath);
     if (latest.head.sha !== head || latest.base.sha !== base || latest.state !== 'open') throw new Error('Pull request changed during review; refusing stale verdict');
-    const marker = `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head, base, preset: request.preset })} -->`;
+    const marker = `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head, base, preset: request.preset })} -->`;
     return await github.request(`${pullPath}/reviews`, { method: 'POST', body: {
       commit_id: head, event: result.verdict,
       body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nScope: **${mode}** (${reason}).\n\n${marker}`,

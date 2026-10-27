@@ -70,7 +70,7 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const patch = fileDiff.slice(fileDiff.indexOf('@@ ')).replace(/\n$/, '');
   const files = [{ filename, ...(filename !== previousFilename ? { previous_filename: previousFilename } : {}), status: filename === previousFilename ? 'modified' : 'renamed', additions: patch.split('\n').filter(line => line.startsWith('+')).length, deletions: patch.split('\n').filter(line => line.startsWith('-')).length, patch }];
   // Keep the primary file's synthetic rename/patch behavior used by coordinate tests.
-  // Supplemental paths must still appear in the authoritative full-PR API metadata.
+  // Repository prompt paths must still appear in the authoritative full-PR API metadata.
   const changes = (await git(['diff', '--find-renames', '--name-status', '-z', base, head])).split('\0');
   for (let index = 0; index < changes.length - 1;) {
     const status = changes[index++];
