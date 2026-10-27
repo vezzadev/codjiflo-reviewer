@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isApproved, parseCommand, requestFromEvent, PRESETS } from '../src/commands.mjs';
+import { isApproved, parseCommand, eventDecision, PRESETS } from '../src/commands.mjs';
 import { filesFromApi, inlineComment } from '../src/diff.mjs';
 import { baseline, validateResult } from '../src/review.mjs';
 import { fixture } from './fixture.mjs';
@@ -58,32 +58,63 @@ test('explicit commands work after prose while casual mentions and quoted exampl
   }
   assert.deepEqual(parseCommand('Owner authorized. @codjiflo claude full'), { preset: 'opus-xhigh', mode: 'full' });
   assert.deepEqual(parseCommand('Thanks @codjiflo for the earlier pass. Please @codjiflo codex'), { preset: 'sol-xhigh', mode: 'incremental' });
-  assert.throws(() => parseCommand('Please @codjiflo codex turbo'));
+  assert.equal(parseCommand('Please @codjiflo codex turbo'), null);
+});
+test('casual profile and review mentions do not fail or hide later commands', () => {
+  for (const body of ['Could @codjiflo review this?', 'Thanks @codjiflo claude did great', 'Please @codjiflo codex turbo']) {
+    assert.equal(parseCommand(body), null);
+    assert.deepEqual(parseCommand(`${body}\n@codjiflo codex`), { preset: 'sol-xhigh', mode: 'incremental' });
+  }
+  for (const body of ['@codjiflo review this?', '@codjiflo claude did great', 'Context\n@codjiflo codex turbo', '  @codjiflo review full full']) {
+    assert.throws(() => parseCommand(body), /Invalid review command/);
+  }
+});
+test('Markdown code spans stop at paragraphs and indented code respects paragraph context', () => {
+  for (const body of [
+    '    @codjiflo codex',
+    '\t@codjiflo codex',
+    'Example:\n\n    @codjiflo codex',
+    'Example:\n\n    @codjiflo review turbo\n    @codjiflo claude full',
+    '`example\n@codjiflo codex\n`',
+    '``example `\n@codjiflo codex\n``',
+    '    ```\n    @codjiflo codex\n    ```',
+  ]) assert.equal(parseCommand(body), null, body);
+  for (const body of [
+    '`unmatched\n\n@codjiflo codex\n\n`',
+    '``unmatched\n \t\n@codjiflo codex\n\n``',
+    'Example:\n    @codjiflo codex',
+    'Example:\n\t@codjiflo codex',
+    '    @codjiflo claude\n\n@codjiflo codex',
+    '    @codjiflo claude\n@codjiflo codex',
+    'Example:\n\n    @codjiflo claude\n\nOwner authorized option (A). @codjiflo codex',
+  ]) assert.deepEqual(parseCommand(body), { preset: 'sol-xhigh', mode: 'incremental' }, body);
 });
 test('shorthand events require an approved original author and a newly created PR comment', () => {
   const event = { action: 'created', sender: { login: 'admin' }, comment: { body: '@codjiflo codex', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1853, pull_request: {} } };
-  assert.equal(requestFromEvent(event, 'admin'), null);
-  assert.equal(requestFromEvent(event, ''), null);
+  assert.deepEqual(eventDecision(event, 'admin'), { reason: 'not-approved' });
+  assert.deepEqual(eventDecision(event, ''), { reason: 'not-approved' });
   event.comment.user.login = 'ADMIN';
   for (const [body, preset, mode] of [['@codjiflo codex', 'sol-xhigh', 'incremental'], ['@codjiflo claude full', 'opus-xhigh', 'full'], ['@codjiflo SOL-MEDIUM', 'sol-medium', 'incremental']]) {
     event.comment.body = body;
-    assert.deepEqual(requestFromEvent(event, 'admin'), { preset, mode, repo: 'org/repo', number: 1853, requester: 'ADMIN' });
-    assert.equal(requestFromEvent({ ...event, action: 'edited' }, 'admin'), null);
-    assert.equal(requestFromEvent({ ...event, issue: { number: 1853 } }, 'admin'), null);
+    assert.deepEqual(eventDecision(event, 'admin'), { reason: 'approved', request: { preset, mode, repo: 'org/repo', number: 1853, requester: 'ADMIN' } });
+    assert.deepEqual(eventDecision({ ...event, action: 'edited' }, 'admin'), { reason: 'not-a-command' });
+    assert.deepEqual(eventDecision({ ...event, issue: { number: 1853 } }, 'admin'), { reason: 'not-a-pr' });
   }
   event.comment.body = '@codjiflo codex claude';
-  assert.throws(() => requestFromEvent(event, 'admin'));
+  const invalid = eventDecision(event, 'admin');
+  assert.equal(invalid.reason, 'invalid-command');
+  assert.match(invalid.error.message, /Invalid review command/);
   event.comment.user.login = 'stranger';
-  assert.equal(requestFromEvent(event, 'admin'), null);
+  assert.deepEqual(eventDecision(event, 'admin'), { reason: 'not-approved' });
 });
 test('event authorization uses original comment sender, not rerunner actor', () => {
   const event = { action: 'created', sender: { login: 'admin' }, comment: { body: '@codjiflo-reviewer review', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1, pull_request: {} } };
-  assert.equal(requestFromEvent(event, 'admin'), null);
+  assert.deepEqual(eventDecision(event, 'admin'), { reason: 'not-approved' });
   event.comment.user.login = 'ADMIN';
-  assert.equal(requestFromEvent(event, 'admin').requester, 'ADMIN');
+  assert.equal(eventDecision(event, 'admin').request.requester, 'ADMIN');
   event.comment.body = '@codjiflo-reviewer review CLAUDE';
-  assert.deepEqual(requestFromEvent(event, 'admin'), { preset: 'opus-xhigh', mode: 'incremental', repo: 'org/repo', number: 1, requester: 'ADMIN' });
-  assert.equal(requestFromEvent({ ...event, action: 'edited' }, 'admin'), null);
+  assert.deepEqual(eventDecision(event, 'admin'), { reason: 'approved', request: { preset: 'opus-xhigh', mode: 'incremental', repo: 'org/repo', number: 1, requester: 'ADMIN' } });
+  assert.deepEqual(eventDecision({ ...event, action: 'edited' }, 'admin'), { reason: 'not-a-command' });
 });
 test('ranged comments retain correct left and right coordinates', () => {
   const files = filesFromApi(metadata);

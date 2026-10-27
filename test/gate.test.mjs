@@ -44,6 +44,12 @@ test('gate explains every decision in logs and the Actions summary without start
     { name: 'Claude full command', body: 'Please @codjiflo claude full', allowed: true, reason: 'approved', provider: 'claude', preset: 'opus-xhigh', mode: 'full' },
     { name: 'ordinary comment', body: 'Thanks @codjiflo for reviewing', reason: 'not-a-command' },
     { name: 'quoted command', body: '> @codjiflo codex', reason: 'not-a-command' },
+    { name: 'casual review question', body: 'Could @codjiflo review this?', reason: 'not-a-command' },
+    { name: 'casual known profile', body: 'Thanks @codjiflo claude did great', reason: 'not-a-command' },
+    { name: 'casual mention before valid command', body: 'Could @codjiflo review this?\n@codjiflo codex', allowed: true, reason: 'approved', provider: 'codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'indented code command', body: 'Example:\n\n    @codjiflo codex', reason: 'not-a-command' },
+    { name: 'paragraph continuation command', body: 'Owner authorized:\n    @codjiflo codex', allowed: true, reason: 'approved', provider: 'codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'unmatched backticks in separate paragraphs', body: '`example\n\n@codjiflo codex\n\n`', allowed: true, reason: 'approved', provider: 'codex', preset: 'sol-xhigh', mode: 'incremental' },
     { name: 'bot kickoff', author: 'codjiflo[bot]', type: 'Bot', body: 'Starting review', reason: 'bot-author' },
     { name: 'allowlisted bot command', author: 'codjiflo[bot]', type: 'Bot', approved: 'codjiflo[bot]', body: '@codjiflo codex', reason: 'bot-author' },
     { name: 'bot login without type', author: 'codjiflo[bot]', body: '@codjiflo codex', reason: 'bot-author' },
@@ -51,7 +57,8 @@ test('gate explains every decision in logs and the Actions summary without start
     { name: 'unapproved malformed command', author: 'stranger', body: '@codjiflo review turbo', reason: 'not-approved' },
     { name: 'issue command', pr: false, body: '@codjiflo codex', reason: 'not-a-pr' },
     { name: 'edited command', action: 'edited', body: '@codjiflo codex', reason: 'not-a-command' },
-    { name: 'invalid command', body: 'Please @codjiflo review turbo', reason: 'invalid-command', fails: true },
+    { name: 'invalid standalone command', body: '@codjiflo review turbo', reason: 'invalid-command', fails: true },
+    { name: 'malformed prose mention', body: 'Please @codjiflo review turbo', reason: 'not-a-command' },
   ];
   for (const scenario of cases) await t.test(scenario.name, async () => {
     const temp = await mkdtemp(join(tmpdir(), 'codjiflo-gate-decision-'));

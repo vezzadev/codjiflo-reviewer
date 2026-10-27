@@ -20,19 +20,31 @@ export function isApproved(login, configured = '') {
 // Ignore Markdown examples while allowing explicit commands after ordinary prose.
 function commandText(body) {
   let fence;
-  return (body ?? '').split('\n').map(line => {
-    if (/^\s*>/.test(line)) return '';
-    const marker = line.match(/^\s*(`{3,}|~{3,})/);
+  let paragraph = [];
+  const blocks = [];
+  const flush = () => {
+    // Code spans may wrap lines, but never cross a Markdown paragraph boundary.
+    blocks.push(paragraph.join('\n').replace(/(?<!`)(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)/g, match => match.replace(/[^\n]/g, ' ')));
+    paragraph = [];
+  };
+  for (const line of (body ?? '').split('\n')) {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (fence) {
       if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && /^\s*$/.test(line.slice(marker[0].length))) fence = undefined;
-      return '';
+      continue;
     }
     if (marker) {
+      flush();
       fence = marker[1];
-      return '';
+    } else if (!line.trim() || /^\s*>/.test(line)) {
+      flush();
+    } else if (paragraph.length || !/^(?: {4}| {0,3}\t)/.test(line)) {
+      // Indented code cannot interrupt an existing ordinary paragraph.
+      paragraph.push(line);
     }
-    return line;
-  }).join('\n').replace(/(?<!`)(`+)([\s\S]*?)\1(?!`)/g, match => match.replace(/[^\n]/g, ' '));
+  }
+  flush();
+  return blocks.join('\n');
 }
 
 export function parseCommand(body) {
@@ -46,14 +58,26 @@ export function parseCommand(body) {
     let preset = 'sol-xhigh';
     let mode = 'incremental';
     const seen = new Set();
+    let invalid = false;
     for (const word of words) {
       const value = word.toLowerCase();
       const canonical = normalizePreset(value);
       const kind = canonical ? 'preset' : ['full', 'incremental'].includes(value) ? 'mode' : null;
-      if (!kind || seen.has(kind)) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [sol-xhigh|opus-xhigh|sol-medium|opus-medium|codex|claude] [full|incremental] or @codjiflo <preset> [full|incremental]`);
+      if (!kind || seen.has(kind)) {
+        invalid = true;
+        break;
+      }
       seen.add(kind);
       if (kind === 'preset') preset = canonical;
       else mode = value;
+    }
+    if (invalid) {
+      // Prose mentions must match the complete grammar to count as commands.
+      // Standalone commands retain actionable errors for malformed options.
+      const mentionIndex = match.index + match[0].indexOf('@');
+      const prefix = text.slice(text.lastIndexOf('\n', mentionIndex - 1) + 1, mentionIndex);
+      if (!prefix.trim()) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [sol-xhigh|opus-xhigh|sol-medium|opus-medium|codex|claude] [full|incremental] or @codjiflo <preset> [full|incremental]`);
+      continue;
     }
     return { preset, mode };
   }
@@ -77,8 +101,3 @@ export function eventDecision(event, approved) {
   return { reason: 'approved', request: { ...command, repo: event.repository.full_name, number: event.issue.number, requester: author.login } };
 }
 
-export function requestFromEvent(event, approved) {
-  const decision = eventDecision(event, approved);
-  if (decision.error) throw decision.error;
-  return decision.request ?? null;
-}
