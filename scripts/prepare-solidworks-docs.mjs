@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { acquireLock } from '../src/file-lock.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const execFileAsync = promisify(execFile);
 
@@ -12,6 +13,22 @@ const referenceDirs = ['types', 'enums', 'docs', 'examples', 'index'];
 const skillName = 'developing-solidworks';
 const marker = '.bundle-version';
 
+
+// Plugin registries can be observed while their writer is replacing JSON.
+// Retry reads, never use stale cache metadata or relax identity/readiness checks.
+async function readJson(load, description) {
+  for (let attempt = 1; ; attempt++) {
+    const text = await load();
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      if (attempt === 3) throw new Error(`${description} is invalid JSON after ${attempt} attempts: ${error.message}`);
+      console.warn(`${description} returned invalid JSON; retrying (${attempt}/3)`);
+      await delay(250);
+    }
+  }
+}
 async function hasReferenceFile(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const file = path.join(directory, entry.name);
@@ -38,12 +55,14 @@ async function bundleVersion(skill) {
 
 async function resolveTarget(home) {
   const codexHome = path.resolve(process.env.CODEX_HOME || path.join(home, '.codex'));
-  const { stdout } = await execFileAsync(process.env.CODJIFLO_CODEX_BIN || 'codex', ['plugin', 'list', '--json'], {
-    env: { ...process.env, CODEX_HOME: codexHome },
-    timeout: 30000,
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  const registry = JSON.parse(stdout);
+  const registry = await readJson(async () => {
+    const { stdout } = await execFileAsync(process.env.CODJIFLO_CODEX_BIN || 'codex', ['plugin', 'list', '--json'], {
+      env: { ...process.env, CODEX_HOME: codexHome },
+      timeout: 30000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return stdout;
+  }, 'Codex plugin manifest');
   const active = registry.installed?.filter(plugin => plugin.name === skillName && plugin.installed === true && plugin.enabled === true);
   if (!Array.isArray(active) || active.length !== 1) throw new Error('Expected exactly one installed, enabled Codex developing-solidworks plugin');
   const plugin = active[0];
@@ -63,7 +82,7 @@ async function resolveSource(home, pluginKey) {
   const registry = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
   let installed;
   try {
-    installed = JSON.parse(await readFile(registry, 'utf8'));
+    installed = await readJson(() => readFile(registry, 'utf8'), 'Claude installed-plugin registry');
   } catch (error) {
     throw new Error(`No readable Claude installed-plugin registry at ${registry}: ${error.message}`);
   }

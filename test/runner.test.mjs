@@ -52,7 +52,9 @@ test('timeouts reject and kill descendants even when they ignore SIGTERM', {
   `;
   let descendantPid;
   await assert.rejects(runProcess(process.execPath, ['-e', parent], { timeoutMs: 3000 }), error => {
-    assert.match(error.message, /timed out after 3000ms/);
+    assert.equal(error.termination, 'timeout');
+    assert.equal(error.exitCode, null);
+    assert.equal(error.signal, 'SIGKILL');
     const match = error.message.match(/descendant=(\d+)/);
     assert.ok(match, 'descendant started before the timeout');
     descendantPid = match[1];
@@ -70,5 +72,30 @@ test('timeouts reject and kill descendants even when they ignore SIGTERM', {
 test('nonzero exits reject instead of returning partial output', async () => {
   await assert.rejects(runProcess(process.execPath, ['-e', 'process.stdout.write("partial"); process.stderr.write("failure"); process.exitCode = 7'], {
     timeoutMs: 5000,
-  }), /failed \(7\): failure/);
+  }), error => {
+    assert.equal(error.termination, 'exit');
+    assert.equal(error.exitCode, 7);
+    assert.equal(error.signal, null);
+    assert.equal(error.stdout, 'partial');
+    return true;
+  });
+});
+
+test('signal termination preserves the signal separately from exit status', {
+  skip: process.platform === 'win32',
+}, async () => {
+  await assert.rejects(runProcess(process.execPath, ['-e', 'process.kill(process.pid, "SIGTERM")']), error => {
+    assert.equal(error.termination, 'signal');
+    assert.equal(error.exitCode, null);
+    assert.equal(error.signal, 'SIGTERM');
+    return true;
+  });
+});
+
+test('spawn failures preserve the operating system error code', async () => {
+  await assert.rejects(runProcess(process.execPath, [], { cwd: '/codjiflo-nonexistent-fixture-directory' }), error => {
+    assert.equal(error.termination, 'spawn');
+    assert.equal(error.code, 'ENOENT');
+    return true;
+  });
 });

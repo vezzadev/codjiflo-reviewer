@@ -253,13 +253,48 @@ test('provider environment is cleared for OAuth and explicit proxy retained only
 
 test('single provider deadline aborts and closes a hung SDK without OAuth', async t => {
   const f = await setup(t);
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_000 });
   let closed = false;
   let signal;
+  let sdkStarted;
+  const started = new Promise(resolve => { sdkStarted = resolve; });
   const query = request => {
     signal = request.options.abortController.signal;
+    sdkStarted();
     return { async *[Symbol.asyncIterator]() { await new Promise(() => {}); }, close() { closed = true; } };
   };
-  await assert.rejects(runClaudeReview({ ...f.options, timeoutMs: 100, query }), /timed out/);
+  const pending = runClaudeReview({ ...f.options, timeoutMs: 100, query });
+  // Routing does real filesystem I/O. Advance the provider clock only after the
+  // SDK starts so slow CI storage cannot turn this into a pre-start timeout.
+  const rejected = assert.rejects(pending, /timed out/);
+  await started;
+  t.mock.timers.tick(99);
+  assert.equal(closed, false);
+  assert.equal(signal.aborted, false);
+  t.mock.timers.tick(1);
+  await rejected;
   assert.equal(closed, true);
   assert.equal(signal.aborted, true);
+});
+
+test('provider deadline exhausted by credential routing does not start the SDK or OAuth', async t => {
+  const f = await setup(t);
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000 });
+  let sdkStarted = false;
+  let oauthStarted = false;
+  const stderr = { write: data => {
+    f.options.stderr.write(data);
+    // This route is logged after claiming the key and before starting the SDK.
+    if (data.startsWith('Claude route: API credential ')) t.mock.timers.setTime(1_100);
+  } };
+  await assert.rejects(runClaudeReview({
+    ...f.options, timeoutMs: 100, stderr,
+    query: () => {
+      sdkStarted = true;
+      return { async *[Symbol.asyncIterator]() { await new Promise(() => {}); }, close() {} };
+    },
+    runProcess: async () => { oauthStarted = true; throw new Error('Unexpected OAuth fallback'); },
+  }), /timed out/);
+  assert.equal(sdkStarted, false);
+  assert.equal(oauthStarted, false);
 });

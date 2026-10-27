@@ -39,6 +39,39 @@ test('Codex failures, malformed JSON, stale heads and Claude error results never
   });
 });
 
+test('environment-blocked and legacy defect-free outputs post only a neutral failure comment', async t => {
+  for (const verdict of ['INCOMPLETE', 'REQUEST_CHANGES']) await t.test(verdict, async () => {
+    const f = await fixture();
+    try {
+      const github = {
+        token: 'fixture-token-not-real',
+        async request(path, options) {
+          if (options?.method === 'POST') {
+            f.state.posts.push({ path, body: options.body });
+            return { id: f.state.posts.length };
+          }
+          return { state: 'open', changed_files: f.state.files.length, head: { sha: f.head }, base: { sha: f.base, repo: { clone_url: pathToFileURL(f.repo).href } } };
+        },
+        async list() { return f.state.files; },
+      };
+      await assert.rejects(review({
+        request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'full' },
+        github,
+        env: { ...f.env, CODJIFLO_APPROVED_USERS: 'alice' },
+        reviewer: async () => ({
+          verdict, findings: [],
+          summary: 'Review failed before analysis: PRIVATE-INCOMPLETE-SUMMARY host-only-secret=not-a-configured-credential.',
+        }),
+      }));
+      assert.equal(verdicts(f).length, 0);
+      assert.equal(f.state.posts.length, 2);
+      assert.match(f.state.posts.at(-1).body.body, /failed/);
+      assert.ok(f.state.posts.every(post => !post.path.endsWith('/reviews')));
+      assert.doesNotMatch(f.state.posts.at(-1).body.body, /PRIVATE-INCOMPLETE-SUMMARY|host-only-secret|not-a-configured-credential/);
+    } finally { await f.close(); }
+  });
+});
+
 test('Claude structured stream produces native approval', async () => {
   const f = await fixture();
   try {

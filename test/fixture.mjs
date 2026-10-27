@@ -92,7 +92,8 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const fake = join(temp, 'fake-cli.mjs');
   const capture = join(temp, 'prompt.txt');
   await writeFile(fake, `#!/usr/bin/env node
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 if (process.argv[2] === 'auth') {
  if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth status inherited provider credentials');
  console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'}));
@@ -100,18 +101,59 @@ if (process.argv[2] === 'auth') {
 }
 process.stdin.setEncoding('utf8');
 let input = ''; for await (const chunk of process.stdin) input += chunk;
+await writeFile(process.env.FIXTURE_CAPTURE + '.stdin', input);
+if (process.argv.includes('exec')) {
+ const manifestLine = input.split('\\n').find(line => line.startsWith('Review input manifest: '));
+ if (manifestLine && process.env.FIXTURE_MODE !== 'incomplete-input') {
+  const manifest = JSON.parse(manifestLine.slice('Review input manifest: '.length));
+  let complete = '';
+  const sizes = [];
+  for (let part = 0; part < manifest.parts; part++) {
+   const text = await readFile(join(manifest.directory, part + '.txt'), 'utf8');
+   sizes.push(Buffer.byteLength(text));
+   complete += text;
+  }
+  await writeFile(process.env.FIXTURE_CAPTURE + '.parts', JSON.stringify(sizes));
+  if (complete.length !== manifest.characters || Buffer.byteLength(complete) !== manifest.bytes) throw new Error('Incomplete staged review input');
+  input = complete;
+ }
+}
 await writeFile(process.env.FIXTURE_CAPTURE, input);
-process.stdout.write('fixture CLI streaming live\\n');
+if (process.argv.includes('exec')) console.log(JSON.stringify({type:'thread.started',thread_id:'fixture CLI streaming live'}));
+else process.stdout.write('fixture CLI streaming live\\n');
 process.stderr.write('fixture stderr streaming live\\n');
 if (process.env.FIXTURE_MODE === 'failure') process.exit(9);
 const findings = process.env.FIXTURE_MODE === 'findings' ? [
  {path:'a.js',side:'LEFT',start_line:1,line:1,priority:'P1',disposition:'blocking',title:'Old-side bug',body:'Concrete failure scenario.'},
  {path:'a.js',side:'RIGHT',start_line:1,line:2,priority:'P2',disposition:'blocking',title:'Range bug',body:'Concrete failure scenario.'}
 ] : [];
-const result = {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings};
+const result = process.env.FIXTURE_MODE === 'incomplete-input'
+ ? {verdict:'INCOMPLETE',summary:'A required review input part could not be read.',findings:[]}
+ : {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings};
 if (process.argv.includes('exec')) {
  const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
  await writeFile(output, process.env.FIXTURE_MODE === 'malformed' ? '{' : JSON.stringify(result));
+ if (process.env.FIXTURE_MODE === 'input-too-large') {
+  console.log(JSON.stringify({type:'error',message:'Input exceeds the maximum length of 1048576 characters. input_too_large'}));
+  process.exit(1);
+ }
+ if (['reconnect-recovered', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Reconnecting... 1/5 (stream disconnected before completion)'}));
+ if (['fatal-error', 'fatal-exit'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Fixture fatal transport error despite result file'}));
+ if (process.env.FIXTURE_MODE === 'fatal-exit') {
+  console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',aggregated_output:'HOST-TOOL-SECRET-do-not-publish'}}));
+  console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'PRIVATE-MODEL-TEXT-do-not-publish'}}));
+  console.log(JSON.stringify({type:'error',message:'Fixture safe terminal diagnostic token=' + process.env.GITHUB_TOKEN,aggregated_output:'ERROR-EXTRA-SECRET-do-not-publish'}));
+  process.stderr.write('x'.repeat(2200) + '\\nFixture verbose CLI stderr detail STDERR-HOST-SECRET-do-not-publish\\n');
+  process.exit(1);
+ }
+ if (process.env.FIXTURE_MODE === 'raw-exit') {
+  console.log('RAW-STDOUT-SECRET-do-not-publish');
+  process.stderr.write('STDERR-HOST-SECRET-do-not-publish'.repeat(100));
+  process.exit(7);
+ }
+ if (process.env.FIXTURE_MODE === 'non-json-completed') console.log('BANNER-SECRET-do-not-publish');
+ if (['failed-turn', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.failed',error:{message:'Fixture provider failed despite result file'}}));
+ else if (!['missing-completion', 'fatal-error'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 } else {
  // stdout is valid JSONL in Claude mode (no unstructured status lines).
  if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth fixture inherited provider credentials');
@@ -132,7 +174,16 @@ if (process.argv.includes('exec')) {
     response.setHeader('Content-Type', 'application/json');
     if (request.method === 'POST') {
       state.posts.push({ path: request.url, body: parsed });
-      response.end(JSON.stringify({ id: state.posts.length }));
+      if (request.url.endsWith('/reviews')) {
+        if (state.publicationStatus) {
+          response.statusCode = state.publicationStatus;
+          response.end(JSON.stringify({ message: 'Fixture publication rejected' }));
+          return;
+        }
+        const receipt = { id: state.posts.length, commit_id: parsed.commit_id, body: parsed.body, state: parsed.event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED' };
+        state.reviews.push(receipt);
+        response.end(JSON.stringify(receipt));
+      } else response.end(JSON.stringify({ id: state.posts.length }));
     } else if (request.url.startsWith('/repos/org/repo/pulls/1/reviews')) {
       response.end(JSON.stringify(state.reviews));
     } else if (request.url.startsWith('/repos/org/repo/pulls/1/files?')) {
@@ -145,11 +196,11 @@ if (process.argv.includes('exec')) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const api = `http://127.0.0.1:${server.address().port}`;
-  return { state, head, base, previous, temp, repo, capture, localDiff, env, hostSentinel,
+  return { state, api, head, base, previous, temp, repo, capture, localDiff, env, hostSentinel,
     async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
         timeoutMs,
-        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: api, CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
+        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
       });
     },
     async close() { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },
