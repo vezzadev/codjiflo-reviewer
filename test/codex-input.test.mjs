@@ -1,69 +1,130 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
+import { reviewInput, MAX_INLINE_INPUT } from '../src/evidence.mjs';
+import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
 import { prompt } from '../src/prompt.mjs';
 
 const verdicts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
 
-async function assertStagedInput(f) {
-  const input = await readFile(f.capture + '.stdin', 'utf8');
-  assert.ok(input.length < 1048576, 'Codex initial user turn stays below its character cap');
-  const manifestLine = input.split('\n').find(line => line.startsWith('Review input manifest: '));
-  assert.ok(manifestLine, 'oversized prompt uses complete file-backed transport');
-  const manifest = JSON.parse(manifestLine.slice('Review input manifest: '.length));
-  const complete = await readFile(f.capture, 'utf8');
-  assert.equal(complete.length, manifest.characters);
-  assert.equal(Buffer.byteLength(complete), manifest.bytes);
-  assert.ok(complete.length > 1048576, 'original input exceeds the actual Codex turn cap');
-  const sizes = JSON.parse(await readFile(f.capture + '.parts', 'utf8'));
-  assert.equal(sizes.length, manifest.parts);
-  assert.ok(sizes.every(bytes => bytes > 0 && bytes <= 8000), 'every part fits the UTF-8 byte budget, including multibyte input');
-  assert.equal(sizes.reduce((total, bytes) => total + bytes, 0), manifest.bytes);
-  assert.match(input, /output budget of at least 4000 tokens/);
-  return complete;
+const manifestOf = input => JSON.parse(input.split('\n').find(line => line.startsWith('Navigable review evidence manifest: ')).slice('Navigable review evidence manifest: '.length));
+
+async function readRange(directory, name, start, size = 6000) {
+  const output = await runProcess(process.execPath, [join(directory, 'read-evidence.mjs'), name, String(start), String(size)]);
+  const newline = output.indexOf('\n');
+  return { ...JSON.parse(output.slice(0, newline)), text: output.slice(newline + 1) };
 }
 
-test('large full and incremental Codex reviews preserve all scope and current API anchors', async () => {
-  // A single long UTF-8 line also exercises part boundaries inside a diff line.
+test('large full and incremental reviews keep methodology inline and expose complete navigable evidence', async () => {
   const f = await fixture({ newLine: 'é🙂漢'.repeat(300000) });
   try {
-    await f.run({ full: true });
-    const complete = await assertStagedInput(f);
-    const currentDiff = JSON.stringify(f.state.files.map(file => ({ filename: file.filename, patch: file.patch })), null, 2);
-    assert.equal(complete, prompt({ level: 'xhigh', mode: 'full', base: f.base, head: f.head, scope: f.base, diff: f.localDiff, currentDiff }));
-    assert.equal(verdicts(f).length, 1);
-    assert.equal(verdicts(f)[0].body.event, 'APPROVE');
-
-    f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
-    await f.run();
-    const incremental = await assertStagedInput(f);
-    assert.ok(incremental.includes(`git diff ${f.previous} ${f.head}`));
-    assert.ok(incremental.endsWith(currentDiff), 'full current-PR metadata remains authoritative in incremental mode');
-    assert.equal(verdicts(f).length, 2);
-    assert.match(verdicts(f)[1].body.body, /Scope: \*\*incremental\*\*/);
+    for (const full of [true, false]) {
+      if (!full) f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
+      await f.run({ full });
+      const input = await readFile(f.capture, 'utf8');
+      assert.ok(input.length < 16000, 'initial prompt does not grow with duplicated patch evidence');
+      assert.match(input, /Line-by-line diff scan/);
+      assert.match(input, /Removed-behavior auditor/);
+      assert.match(input, /Gap sweep/);
+      assert.match(input, /For EVERY scope record/);
+      assert.match(input, /INCOMPLETE/);
+      assert.doesNotMatch(input, /Read every file from|0\.txt|é🙂漢/);
+      const manifest = manifestOf(input);
+      assert.ok(relative(join(manifest.directory, '..', 'repository'), manifest.directory).startsWith('..'));
+      const directory = f.capture + '.evidence';
+      const scope = await readFile(join(directory, 'review-scope.diff'), 'utf8');
+      if (full) assert.equal(scope, f.localDiff);
+      else {
+        assert.match(input, new RegExp(`git diff ${f.previous} ${f.head}`));
+        assert.equal(scope, await runProcess('git', ['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', f.previous, f.head, '--'], { cwd: f.repo, env: f.env }));
+      }
+      const records = (await readFile(join(directory, 'inventory.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+      const scopes = records.filter(record => record.scope);
+      assert.equal(scopes.length, manifest.scopeFiles);
+      assert.equal(scopes.reduce((sum, record) => sum + record.scope.bytes, 0), Buffer.byteLength(scope));
+      const current = JSON.parse(await readFile(join(directory, 'pr-patches.json'), 'utf8'));
+      assert.deepEqual(current, f.state.files.map(file => ({ filename: file.filename, patch: file.patch })));
+      const apiRecord = records.find(record => record.api);
+      const apiBytes = await readFile(join(directory, 'pr-patches.json'));
+      assert.deepEqual(JSON.parse(apiBytes.subarray(apiRecord.api.start, apiRecord.api.start + apiRecord.api.bytes)), current[0]);
+      assert.equal(verdicts(f).at(-1).body.event, 'APPROVE');
+    }
   } finally { await f.close(); }
 });
 
-test('large custom instructions remain verbatim in file-backed Codex input', async () => {
-  const instructions = 'Inspect café 🙂 cancellation.\n'.repeat(45000);
-  const f = await fixture({ headPrompt: instructions });
+test('oversized custom methodology fails closed before provider invocation or publication', async () => {
+  const f = await fixture({ headPrompt: 'Inspect café 🙂 cancellation.\n'.repeat(45000) });
   try {
-    await f.run({ full: true });
-    const complete = await assertStagedInput(f);
-    assert.ok(complete.includes(`--- BEGIN REPOSITORY REVIEW INSTRUCTIONS ---\n${instructions}\n--- END REPOSITORY REVIEW INSTRUCTIONS ---`));
-    assert.ok(complete.includes(f.localDiff));
-    assert.equal(verdicts(f).length, 1);
-    assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+    await assert.rejects(f.run({ full: true }));
+    assert.equal(verdicts(f).length, 0);
+    await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+    assert.match(f.state.posts.at(-1).body.body, /instructions exceed/);
   } finally { await f.close(); }
 });
 
-test('unread staged Codex input returns INCOMPLETE without publishing a defect verdict', async () => {
-  const f = await fixture({ headPrompt: 'Required review instructions.\n'.repeat(20000) });
+test('unprocessed large scope returns INCOMPLETE without publishing a defect verdict', async () => {
+  const f = await fixture({ newLine: 'x'.repeat(600000) });
   try {
     await assert.rejects(f.run({ mode: 'incomplete-input', full: true }));
     assert.equal(verdicts(f).length, 0);
   } finally { await f.close(); }
+});
+
+test('small Codex prompts are unchanged and require no evidence query', async () => {
+  const options = { level: 'xhigh', mode: 'full', base: 'a', head: 'b', scope: 'a', diff: 'small', currentDiff: '[]' };
+  assert.equal(await reviewInput({ preset: { cli: 'codex' }, options, git: () => { throw new Error('Unexpected git query'); } }), prompt(options));
+});
+
+test('range inventory preserves escaped rename paths, binary files, UTF-8 and late-file evidence', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codjiflo-evidence-test-'));
+  const cwd = join(temp, 'repository');
+  await mkdir(cwd);
+  const filename = '-odd\\name\t"é🙂\n.js';
+  const previous = 'old\n\t"漢.js';
+  const first = 'diff --git a/first b/first\n' + 'é🙂漢'.repeat(150000) + '\n';
+  const last = 'diff --git a/last b/last\nBinary files differ\n';
+  const options = { level: 'xhigh', mode: 'incremental', base: 'a', head: 'b', scope: 'c', diff: first + last, currentDiff: JSON.stringify([{ filename, previous_filename: previous, patch: '@@ -1 +1 @@\n-old\n+new' }, { filename: 'last', patch: null }]), customInstructions: 'Inspect complete scope with custom methodology.' };
+  try {
+    const input = await reviewInput({ preset: { cli: 'codex' }, options, temp, cwd, git: async args => {
+      assert.ok(args.includes('-z'));
+      assert.deepEqual(args.slice(-3), ['c', 'b', '--']);
+      return `1\t1\t\0${previous}\0${filename}\0-\t-\tlast\0`;
+    } });
+    assert.ok(input.includes(options.customInstructions));
+    const manifest = manifestOf(input);
+    assert.ok(input.length < MAX_INLINE_INPUT);
+    const records = (await readFile(join(manifest.directory, 'inventory.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(records[0].filename, filename);
+    assert.equal(records[0].previous_filename, previous);
+    assert.equal(records[1].additions, null);
+    assert.equal(records[3].anchors, false);
+    const late = await readRange(manifest.directory, 'review-scope.diff', records[1].scope.start);
+    assert.equal(late.text, last, 'late file can be inspected without loading the earlier huge file');
+    const a = await readRange(manifest.directory, 'review-scope.diff', 0, 31);
+    const b = await readRange(manifest.directory, 'review-scope.diff', a.next, 31);
+    assert.ok(!a.text.includes('\ufffd') && !b.text.includes('\ufffd'));
+    assert.equal(a.text + b.text, Buffer.from(first).subarray(0, b.next).toString('utf8'));
+    assert.ok(a.bytes <= 31 && b.bytes <= 31);
+    const api = await readRange(manifest.directory, 'pr-patches.json', records[2].api.start, records[2].api.bytes);
+    assert.equal(JSON.parse(api.text).filename, filename);
+    await assert.rejects(readRange(manifest.directory, '../repository/secret', 0));
+    await assert.rejects(readRange(manifest.directory, 'review-scope.diff', -1));
+    await assert.rejects(readRange(manifest.directory, 'review-scope.diff', 0, 6001));
+    await assert.rejects(readRange(manifest.directory, 'review-scope.diff', Buffer.byteLength('diff --git a/first b/first\n') + 1));
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test('unbounded inventory records and inconsistent scope indices fail closed', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codjiflo-inventory-test-'));
+  const options = { level: 'xhigh', mode: 'full', base: 'a', head: 'b', scope: 'a', diff: 'diff --git a/a b/a\n' + 'x'.repeat(600000), currentDiff: '[]' };
+  try {
+    await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => `1\t0\t${'name'.repeat(2000)}\0` }), /inventory record/);
+    await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => '' }), /index complete/);
+    await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: temp, git: async () => '' }), /outside the checkout/);
+  } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
 test('Codex reconnect errors followed by turn.completed publish the completed review', async () => {
@@ -142,4 +203,35 @@ test('non-JSON Codex stdout fails closed even with completion and a valid result
     assert.match(body, /invalid JSONL protocol output/);
     assert.doesNotMatch(body, /BANNER-SECRET/);
   } finally { await f.close(); }
+});
+
+test('a 3000-file inventory stays navigable without inflating the initial prompt', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codjiflo-many-files-'));
+  const names = Array.from({ length: 3000 }, (_, index) => `directory/file-${index}.js`);
+  const options = {
+    level: 'xhigh', mode: 'full', base: 'a', head: 'b', scope: 'a',
+    diff: names.map((name, index) => `diff --git a/${name} b/${name}\n${index === 0 ? '+' + 'x'.repeat(600000) + '\n' : ''}`).join(''),
+    currentDiff: JSON.stringify(names.map(filename => ({ filename, patch: null }))),
+  };
+  try {
+    const input = await reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => names.map(name => `0\t0\t${name}\0`).join('') });
+    const manifest = manifestOf(input);
+    assert.ok(input.length < 16000);
+    assert.equal(manifest.scopeFiles, 3000);
+    assert.equal(manifest.apiFiles, 3000);
+    const inventory = await readFile(join(manifest.directory, 'inventory.jsonl'), 'utf8');
+    const records = inventory.trim().split('\n').map(JSON.parse);
+    assert.equal(records.length, 6000);
+    assert.equal(records[2999].filename, names.at(-1));
+    assert.equal(records.at(-1).filename, names.at(-1));
+    const late = await readRange(manifest.directory, 'review-scope.diff', records[2999].scope.start);
+    assert.equal(late.text, `diff --git a/${names.at(-1)} b/${names.at(-1)}\n`);
+    // Simulate retrying a truncated read with a smaller budget at the SAME
+    // offset, without losing the start of a record or advancing the cursor.
+    const large = await readRange(manifest.directory, 'inventory.jsonl', 0);
+    const retry = await readRange(manifest.directory, 'inventory.jsonl', 0, 99);
+    assert.ok(large.text.startsWith(retry.text));
+    assert.equal(retry.start, 0);
+    assert.ok(retry.next < large.next);
+  } finally { await rm(temp, { recursive: true, force: true }); }
 });
