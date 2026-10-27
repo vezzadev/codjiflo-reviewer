@@ -68,7 +68,7 @@ This repository runs its own instance through [`.github/workflows/codjiflo.yml`]
 
 Existing CLI authentication is independent of the GitHub token. Subscription/API access, usage limits and model availability remain your responsibility. The code checks provider exit status and structured completion; it does not turn quota/auth errors into a clean review.
 
-Provider work has one 45-minute limit, including all Claude key attempts and CLI fallback; the review job has a 55-minute limit, below the GitHub App token's one-hour lifetime. Timeouts stop the provider and enter the normal failure-reporting path. A runner shutdown or forced workflow cancellation may prevent the failure comment and temporary-checkout cleanup; check the workflow logs in that case.
+Provider work has one 45-minute limit, including all Claude key attempts and CLI fallback; the review job has a 55-minute limit, below the GitHub App token's one-hour lifetime. Credential routing consumes that same budget: an exhausted deadline prevents starting another SDK session, while expiry during a session aborts and closes it. Timeouts stop the provider and enter the normal failure-reporting path. A runner shutdown or forced workflow cancellation may prevent the failure comment and temporary-checkout cleanup; check the workflow logs in that case.
 
 ### Claude API pool and subscription fallback
 

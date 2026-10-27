@@ -82,6 +82,9 @@ function structuredResult(result) {
 }
 
 async function sdkAttempt({ query, credential, preset, prompt, cwd, env, remaining, stdout, stderr, redact }) {
+  // Check before creating the timeout promise: an executor rejection would still
+  // let query() start with a live controller after credential routing used the budget.
+  const timeoutMs = remaining();
   const controller = new AbortController();
   let session;
   let timer;
@@ -91,7 +94,7 @@ async function sdkAttempt({ query, credential, preset, prompt, cwd, env, remaini
       controller.abort();
       session?.close();
       reject(new Error('Claude review timed out (total provider deadline)'));
-    }, remaining());
+    }, timeoutMs);
   });
   try {
     session = query({ prompt, options: {
