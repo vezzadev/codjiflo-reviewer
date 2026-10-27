@@ -2,19 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { publishReview } from '../src/publication.mjs';
 import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
+const { publishReview } = await import(process.env.CODJIFLO_PUBLICATION_MODULE || '../src/publication.mjs');
 
 const env = { CODJIFLO_APPROVED_USERS: 'alice' };
 function setup() {
-  const envelope = { version: 1, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'sol-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event: 'REQUEST_CHANGES', body: 'Review\n<!-- codjiflo-publication:unique -->', comments: [] } };
+  const envelope = { version: 1, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'sol-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event: 'REQUEST_CHANGES', body: 'Review\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->', comments: [] } };
   const receipt = { id: 42, state: 'CHANGES_REQUESTED', commit_id: envelope.head, body: envelope.payload.body };
-  const state = { posts: 0, lists: 0, reviews: [], stale: false };
+  const state = { posts: 0, lists: 0, reviews: [], stale: false, events: [] };
   const github = {
-    async list() { state.lists++; return state.reviews; },
+    async list() { state.lists++; state.events.push('list'); return state.reviews; },
     async request(path, options) {
-      if (options?.method === 'POST') { state.posts++; return receipt; }
+      if (options?.method === 'POST') { state.posts++; state.events.push('post'); return receipt; }
+      state.events.push('pull');
       return { state: 'open', head: { sha: state.stale ? 'c'.repeat(40) : envelope.head }, base: { sha: envelope.base } };
     },
   };
@@ -38,15 +39,18 @@ test('ambiguous committed POST is reconciled without creating duplicate review',
 
 test('transient publication failures retry only after reconciliation, bounded to three attempts', async () => {
   const f = setup();
+  const delays = [];
   const get = f.github.request;
   f.github.request = async (path, options) => {
     if (!options) return get(path);
     f.state.posts++;
-    assert.equal(f.state.lists, f.state.posts);
+    assert.deepEqual(f.state.events.slice(-2), ['list', 'pull']);
     throw Object.assign(new Error('server failure'), { status: 500 });
   };
-  await assert.rejects(publishReview({ ...f, env, delay: async () => {} }), /server failure/);
+  await assert.rejects(publishReview({ ...f, env, delay: async ms => { delays.push(ms); } }), /server failure/);
   assert.equal(f.state.posts, 3);
+  assert.equal(f.state.lists, 6);
+  assert.deepEqual(delays, [1000, 2000]);
 });
 
 test('failed reconciliation, permanent rejection, stale head and unconfirmed receipt fail closed', async t => {
@@ -75,6 +79,114 @@ test('recovery refuses unauthorized requesters, changed bases and matching pendi
     if (scenario === 'pending') f.state.reviews.push({ ...f.receipt, state: 'PENDING' });
     await assert.rejects(publishReview({ ...f, env }));
     assert.equal(f.state.posts, 0);
+  });
+});
+
+test('review visible only after retry backoff is reconciled before a second POST', async () => {
+  const f = setup();
+  const get = f.github.request;
+  f.github.request = async (path, options) => {
+    if (!options) return get(path);
+    f.state.posts++;
+    f.state.events.push('post');
+    throw Object.assign(new Error('response lost after commit'), { status: 502 });
+  };
+  const delays = [];
+  const result = await publishReview({ ...f, env, delay: async ms => {
+    delays.push(ms);
+    f.state.events.push('delay');
+    f.state.reviews.push(f.receipt);
+  } });
+  assert.equal(result, f.receipt);
+  assert.equal(f.state.posts, 1);
+  assert.deepEqual(delays, [1000]);
+  assert.deepEqual(f.state.events, ['list', 'pull', 'post', 'list', 'delay', 'list']);
+});
+
+test('normalization outside the unique marker does not invalidate a submitted receipt', async t => {
+  for (const scenario of ['direct', 'recovery', 'ambiguous']) await t.test(scenario, async () => {
+    const f = setup();
+    f.envelope.payload.body = `Review\r\n\r\n${f.envelope.payload.body.split('\n')[1]}\r\n`;
+    if (scenario === 'recovery') f.state.reviews.push(f.receipt);
+    if (scenario === 'ambiguous') {
+      const get = f.github.request;
+      f.github.request = async (path, options) => {
+        if (!options) return get(path);
+        f.state.posts++;
+        f.state.reviews.push(f.receipt);
+        throw new TypeError('response lost');
+      };
+    }
+    assert.equal(await publishReview({ ...f, env, delay: async () => {} }), f.receipt);
+    assert.equal(f.state.posts, scenario === 'recovery' ? 0 : 1);
+  });
+});
+
+test('malformed or ambiguous saved publication markers fail before GitHub calls', async t => {
+  for (const body of [
+    'Review without an identity',
+    '<!-- codjiflo-publication:unique -->',
+    '<!-- codjiflo-publication:12345678-1234-4234-1234-123456789abc -->',
+    '<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc',
+    `${setup().envelope.payload.body}\n${setup().envelope.payload.body}`,
+    `${setup().envelope.payload.body}\n<!-- codjiflo-publication:malformed -->`,
+  ]) await t.test(body, async () => {
+    const f = setup();
+    f.envelope.payload.body = body;
+    await assert.rejects(publishReview({ ...f, env }), /Invalid saved publication/);
+    assert.deepEqual(f.state.events, []);
+  });
+});
+
+test('publication identity collisions and invalid matching receipts fail closed', async t => {
+  for (const scenario of ['head', 'state', 'missing-id', 'string-id', 'zero-id', 'unsafe-id', 'duplicate-marker', 'duplicate-review']) await t.test(scenario, async () => {
+    const f = setup();
+    const receipt = { ...f.receipt };
+    if (scenario === 'head') receipt.commit_id = 'c'.repeat(40);
+    if (scenario === 'state') receipt.state = 'APPROVED';
+    if (scenario === 'missing-id') delete receipt.id;
+    if (scenario === 'string-id') receipt.id = '42';
+    if (scenario === 'zero-id') receipt.id = 0;
+    if (scenario === 'unsafe-id') receipt.id = Number.MAX_SAFE_INTEGER + 1;
+    if (scenario === 'duplicate-marker') receipt.body += `\n${receipt.body}`;
+    f.state.reviews.push(receipt);
+    if (scenario === 'duplicate-review') f.state.reviews.push({ ...receipt, id: 43 });
+    await assert.rejects(publishReview({ ...f, env }), /refusing.*publication/);
+    assert.equal(f.state.posts, 0);
+  });
+});
+
+test('a different publication UUID does not prevent a new publication', async () => {
+  const f = setup();
+  f.state.reviews.push({ ...f.receipt, body: f.receipt.body.replace('123456789abc', '123456789abd') });
+  assert.equal(await publishReview({ ...f, env }), f.receipt);
+  assert.equal(f.state.posts, 1);
+});
+
+test('post-backoff reconciliation failure or changed PR never permits another POST', async t => {
+  for (const scenario of ['reconciliation', 'head', 'base', 'closed']) await t.test(scenario, async () => {
+    const f = setup();
+    let delayed = false;
+    const get = f.github.request;
+    const list = f.github.list;
+    f.github.list = async () => {
+      if (delayed && scenario === 'reconciliation') throw new Error('post-backoff lookup failed');
+      return list();
+    };
+    f.github.request = async (path, options) => {
+      if (!options) {
+        const pull = await get(path);
+        if (delayed && scenario === 'head') pull.head.sha = 'c'.repeat(40);
+        if (delayed && scenario === 'base') pull.base.sha = 'c'.repeat(40);
+        if (delayed && scenario === 'closed') pull.state = 'closed';
+        return pull;
+      }
+      f.state.posts++;
+      throw Object.assign(new Error('transient failure'), { status: 503 });
+    };
+    await assert.rejects(publishReview({ ...f, env, delay: async () => { delayed = true; } }),
+      scenario === 'reconciliation' ? /post-backoff lookup failed/ : /refusing stale verdict/);
+    assert.equal(f.state.posts, 1);
   });
 });
 

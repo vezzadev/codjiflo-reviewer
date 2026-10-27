@@ -1,6 +1,11 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { isApproved, PRESETS } from './commands.mjs';
 
+function publicationId(body) {
+  if (typeof body !== 'string' || [...body.matchAll(/codjiflo-publication:/g)].length !== 1) return null;
+  return /<!-- codjiflo-publication:([a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}) -->/.exec(body)?.[1] ?? null;
+}
+
 function validate(envelope, env) {
   const { request, head, base, payload } = envelope ?? {};
   if (envelope?.version !== 1 || !request ||
@@ -9,24 +14,29 @@ function validate(envelope, env) {
       !isApproved(request.requester, env.CODJIFLO_APPROVED_USERS) ||
       !/^[a-f0-9]{40}$/.test(head) || !/^[a-f0-9]{40}$/.test(base) ||
       payload?.commit_id !== head || !['APPROVE', 'REQUEST_CHANGES'].includes(payload.event) ||
-      typeof payload.body !== 'string' || !payload.body.includes('<!-- codjiflo-publication:') ||
+      !publicationId(payload.body) ||
       !Array.isArray(payload.comments)) throw new Error('Invalid saved publication or unapproved requester');
   return envelope;
 }
 
 function confirmed(receipt, envelope) {
-  return Number.isSafeInteger(receipt?.id) && receipt.id > 0 && receipt.commit_id === envelope.head && receipt.body === envelope.payload.body && receipt.state === (envelope.payload.event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED');
+  return Number.isSafeInteger(receipt?.id) && receipt.id > 0 && receipt.commit_id === envelope.head && publicationId(receipt.body) === publicationId(envelope.payload.body) && receipt.state === (envelope.payload.event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED');
 }
 
-// Reconcile every ambiguous POST before retrying: a transport/5xx error can occur
-// after GitHub has already committed the review. A failed GET must never authorize a POST.
+// Reconcile ambiguous POSTs immediately and again after backoff before retrying.
+// A failed GET never authorizes a POST. Visibility delayed beyond the final read
+// can still race a retry; GitHub does not provide an idempotency key for this POST.
 export async function publishReview({ envelope, github, env = process.env, delay = sleep }) {
   validate(envelope, env);
   const { request, head, base, payload } = envelope;
   const pullPath = `/repos/${request.repo}/pulls/${request.number}`;
+  const identity = publicationId(payload.body);
   const reconcile = async () => {
-    const match = (await github.list(`${pullPath}/reviews`)).find(receipt => receipt.commit_id === head && receipt.body === payload.body);
-    if (match && !confirmed(match, envelope)) throw new Error('Matching GitHub review is not in the expected submitted state; refusing duplicate publication');
+    const matches = (await github.list(`${pullPath}/reviews`)).filter(receipt =>
+      typeof receipt.body === 'string' && receipt.body.includes(`codjiflo-publication:${identity}`));
+    if (matches.length > 1) throw new Error('Multiple GitHub reviews have the publication identity; refusing ambiguous publication');
+    const match = matches[0];
+    if (match && !confirmed(match, envelope)) throw new Error('Matching GitHub review has an invalid identity, head, ID or submitted state; refusing duplicate publication');
     return match;
   };
   const finish = receipt => {
@@ -36,6 +46,10 @@ export async function publishReview({ envelope, github, env = process.env, delay
   const existing = await reconcile();
   if (existing) return finish(existing);
   for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      const found = await reconcile();
+      if (found) return finish(found);
+    }
     const latest = await github.request(pullPath);
     if (latest.head.sha !== head || latest.base.sha !== base || latest.state !== 'open') throw new Error('Pull request changed during review; refusing stale verdict');
     try {
