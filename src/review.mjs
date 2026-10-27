@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PRESETS, isApproved } from './commands.mjs';
@@ -76,9 +76,21 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const files = filesFromApi(metadata);
     const diff = await git(['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', scope, head]);
     const currentDiff = JSON.stringify([...files.values()].map(file => ({ filename: file.path, previous_filename: file.previousPath, patch: file.patch })), null, 2);
+    // Walk the inspected Git tree, never the worktree: even an ancestor can be a host symlink.
+    const promptParts = ['.codjiflo', 'code-review', 'PROMPT.md'];
+    let tree = head;
     let customInstructions;
-    try { customInstructions = await readFile(join(cwd, '.codjiflo', 'code-review', 'PROMPT.md'), 'utf8'); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    for (const [index, name] of promptParts.entries()) {
+      const entry = await git(['ls-tree', '-z', tree, '--', name]);
+      if (!entry) break;
+      const match = /^([0-7]{6}) (blob|tree|commit) ([a-f0-9]+)\t([^\0]+)\0$/.exec(entry);
+      const leaf = index === promptParts.length - 1;
+      if (!match || match[4] !== name || (leaf ? !['100644', '100755'].includes(match[1]) || match[2] !== 'blob' : match[1] !== '040000' || match[2] !== 'tree')) {
+        throw new Error('Repository supplemental prompt must be a regular Git blob with tree-only ancestors; links, directories, and submodules are not allowed');
+      }
+      if (leaf) customInstructions = await git(['cat-file', 'blob', match[3]]);
+      else tree = match[3];
+    }
     const result = await reviewer({ preset, prompt: prompt({ level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions }), cwd, temp, env });
     const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10);
     // Read immediately before publication. commit_id also pins the native review to the inspected head.

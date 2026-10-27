@@ -39,7 +39,7 @@ The high and xhigh instructions are faithfully adapted from the e-code-review sk
 
 ### Repository-specific review instructions
 
-Optionally commit UTF-8 instructions to `.codjiflo/code-review/PROMPT.md` in the repository being reviewed. Codjiflo reads this file from the checked-out **current PR head**, not the default branch or bot checkout, and includes it before the diff in the shared prompt for both Codex and Claude (SDK and CLI fallback). These instructions supplement, rather than replace, the built-in review recipe, scope, structured output, and comment-location requirements. A missing file leaves the prompt unchanged; other read errors fail the review.
+Optionally commit UTF-8 instructions to `.codjiflo/code-review/PROMPT.md` in the repository being reviewed. Codjiflo loads only a regular Git blob directly from the exact inspected **current PR head** tree, not the worktree, default branch, or bot checkout, and includes it before the diff in the shared prompt for both Codex and Claude (SDK and CLI fallback). These instructions supplement, rather than replace, the built-in review recipe, scope, structured output, and comment-location requirements. A missing path leaves the prompt unchanged. Symlinks at the file or any ancestor, directories in place of the file, submodules anywhere along the path, and other read errors fail the review before a provider is invoked.
 
 ## Install in a consumer repository
 

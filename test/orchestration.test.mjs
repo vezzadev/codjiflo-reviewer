@@ -84,14 +84,49 @@ test('missing repository prompt preserves the default prompt, including after de
   });
 });
 
-test('repository prompt read errors other than ENOENT fail before provider launch or publication', async () => {
-  const f = await fixture({ promptDirectory: true });
-  try {
-    await assert.rejects(f.run(), /EISDIR/);
-    assert.equal(verdicts(f).length, 0);
-    await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
-    assert.match(f.state.posts.at(-1).body.body, /failed/);
-  } finally { await f.close(); }
+test('repository prompt rejects non-regular Git paths before provider launch or disclosure', async t => {
+  for (const headPromptType of ['directory', 'symlink', 'parent-symlink', 'ancestor-symlink', 'submodule']) {
+    for (const preset of ['codex', 'claude']) await t.test(`${headPromptType}: ${preset}`, async () => {
+      // Symlink targets are readable host files outside the repository, not dangling links.
+      const f = await fixture({ headPromptType });
+      try {
+        assert.equal(await readFile(join(f.temp, 'host', 'code-review', 'PROMPT.md'), 'utf8'), f.hostSentinel);
+        await assert.rejects(f.run({ preset }), /must be a regular Git blob/);
+        assert.equal(verdicts(f).length, 0);
+        await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+        assert.match(f.state.posts.at(-1).body.body, /failed/);
+        assert.ok(!JSON.stringify(f.state.posts).includes(f.hostSentinel));
+      } finally { await f.close(); }
+    });
+  }
+});
+
+test('fixture API metadata includes prompt additions, modifications and deletions', async t => {
+  for (const [status, options, additions, deletions] of [
+    ['added', { headPrompt: 'Added instructions.\n' }, 1, 0],
+    ['modified', { basePrompt: 'Old instructions.\n', headPrompt: 'New instructions.\n' }, 1, 1],
+    ['removed', { basePrompt: 'Deleted instructions.\n', headPrompt: null }, 0, 1],
+  ]) await t.test(status, async () => {
+    const f = await fixture(options);
+    try {
+      assert.equal(f.state.changedFiles, 2);
+      assert.equal(f.state.files.length, 2);
+      assert.equal(f.state.files[0].filename, 'a.js');
+      const file = f.state.files.find(file => file.filename === '.codjiflo/code-review/PROMPT.md');
+      assert.ok(file);
+      assert.equal(file.status, status);
+      assert.equal(file.additions, additions);
+      assert.equal(file.deletions, deletions);
+      assert.match(file.patch, /^@@ /);
+      if (options.headPrompt) assert.ok(file.patch.includes(`+${options.headPrompt.trimEnd()}`));
+      if (options.basePrompt) assert.ok(file.patch.includes(`-${options.basePrompt.trimEnd()}`));
+      await f.run({ full: true });
+      const captured = await readFile(f.capture, 'utf8');
+      const metadataMarker = 'Authoritative current PR file metadata and patches for location mapping ONLY (LEFT is the PR old snapshot, not the incremental old snapshot):\n';
+      const apiPatches = JSON.parse(captured.slice(captured.indexOf(metadataMarker) + metadataMarker.length));
+      assert.ok(apiPatches.some(patch => patch.filename === file.filename && patch.patch === file.patch));
+    } finally { await f.close(); }
+  });
 });
 
 test('Claude OAuth fallback clears inherited API and cloud-provider environment', async () => {
