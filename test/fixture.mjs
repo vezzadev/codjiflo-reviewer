@@ -5,6 +5,31 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { runProcess } from '../src/runner.mjs';
 
+async function setHeadPrompt({ repo, temp, promptPath, hostPromptDirectory, hostPrompt, headPrompt, headPromptType }) {
+  if (headPrompt === undefined && headPromptType === 'file') return;
+  await rm(join(repo, '.codjiflo'), { recursive: true, force: true });
+  if (headPromptType === 'ancestor-symlink') {
+    await symlink(join(temp, 'host'), join(repo, '.codjiflo'));
+    return;
+  }
+  await mkdir(join(repo, '.codjiflo'));
+  if (headPromptType === 'parent-symlink') {
+    await symlink(hostPromptDirectory, join(repo, '.codjiflo', 'code-review'));
+    return;
+  }
+  await mkdir(join(repo, '.codjiflo', 'code-review'));
+  if (headPromptType === 'directory') {
+    await mkdir(promptPath);
+    await writeFile(join(promptPath, 'keep'), 'This tracked directory cannot be read as a prompt.');
+    return;
+  }
+  if (headPromptType === 'symlink') {
+    await symlink(hostPrompt, promptPath);
+    return;
+  }
+  if (headPromptType === 'file' && headPrompt !== null) await writeFile(promptPath, headPrompt);
+}
+
 export async function fixture({ filename = 'a.js', previousFilename = filename, oldLine = 'old', newLine = 'new', basePrompt, headPrompt, headPromptType = 'file' } = {}) {
   if (!['file', 'directory', 'symlink', 'parent-symlink', 'ancestor-symlink', 'submodule'].includes(headPromptType)) throw new Error(`Unknown head prompt type: ${headPromptType}`);
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-fixture-'));
@@ -34,27 +59,7 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   await mkdir(hostPromptDirectory, { recursive: true });
   const hostPrompt = join(hostPromptDirectory, 'PROMPT.md');
   await writeFile(hostPrompt, hostSentinel);
-  if (headPrompt !== undefined || headPromptType !== 'file') {
-    await rm(join(repo, '.codjiflo'), { recursive: true, force: true });
-    if (headPromptType === 'ancestor-symlink') {
-      await symlink(join(temp, 'host'), join(repo, '.codjiflo'));
-    } else {
-      await mkdir(join(repo, '.codjiflo'), { recursive: true });
-      if (headPromptType === 'parent-symlink') {
-        await symlink(hostPromptDirectory, join(repo, '.codjiflo', 'code-review'));
-      } else {
-        await mkdir(join(repo, '.codjiflo', 'code-review'));
-        if (headPromptType === 'directory') {
-          await mkdir(promptPath);
-          await writeFile(join(promptPath, 'keep'), 'This tracked directory cannot be read as a prompt.');
-        } else if (headPromptType === 'symlink') {
-          await symlink(hostPrompt, promptPath);
-        } else if (headPromptType === 'file' && headPrompt !== null) {
-          await writeFile(promptPath, headPrompt);
-        }
-      }
-    }
-  }
+  await setHeadPrompt({ repo, temp, promptPath, hostPromptDirectory, hostPrompt, headPrompt, headPromptType });
   await git(['add', '.']);
   if (headPromptType === 'submodule') await git(['update-index', '--add', '--cacheinfo', `160000,${base},.codjiflo/code-review/PROMPT.md`]);
   await git(['commit', '-m', 'second']);
@@ -62,7 +67,7 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const diffArgs = ['diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', base, head];
   const localDiff = await git(['-c', 'core.quotePath=false', ...diffArgs]);
   const fileDiff = await git(['-c', 'core.quotePath=false', ...diffArgs, '--', previousFilename, filename]);
-  const patch = fileDiff.slice(fileDiff.indexOf('@@ ')).trimEnd();
+  const patch = fileDiff.slice(fileDiff.indexOf('@@ ')).replace(/\n$/, '');
   const files = [{ filename, ...(filename !== previousFilename ? { previous_filename: previousFilename } : {}), status: filename === previousFilename ? 'modified' : 'renamed', additions: patch.split('\n').filter(line => line.startsWith('+')).length, deletions: patch.split('\n').filter(line => line.startsWith('-')).length, patch }];
   // Keep the primary file's synthetic rename/patch behavior used by coordinate tests.
   // Supplemental paths must still appear in the authoritative full-PR API metadata.
@@ -74,7 +79,7 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
     if (newPath === filename || oldPath === previousFilename) continue;
     const fileDiff = await git(['-c', 'core.quotePath=false', ...diffArgs, '--', oldPath, ...(newPath === oldPath ? [] : [newPath])]);
     const patchStart = fileDiff.indexOf('@@ ');
-    const patch = patchStart === -1 ? '' : fileDiff.slice(patchStart).trimEnd();
+    const patch = patchStart === -1 ? '' : fileDiff.slice(patchStart).replace(/\n$/, '');
     files.push({
       filename: newPath,
       ...(/^R/.test(status) ? { previous_filename: oldPath } : {}),

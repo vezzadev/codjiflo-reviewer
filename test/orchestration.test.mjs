@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { prompt } from '../src/prompt.mjs';
+import { filesFromApi, inlineComment } from '../src/diff.mjs';
 import { fixture } from './fixture.mjs';
 
 const verdicts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
@@ -125,6 +126,59 @@ test('fixture API metadata includes prompt additions, modifications and deletion
       const metadataMarker = 'Authoritative current PR file metadata and patches for location mapping ONLY (LEFT is the PR old snapshot, not the incremental old snapshot):\n';
       const apiPatches = JSON.parse(captured.slice(captured.indexOf(metadataMarker) + metadataMarker.length));
       assert.ok(apiPatches.some(patch => patch.filename === file.filename && patch.patch === file.patch));
+    } finally { await f.close(); }
+  });
+});
+
+test('fixture preserves trailing blank prompt context as valid API anchors', async () => {
+  const f = await fixture({ basePrompt: 'old\n\n', headPrompt: 'new\n\n' });
+  try {
+    const path = '.codjiflo/code-review/PROMPT.md';
+    const metadata = f.state.files.find(file => file.filename === path);
+    assert.ok(metadata.patch.endsWith('\n '));
+    const files = filesFromApi(f.state.files);
+    assert.equal(files.get(path).patch, metadata.patch);
+    for (const [side, line] of [['LEFT', 1], ['RIGHT', 1], ['RIGHT', 2]]) {
+      const comment = inlineComment({ path, side, start_line: line, line, priority: 'P2', title: 'Fixture anchor', body: 'Valid API location.' }, files);
+      assert.equal(comment.side, side);
+      assert.equal(comment.line, line);
+    }
+    await f.run({ full: true });
+    assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+  } finally { await f.close(); }
+});
+
+test('supplemental instruction identity governs successful incremental baselines', async t => {
+  for (const [scenario, options, changed] of [
+    ['content changed', { basePrompt: 'Original instructions.\n', headPrompt: 'Changed instructions.\n' }, true],
+    ['added', { headPrompt: 'Added instructions.\n' }, true],
+    ['deleted', { basePrompt: 'Deleted instructions.\n', headPrompt: null }, true],
+    ['unchanged blob', { basePrompt: 'Same instructions.\n', headPrompt: 'Same instructions.\n' }, false],
+    ['absent at both heads', {}, false],
+  ]) await t.test(scenario, async () => {
+    const f = await fixture(options);
+    try {
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
+      await f.run();
+      const result = verdicts(f)[0].body;
+      const captured = await readFile(f.capture, 'utf8');
+      const scopeDiff = captured.slice(captured.indexOf('Review-scope unified diff follows:'), captured.indexOf('Authoritative current PR file metadata'));
+      assert.equal(result.event, 'APPROVE');
+      if (changed) {
+        assert.match(result.body, /Scope: \*\*full\*\* \(repository supplemental instructions changed since the previous approval\)/);
+        assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
+        assert.ok(scopeDiff.includes('-old\n'));
+        assert.ok(scopeDiff.includes('+new\n'));
+        assert.ok(scopeDiff.includes('-second\n'));
+        assert.ok(scopeDiff.includes('+changed\n'));
+      } else {
+        assert.match(result.body, /Scope: \*\*incremental\*\* \(previous approval is an ancestor on the same base\)/);
+        assert.ok(captured.includes(`git diff ${f.previous} ${f.head}`));
+        assert.ok(!scopeDiff.includes('-old\n'));
+        assert.ok(!scopeDiff.includes('+new\n'));
+        assert.ok(scopeDiff.includes('-second\n'));
+        assert.ok(scopeDiff.includes('+changed\n'));
+      }
     } finally { await f.close(); }
   });
 });

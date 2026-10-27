@@ -41,6 +41,8 @@ The high and xhigh instructions are faithfully adapted from the e-code-review sk
 
 Optionally commit UTF-8 instructions to `.codjiflo/code-review/PROMPT.md` in the repository being reviewed. Codjiflo loads only a regular Git blob directly from the exact inspected **current PR head** tree, not the worktree, default branch, or bot checkout, and includes it before the diff in the shared prompt for both Codex and Claude (SDK and CLI fallback). These instructions supplement, rather than replace, the built-in review recipe, scope, structured output, and comment-location requirements. A missing path leaves the prompt unchanged. Symlinks at the file or any ancestor, directories in place of the file, submodules anywhere along the path, and other read errors fail the review before a provider is invoked.
 
+Incremental reviews reuse a successful approval only when the optional supplemental prompt has the same regular Git blob identity at the approved head and the current PR head (or is absent at both). Adding, deleting, or changing its content invalidates that baseline and forces a full PR review, including earlier source edits, under the current instructions. Unchanged instructions retain incremental scope when the other baseline requirements are met.
+
 ## Install in a consumer repository
 
 1. Make sure this public repository's Actions workflows are usable by your organization. Choose a trusted Codjiflo commit SHA. Copy [`examples/codjiflo-reviewer.yml`](examples/codjiflo-reviewer.yml) to `.github/workflows/codjiflo-reviewer.yml` on your repository's **default branch**. Replace both `@main` and `bot-ref: main` with the **same** trusted commit SHA. `main` is usable for development but follows future source changes.
