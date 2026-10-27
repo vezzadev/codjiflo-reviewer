@@ -21,7 +21,7 @@ test('real CLI orchestration streams and publishes pinned native ranged changes 
     assert.equal(result.comments[1].start_side, 'RIGHT');
     assert.equal(result.comments[1].start_line, 1);
     assert.equal(result.comments[1].line, 2);
-    assert.match(result.body, /codjiflo-reviewer:v2/);
+    assert.match(result.body, /codjiflo-reviewer:v3/);
   } finally { await f.close(); }
 });
 
@@ -45,29 +45,47 @@ test('Claude structured stream produces native approval', async () => {
   } finally { await f.close(); }
 });
 
-test('repository prompt uses UTF-8 instructions from PR head for both providers', async t => {
-  for (const preset of ['codex', 'claude']) await t.test(preset, async () => {
-    const instructions = 'Check résumé parsing and preserve café identifiers.\nFocus on concurrency.';
+test('repository prompt replaces the default methodology with PR-head UTF-8 or empty text for both providers', async t => {
+  for (const preset of ['codex', 'claude']) for (const instructions of ['Check résumé parsing and preserve café identifiers.\nFocus on concurrency.', '']) await t.test(`${preset}: ${instructions === '' ? 'empty' : 'UTF-8'}`, async () => {
     const f = await fixture({ basePrompt: 'Old base instructions.', headPrompt: instructions });
     try {
       // Neither the base revision nor uncommitted content in the clone source may win.
       await writeFile(join(f.repo, '.codjiflo', 'code-review', 'PROMPT.md'), 'Uncommitted source instructions.');
       await f.run({ preset, full: true });
       const captured = await readFile(f.capture, 'utf8');
-      const section = captured.slice(captured.indexOf('Repository supplemental instructions'), captured.indexOf('Review-scope unified diff follows:'));
+      const section = captured.slice(captured.indexOf('Repository review instructions'), captured.indexOf('Review-scope unified diff follows:'));
       assert.ok(section.includes(instructions));
       assert.ok(!section.includes('Old base instructions.'));
       assert.ok(!section.includes('Uncommitted source instructions.'));
-      assert.match(section, /supplement.*do not override/);
-      assert.match(section, /BEGIN REPOSITORY SUPPLEMENTAL INSTRUCTIONS/);
-      assert.match(section, /END REPOSITORY SUPPLEMENTAL INSTRUCTIONS/);
-      assert.match(captured, /Apply this adapted e-code-review xhigh recipe/);
+      assert.match(section, /replacing the default methodology/);
+      assert.ok(section.includes(`--- BEGIN REPOSITORY REVIEW INSTRUCTIONS ---\n${instructions}\n--- END REPOSITORY REVIEW INSTRUCTIONS ---`));
+      for (const defaultText of ['e-code-review', 'independent angles', 'Target at least', 'Cap final findings', 'Conventions:', 'Do not run a verifier', 'do NOT spawn subagents', 'ReportFindings']) assert.ok(!captured.includes(defaultText), defaultText);
+      assert.match(captured, /Review only; never edit repository files or publish to GitHub/);
       assert.match(captured, /exactly one final JSON object matching the supplied schema/);
       assert.match(captured, /All native comment locations must use the authoritative CURRENT PR API patches/);
       assert.ok(captured.includes(`PR head ${f.head}`));
       assert.equal(verdicts(f)[0].body.event, 'APPROVE');
     } finally { await f.close(); }
   });
+});
+
+test('repository replacements including empty text do not inherit default findings caps', async t => {
+  for (const preset of ['sol-medium', 'opus-medium', 'sol-xhigh', 'opus-xhigh']) {
+    for (const headPrompt of [undefined, 'Report every concrete defect.', '']) await t.test(`${preset}: ${headPrompt === undefined ? 'default' : headPrompt === '' ? 'empty' : 'custom'}`, async () => {
+      const f = await fixture({ headPrompt });
+      try {
+        if (headPrompt === undefined) {
+          await assert.rejects(f.run({ preset, mode: 'many-findings' }), /Malformed review output/);
+          assert.equal(verdicts(f).length, 0);
+        } else {
+          await f.run({ preset, mode: 'many-findings' });
+          const result = verdicts(f)[0].body;
+          assert.equal(result.event, 'REQUEST_CHANGES');
+          assert.equal(result.comments.length, 16);
+        }
+      } finally { await f.close(); }
+    });
+  }
 });
 
 test('missing repository prompt preserves the default prompt, including after deletion at PR head', async t => {
@@ -79,7 +97,11 @@ test('missing repository prompt preserves the default prompt, including after de
       assert.equal(await readFile(f.capture, 'utf8'), prompt({
         level: 'xhigh', mode: 'full', base: f.base, head: f.head, scope: f.base, diff: f.localDiff, currentDiff,
       }));
-      assert.ok(!(await readFile(f.capture, 'utf8')).includes('Repository supplemental instructions'));
+      const captured = await readFile(f.capture, 'utf8');
+      assert.ok(!captured.includes('Repository review instructions'));
+      assert.match(captured, /Apply this adapted e-code-review xhigh recipe/);
+      assert.match(captured, /10 independent angles IN SEQUENCE/);
+      assert.match(captured, /Cap final findings at 15 most severe/);
       assert.equal(verdicts(f)[0].body.event, 'APPROVE');
     } finally { await f.close(); }
   });
@@ -148,7 +170,7 @@ test('fixture preserves trailing blank prompt context as valid API anchors', asy
   } finally { await f.close(); }
 });
 
-test('supplemental instruction identity governs successful incremental baselines', async t => {
+test('repository instruction identity governs successful incremental baselines', async t => {
   for (const [scenario, options, changed] of [
     ['content changed', { basePrompt: 'Original instructions.\n', headPrompt: 'Changed instructions.\n' }, true],
     ['added', { headPrompt: 'Added instructions.\n' }, true],
@@ -158,14 +180,14 @@ test('supplemental instruction identity governs successful incremental baselines
   ]) await t.test(scenario, async () => {
     const f = await fixture(options);
     try {
-      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
       await f.run();
       const result = verdicts(f)[0].body;
       const captured = await readFile(f.capture, 'utf8');
       const scopeDiff = captured.slice(captured.indexOf('Review-scope unified diff follows:'), captured.indexOf('Authoritative current PR file metadata'));
       assert.equal(result.event, 'APPROVE');
       if (changed) {
-        assert.match(result.body, /Scope: \*\*full\*\* \(repository supplemental instructions changed since the previous approval\)/);
+        assert.match(result.body, /Scope: \*\*full\*\* \(repository review instructions changed since the previous approval\)/);
         assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
         assert.ok(scopeDiff.includes('-old\n'));
         assert.ok(scopeDiff.includes('+new\n'));
@@ -183,7 +205,7 @@ test('supplemental instruction identity governs successful incremental baselines
   });
 });
 
-test('legacy approvals cannot reuse an unchanged preexisting supplemental prompt', async t => {
+test('legacy approvals cannot reuse an unchanged preexisting repository prompt', async t => {
   for (const version of ['v1', 'v2']) await t.test(version, async () => {
     const instructions = 'Check all source edits against these repository instructions.\n';
     const f = await fixture({ basePrompt: instructions, headPrompt: instructions });
@@ -198,18 +220,11 @@ test('legacy approvals cannot reuse an unchanged preexisting supplemental prompt
       const scopeDiff = captured.slice(captured.indexOf('Review-scope unified diff follows:'), captured.indexOf('Authoritative current PR file metadata'));
       assert.equal(result.event, 'APPROVE');
       assert.ok(captured.includes(instructions));
-      assert.match(result.body, /codjiflo-reviewer:v2 /);
-      if (version === 'v1') {
-        assert.match(result.body, /Scope: \*\*full\*\* \(no usable successful baseline\)/);
-        assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
-        assert.ok(scopeDiff.includes('-old\n'));
-        assert.ok(scopeDiff.includes('+new\n'));
-      } else {
-        assert.match(result.body, /Scope: \*\*incremental\*\* \(previous approval is an ancestor on the same base\)/);
-        assert.ok(captured.includes(`git diff ${f.previous} ${f.head}`));
-        assert.ok(!scopeDiff.includes('-old\n'));
-        assert.ok(!scopeDiff.includes('+new\n'));
-      }
+      assert.match(result.body, /codjiflo-reviewer:v3 /);
+      assert.match(result.body, /Scope: \*\*full\*\* \(no usable successful baseline\)/);
+      assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
+      assert.ok(scopeDiff.includes('-old\n'));
+      assert.ok(scopeDiff.includes('+new\n'));
       assert.ok(scopeDiff.includes('-second\n'));
       assert.ok(scopeDiff.includes('+changed\n'));
     } finally { await f.close(); }
@@ -244,14 +259,14 @@ test('local aliases and mixed-case canonical names retain canonical publication 
   for (const [input, preset] of [['CoDeX', 'sol-xhigh'], ['CLAUDE', 'opus-xhigh'], ['SOL-XHIGH', 'sol-xhigh'], ['OpUs-XhIgH', 'opus-xhigh']]) await t.test(input, async () => {
     const f = await fixture();
     try {
-      f.state.reviews = [{ user: { type: 'Bot' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head: f.previous, base: f.base, preset })} -->` }];
+      f.state.reviews = [{ user: { type: 'Bot' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset })} -->` }];
       await f.run({ preset: input });
       const result = verdicts(f)[0].body;
       assert.equal(result.event, 'APPROVE');
       assert.match(f.state.posts[0].body.body, new RegExp(`starting \\*\\*${preset}\\*\\*`));
       assert.ok(result.body.startsWith(`## Codjiflo Reviewer — ${preset}\n`));
       assert.match(result.body, /Scope: \*\*incremental\*\*/);
-      const marker = JSON.parse(/<!-- codjiflo-reviewer:v2 (\{[^\n]+\}) -->/.exec(result.body)[1]);
+      const marker = JSON.parse(/<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/.exec(result.body)[1]);
       assert.deepEqual(marker, { head: f.head, base: f.base, preset });
     } finally { await f.close(); }
   });
@@ -282,7 +297,7 @@ test('ancestor approval, explicit full, PAT blockers, same head and changed pres
     try {
       const prior = scenario === 'rebase' ? 'f'.repeat(40) : scenario === 'same-head' ? f.head : f.previous;
       const base = scenario === 'base-change' ? 'c'.repeat(40) : f.base;
-      const approved = { user: { type: 'Bot' }, state: 'APPROVED', commit_id: prior, body: `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head: prior, base, preset: 'sol-xhigh' })} -->` };
+      const approved = { user: { type: 'Bot' }, state: 'APPROVED', commit_id: prior, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: prior, base, preset: 'sol-xhigh' })} -->` };
       f.state.reviews = [approved, ...(scenario === 'blockers' ? [{ ...approved, user: { type: 'User' }, state: 'CHANGES_REQUESTED' }] : [])];
       await f.run({ full: scenario === 'full', preset: scenario === 'preset-change' ? 'opus-xhigh' : 'sol-xhigh' });
       assert.match(verdicts(f)[0].body.body, new RegExp(`Scope: \\*\\*${scenario === 'incremental' ? 'incremental' : 'full'}\\*\\*`));
@@ -295,7 +310,7 @@ test('full and incremental native coordinates use API patches rather than local 
   for (const full of [false, true]) await t.test(String(full), async () => {
     const f = await fixture();
     try {
-      f.state.reviews = [{ user: { type: 'User' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
+      f.state.reviews = [{ user: { type: 'User' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
       f.state.files[0].patch = '@@ -20,2 +20,2 @@\n-old\n-second\n+new\n+changed';
       await f.run({ mode: 'findings', full });
       const result = verdicts(f)[0].body;

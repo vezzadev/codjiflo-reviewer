@@ -24,7 +24,7 @@ Bare mentions, casual mentions, unknown shorthand profiles, and mentions inside 
 
 ## Presets
 
-| Preset | Provider/model default | Model effort | Embedded e-code-review recipe |
+| Preset | Provider/model default | Model effort | Default e-code-review recipe |
 | --- | --- | --- | --- |
 | `sol-xhigh` (default; alias `codex`) | Codex / `gpt-6.1-sol` | high | xhigh |
 | `opus-xhigh` (alias `claude`) | Claude / `opus` | high | xhigh |
@@ -35,13 +35,13 @@ Preset names and aliases are case-insensitive in mentions and local `--preset` a
 
 `CODJIFLO_SOL_MODEL` and `CODJIFLO_OPUS_MODEL` override model IDs. There is no automatic substitution or cross-provider fallback: configure a model available to your account. Claude's `opus` is its supported Opus alias; use a full model ID to pin a release.
 
-The high and xhigh instructions are faithfully adapted from the e-code-review skill: eight/ten sequential independent angles (no subagent fanout), deduplication without verification, severity ordering, a gap sweep for xhigh, and caps of ten/fifteen findings. They are embedded in **every provider prompt**, not dependent on installing the skill on the runner. Structured JSON/native GitHub reviews replace ReportFindings; the unrelated native-observer pilot and later fix reporting are omitted. See `src/prompt.mjs` for the complete instructions.
+When `.codjiflo/code-review/PROMPT.md` is absent, the default high and xhigh methodology uses eight/ten sequential independent angles (no subagent fanout), deduplication without verification, severity ordering, a gap sweep for xhigh, and caps of ten/fifteen findings. These instructions are adapted from the e-code-review skill and embedded for both providers; no skill installation is required on the runner. Structured JSON/native GitHub reviews replace ReportFindings; the unrelated native-observer pilot and later fix reporting are omitted. See `src/prompt.mjs` for the complete instructions.
 
 ### Repository-specific review instructions
 
-Optionally commit UTF-8 instructions to `.codjiflo/code-review/PROMPT.md` in the repository being reviewed. Codjiflo loads only a regular Git blob directly from the exact inspected **current PR head** tree, not the worktree, default branch, or bot checkout, and includes it before the diff in the shared prompt for both Codex and Claude (SDK and CLI fallback). These instructions supplement, rather than replace, the built-in review recipe, scope, structured output, and comment-location requirements. A missing path leaves the prompt unchanged. Symlinks at the file or any ancestor, directories in place of the file, submodules anywhere along the path, and other read errors fail the review before a provider is invoked.
+Optionally commit UTF-8 instructions to `.codjiflo/code-review/PROMPT.md` in the repository being reviewed. Codjiflo loads only a regular Git blob directly from the exact inspected **current PR head** tree, not the worktree, default branch, or bot checkout. Its contents **replace the default methodology, even when empty**, for both Codex and Claude (SDK and CLI fallback). Shared review-only, review-scope, JSON verdict, and native GitHub comment-anchor requirements remain; built-in angles, finding quotas, reporting conventions, and verifier restrictions do not apply to custom methodology. Only an absent file selects the default methodology. Symlinks at the file or any ancestor, directories in place of the file, submodules anywhere along the path, and other read errors fail the review before a provider is invoked.
 
-Incremental reviews reuse a successful approval only when the optional supplemental prompt has the same regular Git blob identity at the approved head and the current PR head (or is absent at both). Adding, deleting, or changing its content invalidates that baseline and forces a full PR review, including earlier source edits, under the current instructions. Unchanged instructions retain incremental scope when the other baseline requirements are met.
+Incremental reviews reuse a successful approval only when the optional custom prompt has the same regular Git blob identity at the approved head and the current PR head (or is absent at both). Adding, deleting, or changing its content invalidates that baseline and forces a full PR review, including earlier source edits, under the current instructions. Unchanged instructions retain incremental scope when the other baseline requirements are met.
 
 ## Install in a consumer repository
 
@@ -123,12 +123,12 @@ Each self-hosted runner process executes one job at a time. To allow more simult
 Incremental is the default. Each successful native review includes a machine-readable marker:
 
 ```html
-<!-- codjiflo-reviewer:v2 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-xhigh"} -->
+<!-- codjiflo-reviewer:v3 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-xhigh"} -->
 ```
 
 The most recent current-version marked review must be an approval whose marker matches its GitHub `commit_id`, current base, and requested preset. Both App/bot and PAT-authored reviews participate. Its head must be an available ancestor of the new head. Then only changes since that approval are reviewed. Missing baseline, changed base or preset, rewritten/unavailable history, a previous changes-requested verdict, or a same-head rerun forces a **full** review. Earlier blocking findings are revisited rather than discarded. `full` explicitly requests the merge-base-to-head diff. Full Git history is fetched as needed.
 
-Upgrading to supplemental repository instruction support invalidates all legacy `v1` review markers: only `v2` markers qualify as incremental baselines. Unsupported versions are ignored, not migrated or treated as errors. Without a usable `v2` approval, the next review covers the full PR under the current instructions, even if `.codjiflo/code-review/PROMPT.md` already existed unchanged at both heads. A new `v2` approval can establish an incremental baseline for subsequent changes.
+Replacement semantics invalidate all legacy `v1` and `v2` review markers: only `v3` markers qualify as incremental baselines. Unsupported versions are ignored, not migrated or treated as errors. Without a usable `v3` approval, the next review covers the full PR under the current instructions, even if `.codjiflo/code-review/PROMPT.md` already existed unchanged at both heads. A new `v3` approval can establish an incremental baseline for subsequent changes.
 
 Inline coordinates come from GitHub's paginated PR file patches, including the current filename for renamed files. LEFT endpoints must be deleted lines; RIGHT endpoints may be added or unchanged context lines. Local Git diffs supply review scope, not publication coordinates. Missing or truncated patches provide no valid anchors: findings on them go into the review summary and require changes. PRs exceeding GitHub's 3,000-file metadata limit fail without a verdict.
 
