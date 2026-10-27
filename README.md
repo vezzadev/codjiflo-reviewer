@@ -37,6 +37,10 @@ Preset names and aliases are case-insensitive in mentions and local `--preset` a
 
 The high and xhigh instructions are faithfully adapted from the e-code-review skill: eight/ten sequential independent angles (no subagent fanout), deduplication without verification, severity ordering, a gap sweep for xhigh, and caps of ten/fifteen findings. They are embedded in **every provider prompt**, not dependent on installing the skill on the runner. Structured JSON/native GitHub reviews replace ReportFindings; the unrelated native-observer pilot and later fix reporting are omitted. See `src/prompt.mjs` for the complete instructions.
 
+### Repository-specific review instructions
+
+Optionally commit UTF-8 instructions to `.codjiflo/code-review/PROMPT.md` in the repository being reviewed. Codjiflo reads this file from the checked-out **current PR head**, not the default branch or bot checkout, and includes it before the diff in the shared prompt for both Codex and Claude (SDK and CLI fallback). These instructions supplement, rather than replace, the built-in review recipe, scope, structured output, and comment-location requirements. A missing file leaves the prompt unchanged; other read errors fail the review.
+
 ## Install in a consumer repository
 
 1. Make sure this public repository's Actions workflows are usable by your organization. Choose a trusted Codjiflo commit SHA. Copy [`examples/codjiflo-reviewer.yml`](examples/codjiflo-reviewer.yml) to `.github/workflows/codjiflo-reviewer.yml` on your repository's **default branch**. Replace both `@main` and `bot-ref: main` with the **same** trusted commit SHA. `main` is usable for development but follows future source changes.

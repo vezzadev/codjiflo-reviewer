@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { prompt } from '../src/prompt.mjs';
 import { fixture } from './fixture.mjs';
 
 const verdicts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
@@ -39,6 +41,56 @@ test('Claude structured stream produces native approval', async () => {
   try {
     await f.run({ preset: 'opus-medium' });
     assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+  } finally { await f.close(); }
+});
+
+test('repository prompt uses UTF-8 instructions from PR head for both providers', async t => {
+  for (const preset of ['codex', 'claude']) await t.test(preset, async () => {
+    const instructions = 'Check résumé parsing and preserve café identifiers.\nFocus on concurrency.';
+    const f = await fixture({ basePrompt: 'Old base instructions.', headPrompt: instructions });
+    try {
+      // Neither the base revision nor uncommitted content in the clone source may win.
+      await writeFile(join(f.repo, '.codjiflo', 'code-review', 'PROMPT.md'), 'Uncommitted source instructions.');
+      await f.run({ preset, full: true });
+      const captured = await readFile(f.capture, 'utf8');
+      const section = captured.slice(captured.indexOf('Repository supplemental instructions'), captured.indexOf('Review-scope unified diff follows:'));
+      assert.ok(section.includes(instructions));
+      assert.ok(!section.includes('Old base instructions.'));
+      assert.ok(!section.includes('Uncommitted source instructions.'));
+      assert.match(section, /supplement.*do not override/);
+      assert.match(section, /BEGIN REPOSITORY SUPPLEMENTAL INSTRUCTIONS/);
+      assert.match(section, /END REPOSITORY SUPPLEMENTAL INSTRUCTIONS/);
+      assert.match(captured, /Apply this adapted e-code-review xhigh recipe/);
+      assert.match(captured, /exactly one final JSON object matching the supplied schema/);
+      assert.match(captured, /All native comment locations must use the authoritative CURRENT PR API patches/);
+      assert.ok(captured.includes(`PR head ${f.head}`));
+      assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+    } finally { await f.close(); }
+  });
+});
+
+test('missing repository prompt preserves the default prompt, including after deletion at PR head', async t => {
+  for (const options of [{}, { basePrompt: 'Deleted instructions.', headPrompt: null }]) await t.test(JSON.stringify(options), async () => {
+    const f = await fixture(options);
+    try {
+      await f.run({ full: true });
+      const currentDiff = JSON.stringify(f.state.files.map(file => ({ filename: file.filename, patch: file.patch })), null, 2);
+      assert.equal(await readFile(f.capture, 'utf8'), prompt({
+        level: 'xhigh', mode: 'full', base: f.base, head: f.head, scope: f.base, diff: f.localDiff, currentDiff,
+      }));
+      assert.ok(!(await readFile(f.capture, 'utf8')).includes('Repository supplemental instructions'));
+      assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+    } finally { await f.close(); }
+  });
+});
+
+test('repository prompt read errors other than ENOENT fail before provider launch or publication', async () => {
+  const f = await fixture({ promptDirectory: true });
+  try {
+    await assert.rejects(f.run(), /EISDIR/);
+    assert.equal(verdicts(f).length, 0);
+    await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+    assert.match(f.state.posts.at(-1).body.body, /failed/);
   } finally { await f.close(); }
 });
 

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PRESETS, isApproved } from './commands.mjs';
@@ -76,7 +76,10 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const files = filesFromApi(metadata);
     const diff = await git(['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', scope, head]);
     const currentDiff = JSON.stringify([...files.values()].map(file => ({ filename: file.path, previous_filename: file.previousPath, patch: file.patch })), null, 2);
-    const result = await reviewer({ preset, prompt: prompt({ level: preset.level, mode, base, head, scope, diff, currentDiff }), cwd, temp, env });
+    let customInstructions;
+    try { customInstructions = await readFile(join(cwd, '.codjiflo', 'code-review', 'PROMPT.md'), 'utf8'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const result = await reviewer({ preset, prompt: prompt({ level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions }), cwd, temp, env });
     const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10);
     // Read immediately before publication. commit_id also pins the native review to the inspected head.
     const latest = await github.request(pullPath);

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { runProcess } from '../src/runner.mjs';
 
-export async function fixture({ filename = 'a.js', previousFilename = filename, oldLine = 'old', newLine = 'new' } = {}) {
+export async function fixture({ filename = 'a.js', previousFilename = filename, oldLine = 'old', newLine = 'new', basePrompt, headPrompt, promptDirectory = false } = {}) {
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-fixture-'));
   const repo = join(temp, 'repo');
   await mkdir(repo);
@@ -16,6 +16,11 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   await git(['init', '-b', 'main']);
   const tail = 'context\n'.repeat(8);
   await writeFile(join(repo, previousFilename), `${oldLine}\nsecond\n${tail}`);
+  const promptPath = join(repo, '.codjiflo', 'code-review', 'PROMPT.md');
+  if (basePrompt !== undefined) {
+    await mkdir(join(repo, '.codjiflo', 'code-review'), { recursive: true });
+    await writeFile(promptPath, basePrompt);
+  }
   await git(['add', '.']); await git(['commit', '-m', 'base']);
   const base = (await git(['rev-parse', 'HEAD'])).trim();
   if (filename !== previousFilename) await git(['mv', previousFilename, filename]);
@@ -23,11 +28,20 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   await git(['commit', '-am', 'first']);
   const previous = (await git(['rev-parse', 'HEAD'])).trim();
   await writeFile(join(repo, filename), `${newLine}\nchanged\n${tail}`);
-  await git(['commit', '-am', 'second']);
+  if (headPrompt !== undefined || promptDirectory) {
+    await rm(promptPath, { force: true });
+    await mkdir(join(repo, '.codjiflo', 'code-review'), { recursive: true });
+    if (promptDirectory) {
+      await mkdir(promptPath);
+      await writeFile(join(promptPath, 'keep'), 'This tracked directory cannot be read as a prompt.');
+    } else if (headPrompt !== null) await writeFile(promptPath, headPrompt);
+  }
+  await git(['add', '.']); await git(['commit', '-m', 'second']);
   const head = (await git(['rev-parse', 'HEAD'])).trim();
   const diffArgs = ['diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', base, head];
   const localDiff = await git(['-c', 'core.quotePath=false', ...diffArgs]);
-  const patch = localDiff.slice(localDiff.indexOf('@@ ')).trimEnd();
+  const fileDiff = await git(['-c', 'core.quotePath=false', ...diffArgs, '--', previousFilename, filename]);
+  const patch = fileDiff.slice(fileDiff.indexOf('@@ ')).trimEnd();
   const files = [{ filename, ...(filename !== previousFilename ? { previous_filename: previousFilename } : {}), status: filename === previousFilename ? 'modified' : 'renamed', additions: patch.split('\n').filter(line => line.startsWith('+')).length, deletions: patch.split('\n').filter(line => line.startsWith('-')).length, patch }];
   const fake = join(temp, 'fake-cli.mjs');
   const capture = join(temp, 'prompt.txt');
@@ -83,7 +97,7 @@ if (process.argv.includes('exec')) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const api = `http://127.0.0.1:${server.address().port}`;
-  return { state, head, base, previous, temp, capture, localDiff, env,
+  return { state, head, base, previous, temp, repo, capture, localDiff, env,
     async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
         timeoutMs,
