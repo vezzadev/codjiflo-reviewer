@@ -16,6 +16,11 @@ async function assertStagedInput(f) {
   assert.equal(complete.length, manifest.characters);
   assert.equal(Buffer.byteLength(complete), manifest.bytes);
   assert.ok(complete.length > 1048576, 'original input exceeds the actual Codex turn cap');
+  const sizes = JSON.parse(await readFile(f.capture + '.parts', 'utf8'));
+  assert.equal(sizes.length, manifest.parts);
+  assert.ok(sizes.every(bytes => bytes > 0 && bytes <= 8000), 'every part fits the UTF-8 byte budget, including multibyte input');
+  assert.equal(sizes.reduce((total, bytes) => total + bytes, 0), manifest.bytes);
+  assert.match(input, /output budget of at least 4000 tokens/);
   return complete;
 }
 
@@ -98,4 +103,44 @@ test('Codex failed or missing terminal completion cannot publish a valid-looking
       }
     } finally { await f.close(); }
   });
+});
+
+test('nonzero Codex CLI posts only redacted protocol diagnostics, never tool/model output or stderr', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(f.run({ mode: 'fatal-exit' }), error => {
+      assert.match(error.stdout, /HOST-TOOL-SECRET-do-not-publish/);
+      assert.match(error.stdout, /PRIVATE-MODEL-TEXT-do-not-publish/);
+      assert.match(error.message, /STDERR-HOST-SECRET-do-not-publish/);
+      return true;
+    });
+    assert.equal(verdicts(f).length, 0);
+    const body = f.state.posts.at(-1).body.body;
+    assert.match(body, /Codex review failed \(exit 1\)/);
+    assert.match(body, /Fixture fatal transport error/);
+    assert.match(body, /Fixture safe terminal diagnostic token=\[REDACTED\]/);
+    assert.doesNotMatch(body, /HOST-TOOL-SECRET|PRIVATE-MODEL-TEXT|ERROR-EXTRA-SECRET|STDERR-HOST-SECRET|fixture-token-not-real|verbose CLI stderr/);
+  } finally { await f.close(); }
+});
+
+test('nonzero Codex CLI without protocol diagnostics uses a safe fixed fallback', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(f.run({ mode: 'raw-exit' }));
+    assert.equal(verdicts(f).length, 0);
+    const body = f.state.posts.at(-1).body.body;
+    assert.match(body, /Codex review failed \(exit 7\)\. See process logs for details/);
+    assert.doesNotMatch(body, /RAW-STDOUT-SECRET|STDERR-HOST-SECRET/);
+  } finally { await f.close(); }
+});
+
+test('non-JSON Codex stdout fails closed even with completion and a valid result', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(f.run({ mode: 'non-json-completed' }));
+    assert.equal(verdicts(f).length, 0);
+    const body = f.state.posts.at(-1).body.body;
+    assert.match(body, /invalid JSONL protocol output/);
+    assert.doesNotMatch(body, /BANNER-SECRET/);
+  } finally { await f.close(); }
 });

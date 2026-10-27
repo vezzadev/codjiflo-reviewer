@@ -107,7 +107,13 @@ if (process.argv.includes('exec')) {
  if (manifestLine && process.env.FIXTURE_MODE !== 'incomplete-input') {
   const manifest = JSON.parse(manifestLine.slice('Review input manifest: '.length));
   let complete = '';
-  for (let part = 0; part < manifest.parts; part++) complete += await readFile(join(manifest.directory, part + '.txt'), 'utf8');
+  const sizes = [];
+  for (let part = 0; part < manifest.parts; part++) {
+   const text = await readFile(join(manifest.directory, part + '.txt'), 'utf8');
+   sizes.push(Buffer.byteLength(text));
+   complete += text;
+  }
+  await writeFile(process.env.FIXTURE_CAPTURE + '.parts', JSON.stringify(sizes));
   if (complete.length !== manifest.characters || Buffer.byteLength(complete) !== manifest.bytes) throw new Error('Incomplete staged review input');
   input = complete;
  }
@@ -134,9 +140,18 @@ if (process.argv.includes('exec')) {
  if (['reconnect-recovered', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Reconnecting... 1/5 (stream disconnected before completion)'}));
  if (['fatal-error', 'fatal-exit'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Fixture fatal transport error despite result file'}));
  if (process.env.FIXTURE_MODE === 'fatal-exit') {
-  process.stderr.write('x'.repeat(2200) + '\\nFixture verbose CLI stderr detail\\n');
+  console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',aggregated_output:'HOST-TOOL-SECRET-do-not-publish'}}));
+  console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'PRIVATE-MODEL-TEXT-do-not-publish'}}));
+  console.log(JSON.stringify({type:'error',message:'Fixture safe terminal diagnostic token=' + process.env.GITHUB_TOKEN,aggregated_output:'ERROR-EXTRA-SECRET-do-not-publish'}));
+  process.stderr.write('x'.repeat(2200) + '\\nFixture verbose CLI stderr detail STDERR-HOST-SECRET-do-not-publish\\n');
   process.exit(1);
  }
+ if (process.env.FIXTURE_MODE === 'raw-exit') {
+  console.log('RAW-STDOUT-SECRET-do-not-publish');
+  process.stderr.write('STDERR-HOST-SECRET-do-not-publish'.repeat(100));
+  process.exit(7);
+ }
+ if (process.env.FIXTURE_MODE === 'non-json-completed') console.log('BANNER-SECRET-do-not-publish');
  if (['failed-turn', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.failed',error:{message:'Fixture provider failed despite result file'}}));
  else if (!['missing-completion', 'fatal-error'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 } else {
