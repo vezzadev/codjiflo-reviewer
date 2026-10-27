@@ -108,7 +108,6 @@ const findings = process.env.FIXTURE_MODE === 'findings' ? [
  {path:'a.js',side:'LEFT',start_line:1,line:1,priority:'P1',disposition:'blocking',title:'Old-side bug',body:'Concrete failure scenario.'},
  {path:'a.js',side:'RIGHT',start_line:1,line:2,priority:'P2',disposition:'blocking',title:'Range bug',body:'Concrete failure scenario.'}
 ] : [];
-if (process.env.FIXTURE_MODE === 'many-findings') for (let index = 0; index < 16; index++) findings.push({path:'a.js',side:'RIGHT',start_line:1,line:1,priority:'P2',disposition:'blocking',title:'Finding ' + index,body:'Concrete failure scenario ' + index + '.'});
 const result = {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings};
 if (process.argv.includes('exec')) {
  const output = process.argv[process.argv.indexOf('--output-last-message') + 1];

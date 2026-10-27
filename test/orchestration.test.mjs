@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { review } from '../src/review.mjs';
 import { prompt } from '../src/prompt.mjs';
 import { filesFromApi, inlineComment } from '../src/diff.mjs';
 import { fixture } from './fixture.mjs';
@@ -62,6 +64,7 @@ test('repository prompt replaces the default methodology with PR-head UTF-8 or e
       for (const defaultText of ['e-code-review', 'independent angles', 'Target at least', 'Cap final findings', 'Conventions:', 'Do not run a verifier', 'do NOT spawn subagents', 'ReportFindings']) assert.ok(!captured.includes(defaultText), defaultText);
       assert.match(captured, /Review only; never edit repository files or publish to GitHub/);
       assert.match(captured, /exactly one final JSON object matching the supplied schema/);
+      assert.match(captured, /The output must contain no more than 15 findings/);
       assert.match(captured, /All native comment locations must use the authoritative CURRENT PR API patches/);
       assert.ok(captured.includes(`PR head ${f.head}`));
       assert.equal(verdicts(f)[0].body.event, 'APPROVE');
@@ -69,23 +72,39 @@ test('repository prompt replaces the default methodology with PR-head UTF-8 or e
   });
 });
 
-test('repository replacements including empty text do not inherit default findings caps', async t => {
-  for (const preset of ['sol-medium', 'opus-medium', 'sol-xhigh', 'opus-xhigh']) {
-    for (const headPrompt of [undefined, 'Report every concrete defect.', '']) await t.test(`${preset}: ${headPrompt === undefined ? 'default' : headPrompt === '' ? 'empty' : 'custom'}`, async () => {
-      const f = await fixture({ headPrompt });
-      try {
-        if (headPrompt === undefined) {
-          await assert.rejects(f.run({ preset, mode: 'many-findings' }), /Malformed review output/);
-          assert.equal(verdicts(f).length, 0);
-        } else {
-          await f.run({ preset, mode: 'many-findings' });
-          const result = verdicts(f)[0].body;
-          assert.equal(result.event, 'REQUEST_CHANGES');
-          assert.equal(result.comments.length, 16);
+test('oversized custom review output fails before publication', async () => {
+  const f = await fixture({ headPrompt: 'Report every concrete defect.' });
+  try {
+    const github = {
+      token: 'fixture-token-not-real',
+      async request(path, options) {
+        if (options?.method === 'POST') {
+          f.state.posts.push({ path, body: options.body });
+          return { id: f.state.posts.length };
         }
-      } finally { await f.close(); }
-    });
-  }
+        return { state: 'open', changed_files: f.state.files.length, head: { sha: f.head }, base: { sha: f.base, repo: { clone_url: pathToFileURL(f.repo).href } } };
+      },
+      async list() { return f.state.files; },
+    };
+    await assert.rejects(review({
+      request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'full' },
+      github,
+      env: { ...f.env, CODJIFLO_APPROVED_USERS: 'alice' },
+      reviewer: async ({ prompt: instructions }) => {
+        assert.match(instructions, /Report every concrete defect/);
+        return {
+          verdict: 'REQUEST_CHANGES', summary: 'Oversized review result.',
+          findings: Array.from({ length: 16 }, (_, index) => ({
+            path: `module-${index}.js`, side: 'RIGHT', start_line: 1, line: 1,
+            priority: 'P2', disposition: 'blocking', title: `Defect in module ${index}`,
+            body: `Module ${index} loses its result on cancellation.`,
+          })),
+        };
+      },
+    }), /Malformed review output/);
+    assert.equal(verdicts(f).length, 0);
+    assert.match(f.state.posts.at(-1).body.body, /failed/);
+  } finally { await f.close(); }
 });
 
 test('missing repository prompt preserves the default prompt, including after deletion at PR head', async t => {

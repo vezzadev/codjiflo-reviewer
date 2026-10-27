@@ -100,7 +100,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const currentDiff = JSON.stringify([...files.values()].map(file => ({ filename: file.path, previous_filename: file.previousPath, patch: file.patch })), null, 2);
     const customInstructions = currentPromptBlob === undefined ? undefined : await git(['cat-file', 'blob', currentPromptBlob]);
     const result = await reviewer({ preset, prompt: prompt({ level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions }), cwd, temp, env });
-    const comments = validateResult(result, files, customInstructions === undefined ? (preset.level === 'xhigh' ? 15 : 10) : Infinity);
+    const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10);
     // Read immediately before publication. commit_id also pins the native review to the inspected head.
     const latest = await github.request(pullPath);
     if (latest.head.sha !== head || latest.base.sha !== base || latest.state !== 'open') throw new Error('Pull request changed during review; refusing stale verdict');
