@@ -18,9 +18,9 @@ Comment on an open PR:
 @codjiflo sol-medium incremental
 ```
 
-`@codjiflo` and `@codjiflo-reviewer` are both accepted. The mention must begin a line (leading spaces/tabs are allowed), and the command must stay on that line. Use `@codjiflo review [preset] [full|incremental]` or the shorthand `@codjiflo <preset> [full|incremental]`. Explicit `review` defaults to `sol-xhigh` when no preset is supplied; shorthand requires a known canonical preset or alias immediately after the mention. Commands, presets, aliases, and modes are case-insensitive. After `review`, options are optional and order-independent; both forms allow at most one preset and one mode, and duplicate arguments are rejected. Only newly created issue comments trigger work; editing an existing comment does not.
+`@codjiflo` and `@codjiflo-reviewer` are both accepted. An explicit command mention may appear after ordinary prose (for example, `Owner authorized option (A). @codjiflo codex`), but the command and all its options must stay on the same line. Use `@codjiflo review [preset] [full|incremental]` or the shorthand `@codjiflo <preset> [full|incremental]`. Explicit `review` defaults to `sol-xhigh` when no preset is supplied; shorthand requires a known canonical preset or alias immediately after the mention. Commands, presets, aliases, and modes are case-insensitive. After `review`, options are optional and order-independent; both forms allow at most one preset and one mode, and duplicate arguments are rejected. Only newly created issue comments trigger work; editing an existing comment does not.
 
-Bare mentions, casual mentions, unknown shorthand profiles, and mentions inside a sentence do not trigger a review. Once a command starts with `review` or a known profile, unknown options are rejected rather than ignored. For example, `@codjiflo turbo` is ignored, while `@codjiflo review turbo` and `@codjiflo codex turbo` are invalid. Both forms require the same approved original comment author.
+Bare mentions, casual mentions such as `Thanks @codjiflo for reviewing`, unknown shorthand profiles, and commands inside Markdown blockquotes, fenced code blocks, or inline code do not trigger a review. Once a command starts with `review` or a known profile, unknown options (including trailing prose on that line) are rejected rather than ignored. For example, `@codjiflo turbo` is ignored, while `@codjiflo review turbo` and `@codjiflo codex turbo` are invalid. Both forms require the same approved original comment author; bot-authored comments never trigger reviews.
 
 ## Presets
 
@@ -53,6 +53,8 @@ Incremental reviews reuse a successful approval only when the optional custom pr
 6. Post an allowed mention on an open PR. A kickoff comment links the workflow run. CLI stdout/stderr and SDK events stream live in the review step's logs. A successful run posts a native `APPROVE` or `REQUEST_CHANGES` review with validated single-/multi-line inline findings on the appropriate LEFT/RIGHT sides.
 
 The reusable workflow first runs an authorization gate on `ubuntu-latest`, **before scheduling self-hosted review work**. Both gate and CLI authorize the original `issue_comment.comment.user.login`, not the user who reruns the workflow. The CLI repeats authorization before any API mutation or provider invocation. The event JSON is the source of truth; workflow runs ignore local requester flags. No `workflow_dispatch` path or caller-supplied event login is supported.
+
+Every gate run prints one concise `gate:` decision line and adds it to the Actions job summary. It includes `allowed`, `reason`, the original author, comment ID, and PR number; accepted requests also include provider, canonical preset, and mode. Denials distinguish `not-a-command`, `bot-author`, `not-approved`, `invalid-command`, and `not-a-pr`. An invalid command from an approved author records its decision before failing the gate. Ordinary comments and the bot's own kickoff/failure comments may still create a hosted gate run, but are explicitly denied and never schedule the self-hosted review job.
 
 Bot implementation checkout always comes from trusted `vezzadev/codjiflo-reviewer` at `bot-ref`, **never the PR branch**. The target PR is fetched separately into a disposable Git repository, including fork heads via GitHub's accessible commit objects. It is not built or tested by the orchestrator. The review CLI can read files and use Git to inspect context. This is intended for machines/repositories whose users and content you trust; it is not a sandbox or a malicious-input isolation product.
 
@@ -151,7 +153,7 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 | Invocation | Behavior |
 | --- | --- |
 | `node bin/codjiflo-reviewer.mjs` | Uses `GITHUB_EVENT_PATH` for an issue_comment event |
-| `node bin/codjiflo-reviewer.mjs --gate` | Authorization/command check only; sets `allowed` and `provider` in `GITHUB_OUTPUT`; no token/provider/API calls |
+| `node bin/codjiflo-reviewer.mjs --gate` | Authorization/command check only; logs its decision and writes an Actions summary, sets `allowed` and `provider` in `GITHUB_OUTPUT`; no token/provider/API calls |
 | `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `sol-xhigh` incremental; still requires allowlist |
 | `--preset PRESET` | Select one of the four canonical presets or the `codex`/`claude` aliases |
 | `--full` | Full review in local invocation |

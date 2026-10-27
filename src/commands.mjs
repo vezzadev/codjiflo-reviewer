@@ -17,12 +17,32 @@ export function isApproved(login, configured = '') {
   return typeof login === 'string' && users.includes(login.toLowerCase());
 }
 
+// Ignore Markdown examples while allowing explicit commands after ordinary prose.
+function commandText(body) {
+  let fence;
+  return (body ?? '').split('\n').map(line => {
+    if (/^\s*>/.test(line)) return '';
+    const marker = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && /^\s*$/.test(line.slice(marker[0].length))) fence = undefined;
+      return '';
+    }
+    if (marker) {
+      fence = marker[1];
+      return '';
+    }
+    return line;
+  }).join('\n').replace(/(?<!`)(`+)([\s\S]*?)\1(?!`)/g, match => match.replace(/[^\n]/g, ' '));
+}
+
 export function parseCommand(body) {
-  const mentions = /(?:^|\n)[^\S\n]*@codjiflo(?:-reviewer)?[^\S\n]+(\S+)([^\n]*)/gi;
-  for (const match of (body ?? '').matchAll(mentions)) {
+  const text = commandText(body);
+  const mentions = /(?:^|[^\w@])@codjiflo(?:-reviewer)?[^\S\n]+(\S+)/gi;
+  for (const match of text.matchAll(mentions)) {
     const first = match[1].toLowerCase();
     if (first !== 'review' && !normalizePreset(first)) continue;
-    const words = (first === 'review' ? match[2] : `${first}${match[2]}`).trim().split(/\s+/).filter(Boolean);
+    const rest = text.slice(match.index + match[0].length).split('\n', 1)[0];
+    const words = (first === 'review' ? rest : `${first}${rest}`).trim().split(/\s+/).filter(Boolean);
     let preset = 'sol-xhigh';
     let mode = 'incremental';
     const seen = new Set();
@@ -40,11 +60,25 @@ export function parseCommand(body) {
   return null;
 }
 
-export function requestFromEvent(event, approved) {
-  if (!event.issue?.pull_request || event.action !== 'created') return null;
+export function eventDecision(event, approved) {
+  if (!event.issue?.pull_request) return { reason: 'not-a-pr' };
+  if (event.action !== 'created') return { reason: 'not-a-command' };
+  const author = event.comment?.user;
+  if (author?.type === 'Bot' || /\[bot\]$/i.test(author?.login ?? '')) return { reason: 'bot-author' };
   // The original comment author, never the workflow rerunner, is authoritative.
-  if (!isApproved(event.comment?.user?.login, approved)) return null;
-  const command = parseCommand(event.comment?.body);
-  if (!command) return null;
-  return { ...command, repo: event.repository.full_name, number: event.issue.number, requester: event.comment.user.login };
+  if (!isApproved(author?.login, approved)) return { reason: 'not-approved' };
+  let command;
+  try {
+    command = parseCommand(event.comment?.body);
+  } catch (error) {
+    return { reason: 'invalid-command', error };
+  }
+  if (!command) return { reason: 'not-a-command' };
+  return { reason: 'approved', request: { ...command, repo: event.repository.full_name, number: event.issue.number, requester: author.login } };
+}
+
+export function requestFromEvent(event, approved) {
+  const decision = eventDecision(event, approved);
+  if (decision.error) throw decision.error;
+  return decision.request ?? null;
 }

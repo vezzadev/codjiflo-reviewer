@@ -46,13 +46,19 @@ test('profile shorthand normalizes aliases and canonical names with optional mod
     }
   }
 });
-test('only line-start review or known profile commands trigger reviews', () => {
-  for (const body of [undefined, '', '@codjiflo', '@codjiflo-reviewer', '@codjiflo thanks', '@codjiflo turbo', '@codjiflo sol-high full', '@codjiflo full', 'Thanks @codjiflo codex', '> @codjiflo claude full', '@codjiflo-other codex', '@codjiflo codexish', '@codjiflo\ncodex', '@codjiflo\nreview']) {
+test('explicit commands work after prose while casual mentions and quoted examples stay inert', () => {
+  for (const body of [undefined, '', '@codjiflo', '@codjiflo-reviewer', '@codjiflo thanks', '@codjiflo turbo', '@codjiflo sol-high full', '@codjiflo full', 'Thanks @codjiflo for reviewing', '> @codjiflo claude full', '  > quoted @codjiflo codex', '`@codjiflo codex`', 'Example: ``@codjiflo review``', '```\n@codjiflo codex\n```', '~~~markdown\n@codjiflo review\n~~~', '```text\n@codjiflo codex', '@codjiflo-other codex', 'email@codjiflo codex', '@codjiflo codexish', '@codjiflo\ncodex', '@codjiflo\nreview']) {
     assert.equal(parseCommand(body), null);
   }
   assert.deepEqual(parseCommand('@codjiflo thanks\n@codjiflo codex'), { preset: 'sol-xhigh', mode: 'incremental' });
   assert.deepEqual(parseCommand('@codjiflo review'), { preset: 'sol-xhigh', mode: 'incremental' });
   assert.deepEqual(parseCommand('@codjiflo review FULL'), { preset: 'sol-xhigh', mode: 'full' });
+  for (const body of ['Owner authorized option (A) (...). @codjiflo codex', 'Thanks @codjiflo codex', 'Please @CODJIFLO-REVIEWER review', '```text\n@codjiflo claude\n```\nPlease @codjiflo codex', '> @codjiflo claude\nPlease @codjiflo codex', '`example` @codjiflo codex']) {
+    assert.deepEqual(parseCommand(body), { preset: 'sol-xhigh', mode: 'incremental' });
+  }
+  assert.deepEqual(parseCommand('Owner authorized. @codjiflo claude full'), { preset: 'opus-xhigh', mode: 'full' });
+  assert.deepEqual(parseCommand('Thanks @codjiflo for the earlier pass. Please @codjiflo codex'), { preset: 'sol-xhigh', mode: 'incremental' });
+  assert.throws(() => parseCommand('Please @codjiflo codex turbo'));
 });
 test('shorthand events require an approved original author and a newly created PR comment', () => {
   const event = { action: 'created', sender: { login: 'admin' }, comment: { body: '@codjiflo codex', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1853, pull_request: {} } };
