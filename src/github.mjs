@@ -11,7 +11,7 @@ export class GitHub {
       body: body ? JSON.stringify(body) : undefined,
     });
     const text = await response.text();
-    if (!response.ok) throw new Error(`GitHub ${method} ${path}: ${response.status} ${text}`);
+    if (!response.ok) throw Object.assign(new Error(`GitHub ${method} ${path}: ${response.status} ${text}`), { status: response.status });
     return text ? JSON.parse(text) : null;
   }
   async list(path) {

@@ -136,6 +136,10 @@ Inline coordinates come from GitHub's paginated PR file patches, including the c
 
 Each native review is pinned to the inspected head commit. Before publication the bot rereads the PR and rejects changed head/base or a closed PR. There is an unavoidable GitHub API race between that final read and creating the review; `commit_id` still records the exact inspected commit and never claims to have reviewed a newer one. GitHub's branch protection should dismiss stale approvals if desired.
 
+Validated reviews are saved **before** publication as `codjiflo-result.json` (override with `--output FILE` or `CODJIFLO_RESULT_PATH`). The reusable workflow always uploads that file as the `codjiflo-review-result` artifact, including when GitHub rejects publication. It contains the exact pinned review body and inline comments, not credentials. Successful publication logs the review URL, submitted state, and inspected head; a completed model turn alone is not publication confirmation.
+
+To recover without rerunning the model, download the artifact and run `node bin/codjiflo-reviewer.mjs --publish codjiflo-result.json` with a GitHub token and the original requester in `CODJIFLO_APPROVED_USERS`. Recovery uses the saved repository, PR, preset, head, base, and validated payload. It first reconciles the unique publication identity against all GitHub reviews, returning the existing submitted review if already accepted. Otherwise it refuses changed head/base or a closed PR. Network and HTTP 5xx failures receive up to three POST attempts, with reconciliation before every retry; a failed reconciliation stops rather than risking duplicate reviews. Permanent rejections fail immediately. Unconfirmed publication posts a failure comment when possible and exits nonzero; preserve the artifact for later recovery.
+
 Only authorized review jobs enter the per-PR concurrency group. Unrelated comments and denied requests cannot displace queued reviews. GitHub retains one running and one pending job per group: a newer authorized request replaces an older pending request, without cancelling the running review.
 
 Malformed JSON, missing structured output, provider failure, contradictory approval with blocking findings, or a stale PR produce **no approval**. Invalid/out-of-hunk locations are preserved as summary findings and force `REQUEST_CHANGES`; they are not dropped or assigned invented coordinates. Failures are reported in a comment and Actions logs when the runner and API remain available. Each structured finding carries `disposition: "blocking" | "advisory"`; correctly anchored advisory findings may accompany approval.
@@ -159,6 +163,8 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 | `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `sol-xhigh` incremental; still requires allowlist |
 | `--preset PRESET` | Select one of the four canonical presets or the `codex`/`claude` aliases |
 | `--full` | Full review in local invocation |
+| `--output FILE` | Retain the validated publication payload outside temporary review worktrees |
+| `--publish FILE` | Reconcile/retry a retained review without invoking either provider |
 | `--help` | Print usage |
 
 Local `--requester` is an operator assertion, not remote authentication. Do not expose this CLI as an unauthenticated service. Event-based runs always use the original event author instead.

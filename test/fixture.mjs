@@ -152,7 +152,16 @@ if (process.argv.includes('exec')) {
     response.setHeader('Content-Type', 'application/json');
     if (request.method === 'POST') {
       state.posts.push({ path: request.url, body: parsed });
-      response.end(JSON.stringify({ id: state.posts.length }));
+      if (request.url.endsWith('/reviews')) {
+        if (state.publicationStatus) {
+          response.statusCode = state.publicationStatus;
+          response.end(JSON.stringify({ message: 'Fixture publication rejected' }));
+          return;
+        }
+        const receipt = { id: state.posts.length, commit_id: parsed.commit_id, body: parsed.body, state: parsed.event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED' };
+        state.reviews.push(receipt);
+        response.end(JSON.stringify(receipt));
+      } else response.end(JSON.stringify({ id: state.posts.length }));
     } else if (request.url.startsWith('/repos/org/repo/pulls/1/reviews')) {
       response.end(JSON.stringify(state.reviews));
     } else if (request.url.startsWith('/repos/org/repo/pulls/1/files?')) {
@@ -165,11 +174,11 @@ if (process.argv.includes('exec')) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const api = `http://127.0.0.1:${server.address().port}`;
-  return { state, head, base, previous, temp, repo, capture, localDiff, env, hostSentinel,
+  return { state, api, head, base, previous, temp, repo, capture, localDiff, env, hostSentinel,
     async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
         timeoutMs,
-        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: api, CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
+        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
       });
     },
     async close() { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },

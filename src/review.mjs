@@ -1,10 +1,12 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { PRESETS, isApproved } from './commands.mjs';
 import { filesFromApi, inlineComment } from './diff.mjs';
 import { prompt } from './prompt.mjs';
 import { runProcess, runReviewer } from './runner.mjs';
+import { publishReview, reportPublicationFailure } from './publication.mjs';
 
 export const MARKER = /<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/;
 export function baseline(reviews, base, preset) {
@@ -57,7 +59,7 @@ async function repositoryPromptBlob(git, revision) {
   }
 }
 
-export async function review({ request, github, env = process.env, reviewer = runReviewer }) {
+export async function review({ request, github, env = process.env, reviewer = runReviewer, output = env.CODJIFLO_RESULT_PATH || 'codjiflo-result.json' }) {
   if (!isApproved(request.requester, env.CODJIFLO_APPROVED_USERS)) throw new Error('Review requester is not approved');
   const preset = PRESETS[request.preset];
   if (!Object.hasOwn(PRESETS, request.preset) || !['full', 'incremental'].includes(request.mode)) throw new Error('Unknown preset or review mode');
@@ -107,17 +109,17 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const customInstructions = currentPromptBlob === undefined ? undefined : await git(['cat-file', 'blob', currentPromptBlob]);
     const result = await reviewer({ preset, prompt: prompt({ level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions }), cwd, temp, env });
     const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10);
-    // Read immediately before publication. commit_id also pins the native review to the inspected head.
-    const latest = await github.request(pullPath);
-    if (latest.head.sha !== head || latest.base.sha !== base || latest.state !== 'open') throw new Error('Pull request changed during review; refusing stale verdict');
     const marker = `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head, base, preset: request.preset })} -->`;
-    return await github.request(`${pullPath}/reviews`, { method: 'POST', body: {
+    const envelope = { version: 1, request, head, base, payload: {
       commit_id: head, event: result.verdict,
-      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nScope: **${mode}** (${reason}).\n\n${marker}`,
+      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nScope: **${mode}** (${reason}).\n\n${marker}\n<!-- codjiflo-publication:${randomUUID()} -->`,
       comments,
-    } });
+    } };
+    await writeFile(output, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 });
+    console.log(`Validated review retained at ${output}`);
+    return await publishReview({ envelope, github, env });
   } catch (error) {
-    await github.request(`${root}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer failed; **no successful publication was confirmed**. ${runUrl ? `[Workflow logs](${runUrl})` : 'See process logs.'}\n\n${error.message.slice(0, 1500)}` } }).catch(() => {});
+    await reportPublicationFailure({ request, github, env, error });
     throw error;
   } finally { await rm(temp, { recursive: true, force: true }); }
 }
