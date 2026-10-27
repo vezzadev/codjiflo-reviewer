@@ -35,7 +35,6 @@ export function validateResult(result, files, cap) {
   for (const finding of result.findings) {
     try { comments.push(inlineComment(finding, files)); }
     catch {
-      result.verdict = 'REQUEST_CHANGES';
       result.summary += `\n\n**[${finding.priority}] ${finding.title}** (${finding.path}, unanchorable in the current PR diff)\n\n${finding.body}`;
     }
   }

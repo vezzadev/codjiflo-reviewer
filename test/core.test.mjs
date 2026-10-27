@@ -181,12 +181,12 @@ test('left anchors reject context; ranges require legal endpoints, not deleted i
   assert.equal(inlineComment({ ...finding, side: 'LEFT', start_line: 1, line: 3 }, files).start_line, 1);
 });
 
-test('missing and truncated API patches downgrade unanchorable findings into a changes-request summary', () => {
+test('missing and truncated API patches preserve advisory approval in the review summary', () => {
   for (const patch of [undefined, '@@ -1,2 +1,2 @@\n-old\n+new', '@@ -1 +1 @@\n-old\n+new']) {
     const files = filesFromApi([{ filename: 'a.js', additions: 2, deletions: 2, patch }]);
     const result = { verdict: 'APPROVE', summary: 'Review complete.', findings: [{ ...finding, disposition: 'advisory' }] };
     assert.deepEqual(validateResult(result, files, 10), []);
-    assert.equal(result.verdict, 'REQUEST_CHANGES');
+    assert.equal(result.verdict, 'APPROVE');
     assert.match(result.summary, /Broken result/);
     assert.match(result.summary, /Fails for zero/);
   }
