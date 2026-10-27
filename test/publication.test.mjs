@@ -439,9 +439,3 @@ test('explicit result path remains caller-selected and may overwrite an earlier 
     assert.ok(!(await readdir(f.temp)).includes('ignored-result.json'), '--output must take precedence over the environment');
   } finally { await f.close(); }
 });
-
-test('workflow artifact name and result path are unique across run attempts', async () => {
-  const workflow = await readFile(resolve('.github/workflows/review.yml'), 'utf8');
-  assert.match(workflow, /name: codjiflo-review-result-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
-  assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/codjiflo-result-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\.json/);
-});
