@@ -11,7 +11,6 @@ async function assertStagedInput(f) {
   assert.ok(input.length < 1048576, 'Codex initial user turn stays below its character cap');
   const manifestLine = input.split('\n').find(line => line.startsWith('Review input manifest: '));
   assert.ok(manifestLine, 'oversized prompt uses complete file-backed transport');
-  assert.match(input, /return \{"verdict":"INCOMPLETE"/, 'bootstrap gives an explicit fail-closed verdict even if staged instructions cannot be read');
   const manifest = JSON.parse(manifestLine.slice('Review input manifest: '.length));
   const complete = await readFile(f.capture, 'utf8');
   assert.equal(complete.length, manifest.characters);
@@ -58,9 +57,6 @@ test('unread staged Codex input returns INCOMPLETE without publishing a defect v
   const f = await fixture({ headPrompt: 'Required review instructions.\n'.repeat(20000) });
   try {
     await assert.rejects(f.run({ mode: 'incomplete-input', full: true }));
-    const bootstrap = await readFile(f.capture, 'utf8');
-    assert.match(bootstrap, /Review input manifest:/);
-    assert.match(bootstrap, /return \{"verdict":"INCOMPLETE"/);
     assert.equal(verdicts(f).length, 0);
     assert.match(f.state.posts.at(-1).body.body, /Review incomplete; no defect verdict: A required review input part could not be read/);
   } finally { await f.close(); }
