@@ -71,6 +71,7 @@ jobs:
         with:
           node-version: '22'
       - name: Install Claude Agent SDK
+        id: sdk
         if: needs.gate.outputs.provider == 'claude'
         timeout-minutes: 5
         run: npm ci --omit=dev
@@ -80,18 +81,6 @@ jobs:
         timeout-minutes: 5
         shell: bash
         run: ${{ inputs.prepare-command }}
-      - name: Report preparation failure
-        if: failure() && steps.prepare.outcome == 'failure'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            await github.rest.issues.createComment({
-              ...context.repo,
-              issue_number: context.issue.number,
-              body: `Codjiflo Reviewer preparation failed; **no review verdict was submitted**. Review prerequisites could not be prepared. [Workflow logs](${runUrl})`,
-            });
       - name: Mint GitHub App installation token (optional)
         id: app
         if: inputs.app-id != ''
@@ -101,7 +90,22 @@ jobs:
           private-key: ${{ secrets.app-private-key }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+      - name: Report preparation failure
+        id: setup_failure
+        if: failure() && (steps.sdk.outcome == 'failure' || steps.prepare.outcome == 'failure' || steps.app.outcome == 'failure')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: `Codjiflo Reviewer preparation failed; **no review verdict was submitted**. SDK installation, review prerequisite preparation, or GitHub App token setup failed. [Workflow logs](${runUrl})`,
+            });
       - name: Review pull request
+        id: review
+        shell: bash
         run: node bin/codjiflo-reviewer.mjs --output "$RUNNER_TEMP/codjiflo-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
         env:
           GITHUB_TOKEN: ${{ steps.app.outputs.token || github.token }}
@@ -109,9 +113,15 @@ jobs:
           CODJIFLO_SOL_MODEL: ${{ inputs.sol-model }}
           CODJIFLO_OPUS_MODEL: ${{ inputs.opus-model }}
       - name: Retain review result
+        id: artifact
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: codjiflo-review-result-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/codjiflo-result-${{ github.run_id }}-${{ github.run_attempt }}.json
           if-no-files-found: ignore
+      - name: Warn when review result retention fails
+        if: always() && steps.artifact.outcome == 'failure'
+        shell: bash
+        run: echo "::warning::Review result artifact upload failed; this does not change the review publication outcome. Check the retention step logs. actions/upload-artifact@v4 is not supported on GitHub Enterprise Server."
