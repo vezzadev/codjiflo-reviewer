@@ -59,6 +59,23 @@ test('explicit commands work after prose while casual mentions and quoted exampl
   assert.deepEqual(parseCommand('Owner authorized. @codjiflo claude full'), { preset: 'opus-xhigh', mode: 'full' });
   assert.deepEqual(parseCommand('Thanks @codjiflo for the earlier pass. Please @codjiflo codex'), { preset: 'sol-xhigh', mode: 'incremental' });
   assert.equal(parseCommand('Please @codjiflo codex turbo'), null);
+  assert.deepEqual(parseCommand('Owner authorized option (A). @codjiflo codex\n\nThanks for taking another look.'), { preset: 'sol-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('Please @codjiflo-reviewer review claude full\n\nFurther context below.'), { preset: 'opus-xhigh', mode: 'full' });
+});
+test('soft-wrapped prose mentions are not complete after-prose commands', () => {
+  for (const body of [
+    'I think the earlier pass by @codjiflo review\nmissed this',
+    'Thanks to @codjiflo claude\nfor the review',
+    'I think the earlier pass by @codjiflo review\r\nmissed this',
+    'Thanks to @codjiflo claude\nfor the review\n\nMore context.',
+    'Please @codjiflo review\nfull',
+    '`x` @codjiflo review turbo',
+    '``x`` @codjiflo claude turbo',
+    '`x\ncontinued` @codjiflo review turbo',
+  ]) {
+    assert.equal(parseCommand(body), null, body);
+    assert.deepEqual(parseCommand(`${body}\n\n@codjiflo codex full`), { preset: 'sol-xhigh', mode: 'full' }, body);
+  }
 });
 test('casual profile and review mentions do not fail or hide later commands', () => {
   for (const body of ['Could @codjiflo review this?', 'Thanks @codjiflo claude did great', 'Please @codjiflo codex turbo']) {

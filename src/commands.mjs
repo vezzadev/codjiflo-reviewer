@@ -24,7 +24,8 @@ function commandText(body) {
   const blocks = [];
   const flush = () => {
     // Code spans may wrap lines, but never cross a Markdown paragraph boundary.
-    blocks.push(paragraph.join('\n').replace(/(?<!`)(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)/g, match => match.replace(/[^\n]/g, ' ')));
+    // Keep a non-whitespace prefix so code cannot turn prose into a standalone command.
+    blocks.push(paragraph.join('\n').replace(/(?<!`)(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)/g, match => match.replace(/[^\n]/g, '#')));
     paragraph = [];
   };
   for (const line of (body ?? '').split('\n')) {
@@ -44,7 +45,7 @@ function commandText(body) {
     }
   }
   flush();
-  return blocks.join('\n');
+  return blocks.join('\n\n');
 }
 
 export function parseCommand(body) {
@@ -53,7 +54,13 @@ export function parseCommand(body) {
   for (const match of text.matchAll(mentions)) {
     const first = match[1].toLowerCase();
     if (first !== 'review' && !normalizePreset(first)) continue;
-    const rest = text.slice(match.index + match[0].length).split('\n', 1)[0];
+    const mentionIndex = match.index + match[0].indexOf('@');
+    const prefix = text.slice(text.lastIndexOf('\n', mentionIndex - 1) + 1, mentionIndex);
+    const suffix = text.slice(match.index + match[0].length);
+    const rest = suffix.split('\n', 1)[0];
+    // After-prose commands must end their paragraph, not just a soft-wrapped line.
+    // Standalone command lines keep their existing grammar and error handling.
+    if (prefix.trim() && suffix.split('\n\n', 1)[0].slice(rest.length).trim()) continue;
     const words = (first === 'review' ? rest : `${first}${rest}`).trim().split(/\s+/).filter(Boolean);
     let preset = 'sol-xhigh';
     let mode = 'incremental';
@@ -74,8 +81,6 @@ export function parseCommand(body) {
     if (invalid) {
       // Prose mentions must match the complete grammar to count as commands.
       // Standalone commands retain actionable errors for malformed options.
-      const mentionIndex = match.index + match[0].indexOf('@');
-      const prefix = text.slice(text.lastIndexOf('\n', mentionIndex - 1) + 1, mentionIndex);
       if (!prefix.trim()) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [sol-xhigh|opus-xhigh|sol-medium|opus-medium|codex|claude] [full|incremental] or @codjiflo <preset> [full|incremental]`);
       continue;
     }
