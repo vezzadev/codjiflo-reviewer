@@ -67,7 +67,7 @@ export async function reviewInput({ preset, options, temp, cwd, git }) {
     // Ask Git for raw NUL-delimited paths, never decode its quoted headers.
     const changedTypes = await git(['diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--diff-filter=T', '--name-only', '-z', options.scope, options.head, '--']);
     for (const filename of changedTypes.split('\0').filter(Boolean)) {
-      typeDiffs.set(filename, await git(['-c', 'core.quotePath=false', '--literal-pathspecs', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', options.scope, options.head, '--', filename]));
+      typeDiffs.set(filename, await git(['-c', 'core.quotePath=false', '--literal-pathspecs', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', options.scope, options.head, '--', filename]));
     }
   }
   let byte = 0, position = 0, block = 0;

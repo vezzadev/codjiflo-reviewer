@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, symlink, mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { review } from '../src/review.mjs';
 import { reviewInput, MAX_INLINE_INPUT } from '../src/evidence.mjs';
 import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
@@ -33,7 +35,7 @@ test('large full and incremental reviews keep methodology inline and expose comp
       if (full) assert.equal(scope, f.localDiff);
       else {
         assert.match(input, new RegExp(`git diff ${f.previous} ${f.head}`));
-        assert.equal(scope, await runProcess('git', ['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', f.previous, f.head, '--'], { cwd: f.repo, env: f.env }));
+        assert.equal(scope, await runProcess('git', ['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', f.previous, f.head, '--'], { cwd: f.repo, env: f.env }));
       }
       const records = (await readFile(join(directory, 'inventory.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
       const scopes = records.filter(record => record.scope);
@@ -112,60 +114,108 @@ test('range inventory preserves escaped rename paths, binary files, UTF-8 and la
 });
 
 test('real Git type changes and non-LF content preserve complete consumer-visible ranges', async t => {
-  for (const typeChanges of [false, true]) {
-    await t.test(typeChanges ? 'regular files and symlinks in both directions' : 'CR and Unicode separators are blob content', async () => {
+  for (const variant of ['separators', 'types', 'submodule']) {
+    const typeChanges = variant !== 'separators', gitlink = variant === 'submodule';
+    await t.test(variant, async () => {
       const temp = await mkdtemp(join(tmpdir(), 'codjiflo-git-evidence-'));
       const cwd = join(temp, 'repository');
       await mkdir(cwd);
-      const git = args => runProcess('git', args, { cwd });
+      const home = join(temp, 'home');
+      await mkdir(home);
+      const env = { ...process.env, HOME: home, USERPROFILE: home };
+      const git = args => runProcess('git', args, { cwd, env });
       const commit = () => git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshot']);
       const toLink = 'a-to-link\t"é\n.txt', fromLink = 'b-from-link\t"漢\n.txt';
-      const names = [...(typeChanges ? [toLink, fromLink] : []), 'c-content.txt', 'z-padding.txt', 'zz-late.txt'];
-      const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3'];
+      const names = [...(typeChanges ? [toLink] : []), ...(variant === 'types' ? [fromLink] : []), 'c-content.txt', ...(gitlink ? ['d-submodule'] : []), 'z-padding.txt', 'zz-late.txt'];
+      const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3'];
       try {
         await git(['init', '-q']);
+        await git(['config', 'diff.submodule', 'log']);
+        await git(['config', '--global', 'diff.submodule', 'log']);
+        let seed;
+        if (gitlink) {
+          await git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'submodule seed']);
+          seed = (await git(['rev-parse', 'HEAD'])).trim();
+        }
         for (const filename of names) {
+          if (filename === 'd-submodule') continue;
           if (filename === fromLink) await symlink('old-target', join(cwd, filename));
           else await writeFile(join(cwd, filename), `old ${filename}\n`);
         }
         await git(['add', '--all']);
+        if (gitlink) await git(['update-index', '--add', '--cacheinfo', `160000,${seed},d-submodule`]);
         await commit();
         const base = (await git(['rev-parse', 'HEAD'])).trim();
         if (typeChanges) {
           await rm(join(cwd, toLink));
           await symlink('new-target', join(cwd, toLink));
-          await rm(join(cwd, fromLink));
-          await writeFile(join(cwd, fromLink), 'now a regular file\n');
+          if (variant === 'types') {
+            await rm(join(cwd, fromLink));
+            await writeFile(join(cwd, fromLink), 'now a regular file\n');
+          }
         }
         const content = ['\r', '\u2028', '\u2029'].map(separator => `content${separator}diff --git a/fake b/fake\n`).join('');
         await writeFile(join(cwd, 'c-content.txt'), content);
         await writeFile(join(cwd, 'z-padding.txt'), 'x'.repeat(MAX_INLINE_INPUT) + '\n');
         await writeFile(join(cwd, 'zz-late.txt'), 'late evidence\n');
         await git(['add', '--all']);
+        if (gitlink) await git(['update-index', '--add', '--cacheinfo', `160000,${base},d-submodule`]);
         await commit();
         const head = (await git(['rev-parse', 'HEAD'])).trim();
         const diff = await git([...diffArgs, base, head, '--']);
-        const input = await reviewInput({ preset: { cli: 'codex' }, temp, cwd, git, options: { level: 'xhigh', mode: 'full', base, head, scope: base, diff, currentDiff: '[]' } });
-        const manifest = manifestOf(input);
-        const records = (await readFile(join(manifest.directory, 'inventory.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
-        assert.deepEqual(records.map(record => record.filename), names);
-        const stored = await readFile(join(manifest.directory, 'review-scope.diff'));
-        assert.equal(stored.toString('utf8'), diff);
-        assert.equal(manifest.scopeBytes, stored.length);
-        let next = 0;
-        for (const record of records) {
-          const expected = await git(['--literal-pathspecs', ...diffArgs, base, head, '--', record.filename]);
-          assert.equal(record.scope.start, next);
-          const end = next + record.scope.bytes;
-          assert.equal(stored.subarray(next, end).toString('utf8'), expected);
-          if (record.filename !== 'z-padding.txt') {
-            const actual = await readRange(manifest.directory, 'review-scope.diff', next, record.scope.bytes);
-            assert.equal(actual.text, expected);
-            assert.equal(actual.next, end);
+        const inspect = async input => {
+          const manifest = manifestOf(input);
+          const records = (await readFile(join(manifest.directory, 'inventory.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+          assert.deepEqual(records.filter(record => record.scope).map(record => record.filename), names);
+          const stored = await readFile(join(manifest.directory, 'review-scope.diff'));
+          assert.equal(stored.toString('utf8'), diff);
+          assert.equal(manifest.scopeBytes, stored.length);
+          let next = 0;
+          for (const record of records.filter(record => record.scope)) {
+            const expected = await git(['--literal-pathspecs', ...diffArgs, base, head, '--', record.filename]);
+            assert.equal(record.scope.start, next);
+            const end = next + record.scope.bytes;
+            assert.equal(stored.subarray(next, end).toString('utf8'), expected);
+            if (record.filename !== 'z-padding.txt') {
+              const actual = await readRange(manifest.directory, 'review-scope.diff', next, record.scope.bytes);
+              assert.equal(actual.text, expected);
+              assert.equal(actual.next, end);
+            }
+            next = end;
           }
-          next = end;
+          assert.equal(next, stored.length, 'every byte belongs to exactly one complete file range');
+        };
+        if (gitlink) {
+          const posts = [];
+          const github = {
+            token: 'fixture-token-not-real',
+            async request(path, options) {
+              if (options?.method === 'POST') {
+                posts.push({ path, body: options.body });
+                return { id: posts.length };
+              }
+              return { state: 'open', changed_files: names.length, head: { sha: head }, base: { sha: base, repo: { clone_url: pathToFileURL(cwd).href } } };
+            },
+            async list() { return names.map(filename => ({ filename, patch: null })); },
+          };
+          let inspected = false;
+          // Exercise the production scope command in its disposable checkout,
+          // inheriting diff.submodule=log through ordinary Git configuration.
+          await assert.rejects(review({
+            request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'full' },
+            github,
+            env: { ...env, CODJIFLO_APPROVED_USERS: 'alice' },
+            reviewer: async ({ prompt: input }) => {
+              await inspect(input);
+              inspected = true;
+              return { verdict: 'INCOMPLETE', summary: 'Evidence inspected; no model analysis performed.', findings: [] };
+            },
+          }), /Review incomplete/);
+          assert.equal(inspected, true);
+          assert.equal(posts.filter(post => post.path.endsWith('/reviews')).length, 0);
+        } else {
+          await inspect(await reviewInput({ preset: { cli: 'codex' }, temp, cwd, git, options: { level: 'xhigh', mode: 'full', base, head, scope: base, diff, currentDiff: '[]' } }));
         }
-        assert.equal(next, stored.length, 'every byte belongs to exactly one complete file range');
       } finally { await rm(temp, { recursive: true, force: true }); }
     });
   }
