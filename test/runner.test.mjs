@@ -65,7 +65,8 @@ test('timeouts reject and kill descendants even when they ignore SIGTERM', {
     // A killed orphan can briefly remain as a zombie until PID 1 reaps it.
     assert.match(stat, /^\d+ \(.*\) Z /);
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    // procfs can report ESRCH if reaping races an already-open stat file.
+    if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error;
   }
 });
 
