@@ -50,14 +50,15 @@ async function fixture(t) {
       version: 2, plugins: { [pluginKey]: [{ scope: 'project', projectPath: '/some/other/project', installPath: sourcePlugin, version: '0.9.9', lastUpdated: '2026-09-27T00:26:34.503Z' }] },
     }));
   };
-  const run = onOutput => {
+  const run = (onOutput, onError) => {
     const result = execFileAsync(process.execPath, [script, '--home', home], {
       env: { ...process.env, HOME: home, CODEX_HOME: codexHome, CODJIFLO_CODEX_BIN: cli }, timeout: 10000,
     });
     if (onOutput) result.child.stdout.on('data', chunk => onOutput(chunk.toString()));
+    if (onError) result.child.stderr.on('data', chunk => onError(chunk.toString()));
     return result;
   };
-  return { home, codexHome, target, targetFor, source, activate, registerSource, run };
+  return { home, codexHome, cli, target, targetFor, source, activate, registerSource, run };
 }
 
 async function noMarker(target) {
@@ -239,3 +240,63 @@ for (const identifyImmediately of [true, false]) {
     assert.deepEqual(await readdir(path.dirname(f.target)), [skill]);
   });
 }
+
+for (const recovered of [true, false]) {
+  test(`truncated Codex manifest ${recovered ? 'recovers on a fresh read' : 'fails closed after bounded retries'}`, async t => {
+    const f = await fixture(t);
+    await f.registerSource();
+    await bundle(f.source);
+    const attempts = path.join(f.home, 'attempts');
+    await writeFile(f.cli, `#!${process.execPath}
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+const file = ${JSON.stringify(attempts)};
+const attempt = existsSync(file) ? Number(readFileSync(file, 'utf8')) + 1 : 1;
+writeFileSync(file, String(attempt));
+process.stdout.write(${recovered} && attempt === 3 ? readFileSync(process.env.CODEX_HOME + '/active.json', 'utf8') : '{"installed":[');
+`, { mode: 0o755 });
+    if (recovered) {
+      assert.match((await f.run()).stdout, /SolidWorks docs provisioned/);
+      assert.equal(await readFile(path.join(f.target, '.bundle-version'), 'utf8'), 'v3.12.1\n');
+    } else {
+      await assert.rejects(f.run(), error => {
+        assert.match(error.stderr, /Codex plugin manifest is invalid JSON after 3 attempts/);
+        assert.doesNotMatch(error.stdout, /reused|provisioned/);
+        return true;
+      });
+      await noMarker(f.target);
+      assert.deepEqual(await readdir(path.dirname(f.target)), [skill]);
+    }
+    assert.equal(await readFile(attempts, 'utf8'), '3');
+  });
+}
+
+test('retries a transiently truncated Claude registry without accepting partial bundles', async t => {
+  const f = await fixture(t);
+  await f.registerSource();
+  await bundle(f.source);
+  const registry = path.join(f.home, '.claude', 'plugins', 'installed_plugins.json');
+  const complete = await readFile(registry, 'utf8');
+  await writeFile(registry, '{"plugins":');
+  let repaired;
+  const result = await f.run(undefined, text => {
+    if (!repaired && text.includes('Claude installed-plugin registry returned invalid JSON')) {
+      repaired = writeFile(registry, complete);
+    }
+  });
+  await repaired;
+  assert.ok(repaired);
+  assert.match(result.stdout, /SolidWorks docs provisioned/);
+});
+
+test('persistently truncated Claude registry fails closed without staging or readiness', async t => {
+  const f = await fixture(t);
+  await bundle(f.source);
+  await put(path.join(f.home, '.claude', 'plugins', 'installed_plugins.json'), '{"plugins":');
+  await assert.rejects(f.run(), error => {
+    assert.match(error.stderr, /Claude installed-plugin registry is invalid JSON after 3 attempts/);
+    assert.doesNotMatch(error.stdout, /reused|provisioned/);
+    return true;
+  });
+  await noMarker(f.target);
+  assert.deepEqual(await readdir(path.dirname(f.target)), [skill]);
+});

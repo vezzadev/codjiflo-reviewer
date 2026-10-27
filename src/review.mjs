@@ -18,11 +18,17 @@ export function baseline(reviews, base, preset) {
 }
 
 export function validateResult(result, files, cap) {
+  if (result?.verdict === 'INCOMPLETE') {
+    throw new Error(`Review incomplete; no defect verdict: ${typeof result.summary === 'string' ? result.summary.slice(0, 1500) : 'Required analysis could not be completed'}`);
+  }
   if (!result || !['APPROVE', 'REQUEST_CHANGES'].includes(result.verdict) || typeof result.summary !== 'string' || !result.summary.trim() || !Array.isArray(result.findings) || result.findings.length > cap) throw new Error('Malformed review output');
   for (const finding of result.findings) {
     if (!finding || !['blocking', 'advisory'].includes(finding.disposition) || !['P0', 'P1', 'P2', 'P3'].includes(finding.priority) || typeof finding.title !== 'string' || !finding.title.trim() || typeof finding.body !== 'string' || !finding.body.trim()) throw new Error('Malformed finding');
   }
   if (result.verdict === 'APPROVE' && result.findings.some(finding => finding.disposition === 'blocking')) throw new Error('Approval contradicts blocking findings');
+  if (result.verdict === 'REQUEST_CHANGES' && !result.findings.some(finding => finding.disposition === 'blocking')) {
+    throw new Error('Changes request has no blocking defect findings; refusing a defect verdict');
+  }
   const comments = [];
   for (const finding of result.findings) {
     try { comments.push(inlineComment(finding, files)); }

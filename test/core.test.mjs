@@ -133,6 +133,24 @@ test('malformed or contradictory results cannot approve', () => {
   assert.equal(validateResult({ verdict: 'REQUEST_CHANGES', summary: 'Found bug', findings: [finding] }, files, 15).length, 1);
 });
 
+test('incomplete analysis and defect-free changes requests fail without a verdict', () => {
+  const files = filesFromApi(metadata);
+  for (const findings of [[], [finding]]) {
+    assert.throws(() => validateResult({
+      verdict: 'INCOMPLETE', summary: 'Required docs missing; pwsh.exe unavailable; DNS failed.', findings,
+    }, files, 15), /Review incomplete; no defect verdict/);
+  }
+  for (const findings of [[], [{ ...finding, disposition: 'advisory' }]]) {
+    assert.throws(() => validateResult({
+      verdict: 'REQUEST_CHANGES', summary: 'Review failed before the ten-angle analysis; this is not a defect verdict.', findings,
+    }, files, 15), /no blocking defect findings/);
+  }
+  const unanchorable = { verdict: 'REQUEST_CHANGES', summary: 'Concrete defect found.', findings: [{ ...finding, line: 999 }] };
+  assert.deepEqual(validateResult(unanchorable, files, 15), []);
+  assert.equal(unanchorable.verdict, 'REQUEST_CHANGES');
+  assert.match(unanchorable.summary, /Broken result/);
+});
+
 test('API filenames preserve spaces and Unicode while real Git SQL patches retain anchors', async t => {
   for (const filename of ['has space.sql', 'é\t"quoted".sql']) await t.test(filename, async () => {
     const f = await fixture({ filename, oldLine: '-- old SQL comment', newLine: '++ new SQL content' });
