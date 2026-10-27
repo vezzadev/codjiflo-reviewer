@@ -92,7 +92,8 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const fake = join(temp, 'fake-cli.mjs');
   const capture = join(temp, 'prompt.txt');
   await writeFile(fake, `#!/usr/bin/env node
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 if (process.argv[2] === 'auth') {
  if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth status inherited provider credentials');
  console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'}));
@@ -100,8 +101,20 @@ if (process.argv[2] === 'auth') {
 }
 process.stdin.setEncoding('utf8');
 let input = ''; for await (const chunk of process.stdin) input += chunk;
+await writeFile(process.env.FIXTURE_CAPTURE + '.stdin', input);
+if (process.argv.includes('exec')) {
+ const manifestLine = input.split('\\n').find(line => line.startsWith('Review input manifest: '));
+ if (manifestLine) {
+  const manifest = JSON.parse(manifestLine.slice('Review input manifest: '.length));
+  let complete = '';
+  for (let part = 0; part < manifest.parts; part++) complete += await readFile(join(manifest.directory, part + '.txt'), 'utf8');
+  if (complete.length !== manifest.characters || Buffer.byteLength(complete) !== manifest.bytes) throw new Error('Incomplete staged review input');
+  input = complete;
+ }
+}
 await writeFile(process.env.FIXTURE_CAPTURE, input);
-process.stdout.write('fixture CLI streaming live\\n');
+if (process.argv.includes('exec')) console.log(JSON.stringify({type:'thread.started',thread_id:'fixture CLI streaming live'}));
+else process.stdout.write('fixture CLI streaming live\\n');
 process.stderr.write('fixture stderr streaming live\\n');
 if (process.env.FIXTURE_MODE === 'failure') process.exit(9);
 const findings = process.env.FIXTURE_MODE === 'findings' ? [
@@ -112,6 +125,13 @@ const result = {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary
 if (process.argv.includes('exec')) {
  const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
  await writeFile(output, process.env.FIXTURE_MODE === 'malformed' ? '{' : JSON.stringify(result));
+ if (process.env.FIXTURE_MODE === 'input-too-large') {
+  console.log(JSON.stringify({type:'error',message:'Input exceeds the maximum length of 1048576 characters. input_too_large'}));
+  process.exit(1);
+ }
+ if (process.env.FIXTURE_MODE === 'error-event') console.log(JSON.stringify({type:'error',message:'Fixture terminal error despite result file'}));
+ if (process.env.FIXTURE_MODE === 'failed-turn') console.log(JSON.stringify({type:'turn.failed',error:{message:'Fixture provider failed despite result file'}}));
+ else if (process.env.FIXTURE_MODE !== 'missing-completion') console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 } else {
  // stdout is valid JSONL in Claude mode (no unstructured status lines).
  if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth fixture inherited provider credentials');

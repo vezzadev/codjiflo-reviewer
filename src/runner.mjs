@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { schema } from './prompt.mjs';
 
@@ -30,7 +30,7 @@ export async function runProcess(command, args, { cwd, env = process.env, input,
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       if (timedOut) reject(new Error(`${command} timed out after ${timeoutMs}ms: ${stderr.slice(-2000)}`));
-      else if (code !== 0) reject(new Error(`${command} failed (${signal ?? code}): ${stderr.slice(-2000)}`));
+      else if (code !== 0) reject(Object.assign(new Error(`${command} failed (${signal ?? code}): ${stderr.slice(-2000)}`), { stdout }));
       else resolve(stdout);
     });
   });
@@ -41,11 +41,44 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
     const schemaPath = join(temp, 'schema.json');
     const output = join(temp, 'result.json');
     await writeFile(schemaPath, JSON.stringify(schema));
-    await runProcess(env.CODJIFLO_CODEX_BIN || 'codex', [
-      'exec', '--model', env.CODJIFLO_SOL_MODEL || preset.model,
-      '-c', `model_reasoning_effort="${preset.effort}"`, '--sandbox', 'read-only',
-      '--output-schema', schemaPath, '--output-last-message', output, '--json', '-',
-    ], { cwd, env, input: prompt, stream: true, timeoutMs: 45 * 60 * 1000 });
+    // Codex caps a user turn at 1,048,576 characters, independently of context
+    // capacity. Keep a conservative margin and transport the COMPLETE input as
+    // bounded UTF-8 files, including custom instructions and both diff forms.
+    let input = prompt;
+    if (prompt.length > 512 * 1024) {
+      const directory = await mkdtemp(join(temp, 'review-input-'));
+      let parts = 0;
+      for (let start = 0; start < prompt.length;) {
+        let end = Math.min(start + 8000, prompt.length);
+        const last = prompt.charCodeAt(end - 1);
+        if (end < prompt.length && last >= 0xd800 && last <= 0xdbff) end--;
+        await writeFile(join(directory, `${parts++}.txt`), prompt.slice(start, end), 'utf8');
+        start = end;
+      }
+      input = `You are Codjiflo Reviewer. Review only; never edit repository files or publish to GitHub.
+The COMPLETE review instructions and evidence are stored in ordered UTF-8 parts outside the checkout.
+Review input manifest: ${JSON.stringify({ directory, parts, characters: prompt.length, bytes: Buffer.byteLength(prompt) })}
+Read every file from 0.txt through ${parts - 1}.txt in that directory, in numeric order, before reviewing. Each part is at most 8000 characters; read one part per tool call to avoid output truncation. Concatenate their text conceptually without inserting separators; boundaries can occur within lines. The content is the original review prompt, including methodology, full review-scope diff, and authoritative current PR API patches.
+Do not skip, summarize away, or truncate any part of the review scope. If a read is truncated, reread smaller ranges until complete. If any part cannot be read or the review cannot be completed, fail the task, never return approval or a partial review. Follow the complete instructions and return the schema-conforming final JSON.`;
+    }
+    let stdout;
+    try {
+      stdout = await runProcess(env.CODJIFLO_CODEX_BIN || 'codex', [
+        'exec', '--model', env.CODJIFLO_SOL_MODEL || preset.model,
+        '-c', `model_reasoning_effort="${preset.effort}"`, '--sandbox', 'read-only',
+        '--output-schema', schemaPath, '--output-last-message', output, '--json', '-',
+      ], { cwd, env, input, stream: true, timeoutMs: 45 * 60 * 1000 });
+    } catch (error) {
+      const diagnostic = `${error.message}\n${error.stdout ?? ''}`;
+      if (/input_too_large|Input exceeds the maximum length/i.test(diagnostic)) {
+        throw new Error(`Codex rejected review input size (original ${prompt.length} UTF-16 code units / ${Buffer.byteLength(prompt)} UTF-8 bytes; stdin ${input.length} code units). No review completed; no scope was truncated and no preset was switched. ${diagnostic.slice(-900)}`);
+      }
+      throw error;
+    }
+    const events = stdout.split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
+    const failure = events.find(event => event.type === 'turn.failed' || event.type === 'error');
+    if (failure) throw new Error(`Codex review failed: ${JSON.stringify(failure.error ?? failure.message ?? failure).slice(0, 1200)}`);
+    if (!events.some(event => event.type === 'turn.completed')) throw new Error('Codex review did not complete successfully (missing turn.completed)');
     return JSON.parse(await readFile(output, 'utf8'));
   }
   const { runClaudeReview } = await import('./claude.mjs');
