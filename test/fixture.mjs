@@ -104,7 +104,7 @@ let input = ''; for await (const chunk of process.stdin) input += chunk;
 await writeFile(process.env.FIXTURE_CAPTURE + '.stdin', input);
 if (process.argv.includes('exec')) {
  const manifestLine = input.split('\\n').find(line => line.startsWith('Review input manifest: '));
- if (manifestLine) {
+ if (manifestLine && process.env.FIXTURE_MODE !== 'incomplete-input') {
   const manifest = JSON.parse(manifestLine.slice('Review input manifest: '.length));
   let complete = '';
   for (let part = 0; part < manifest.parts; part++) complete += await readFile(join(manifest.directory, part + '.txt'), 'utf8');
@@ -121,7 +121,9 @@ const findings = process.env.FIXTURE_MODE === 'findings' ? [
  {path:'a.js',side:'LEFT',start_line:1,line:1,priority:'P1',disposition:'blocking',title:'Old-side bug',body:'Concrete failure scenario.'},
  {path:'a.js',side:'RIGHT',start_line:1,line:2,priority:'P2',disposition:'blocking',title:'Range bug',body:'Concrete failure scenario.'}
 ] : [];
-const result = {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings};
+const result = process.env.FIXTURE_MODE === 'incomplete-input'
+ ? {verdict:'INCOMPLETE',summary:'A required review input part could not be read.',findings:[]}
+ : {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings};
 if (process.argv.includes('exec')) {
  const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
  await writeFile(output, process.env.FIXTURE_MODE === 'malformed' ? '{' : JSON.stringify(result));
@@ -129,9 +131,11 @@ if (process.argv.includes('exec')) {
   console.log(JSON.stringify({type:'error',message:'Input exceeds the maximum length of 1048576 characters. input_too_large'}));
   process.exit(1);
  }
- if (process.env.FIXTURE_MODE === 'error-event') console.log(JSON.stringify({type:'error',message:'Fixture terminal error despite result file'}));
- if (process.env.FIXTURE_MODE === 'failed-turn') console.log(JSON.stringify({type:'turn.failed',error:{message:'Fixture provider failed despite result file'}}));
- else if (process.env.FIXTURE_MODE !== 'missing-completion') console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
+ if (['reconnect-recovered', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Reconnecting... 1/5 (stream disconnected before completion)'}));
+ if (['fatal-error', 'fatal-exit'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Fixture fatal transport error despite result file'}));
+ if (process.env.FIXTURE_MODE === 'fatal-exit') process.exit(1);
+ if (['failed-turn', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.failed',error:{message:'Fixture provider failed despite result file'}}));
+ else if (!['missing-completion', 'fatal-error'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 } else {
  // stdout is valid JSONL in Claude mode (no unstructured status lines).
  if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth fixture inherited provider credentials');

@@ -59,7 +59,7 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
 The COMPLETE review instructions and evidence are stored in ordered UTF-8 parts outside the checkout.
 Review input manifest: ${JSON.stringify({ directory, parts, characters: prompt.length, bytes: Buffer.byteLength(prompt) })}
 Read every file from 0.txt through ${parts - 1}.txt in that directory, in numeric order, before reviewing. Each part is at most 8000 characters; read one part per tool call to avoid output truncation. Concatenate their text conceptually without inserting separators; boundaries can occur within lines. The content is the original review prompt, including methodology, full review-scope diff, and authoritative current PR API patches.
-Do not skip, summarize away, or truncate any part of the review scope. If a read is truncated, reread smaller ranges until complete. If any part cannot be read or the review cannot be completed, fail the task, never return approval or a partial review. Follow the complete instructions and return the schema-conforming final JSON.`;
+Do not skip, summarize away, or truncate any part of the review scope. If a read is truncated, reread smaller ranges until complete. If any part cannot be read or the review cannot be completed, return {"verdict":"INCOMPLETE","summary":"Explain the unread input or other blocker.","findings":[]} rather than approval, a defect verdict, or a partial review. Follow the complete instructions and return the schema-conforming final JSON.`;
     }
     let stdout;
     try {
@@ -73,12 +73,16 @@ Do not skip, summarize away, or truncate any part of the review scope. If a read
       if (/input_too_large|Input exceeds the maximum length/i.test(diagnostic)) {
         throw new Error(`Codex rejected review input size (original ${prompt.length} UTF-16 code units / ${Buffer.byteLength(prompt)} UTF-8 bytes; stdin ${input.length} code units). No review completed; no scope was truncated and no preset was switched. ${diagnostic.slice(-900)}`);
       }
+      if (error.stdout) error.message += `\nCodex JSONL diagnostics: ${error.stdout.slice(-1200)}`;
       throw error;
     }
     const events = stdout.split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
-    const failure = events.find(event => event.type === 'turn.failed' || event.type === 'error');
-    if (failure) throw new Error(`Codex review failed: ${JSON.stringify(failure.error ?? failure.message ?? failure).slice(0, 1200)}`);
-    if (!events.some(event => event.type === 'turn.completed')) throw new Error('Codex review did not complete successfully (missing turn.completed)');
+    // rust-v0.159.2 maps retryable reconnect notifications to top-level errors,
+    // too. Only the terminal turn event decides success; keep errors as diagnostics.
+    const failure = events.find(event => event.type === 'turn.failed');
+    const diagnostics = events.filter(event => event.type === 'turn.failed' || event.type === 'error');
+    if (failure) throw new Error(`Codex review failed: ${JSON.stringify(diagnostics).slice(-1200)}`);
+    if (!events.some(event => event.type === 'turn.completed')) throw new Error(`Codex review did not complete successfully (missing turn.completed): ${JSON.stringify(diagnostics).slice(-1200)}`);
     return JSON.parse(await readFile(output, 'utf8'));
   }
   const { runClaudeReview } = await import('./claude.mjs');
