@@ -7,7 +7,7 @@ import { fixture } from './fixture.mjs';
 
 const metadata = [{ filename: 'a.js', additions: 2, deletions: 2, patch: '@@ -1,3 +1,3 @@\n-old\n+new\n same\n last\n@@ -20 +20 @@\n-before\n+after\n' }];
 const finding = { path: 'a.js', side: 'RIGHT', start_line: 1, line: 2, priority: 'P1', disposition: 'blocking', title: 'Broken result', body: 'Fails for zero. Category: correctness.' };
-const marker = (head, base, preset = 'sol-xhigh') => `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head, base, preset })} -->`;
+const marker = (head, base, preset = 'sol-xhigh') => `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head, base, preset })} -->`;
 const sha = 'a'.repeat(40);
 
 test('authorization denies empty, absent and non-exact users; normalizes login case', () => {
@@ -107,6 +107,15 @@ test('baseline accepts PAT or bot approval, pins commit/base/preset, and respect
   assert.equal(baseline([approved, { ...pat, state: 'CHANGES_REQUESTED' }], 'base', 'sol-xhigh'), null);
   assert.equal(baseline([approved, { ...approved, state: 'DISMISSED' }], 'base', 'sol-xhigh'), null);
   assert.equal(baseline([{ ...approved, commit_id: 'mismatch' }], 'base', 'sol-xhigh'), null);
+});
+test('baseline ignores unsupported marker versions without parsing their payloads', () => {
+  const approved = { state: 'APPROVED', body: marker(sha, 'base'), commit_id: sha };
+  for (const version of ['v1', 'v0', 'v3']) {
+    const legacy = { ...approved, body: approved.body.replace(':v2 ', `:${version} `) };
+    assert.equal(baseline([legacy], 'base', 'sol-xhigh'), null);
+    assert.equal(baseline([{ ...legacy, body: `<!-- codjiflo-reviewer:${version} {invalid JSON} -->` }], 'base', 'sol-xhigh'), null);
+    assert.equal(baseline([approved, legacy], 'base', 'sol-xhigh').head, sha);
+  }
 });
 test('malformed or contradictory results cannot approve', () => {
   const files = filesFromApi(metadata);

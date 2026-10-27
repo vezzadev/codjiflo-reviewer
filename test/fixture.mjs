@@ -1,11 +1,37 @@
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, readFile, chmod, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, chmod, rm, symlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { runProcess } from '../src/runner.mjs';
 
-export async function fixture({ filename = 'a.js', previousFilename = filename, oldLine = 'old', newLine = 'new' } = {}) {
+async function setHeadPrompt({ repo, temp, promptPath, hostPromptDirectory, hostPrompt, headPrompt, headPromptType }) {
+  if (headPrompt === undefined && headPromptType === 'file') return;
+  await rm(join(repo, '.codjiflo'), { recursive: true, force: true });
+  if (headPromptType === 'ancestor-symlink') {
+    await symlink(join(temp, 'host'), join(repo, '.codjiflo'));
+    return;
+  }
+  await mkdir(join(repo, '.codjiflo'));
+  if (headPromptType === 'parent-symlink') {
+    await symlink(hostPromptDirectory, join(repo, '.codjiflo', 'code-review'));
+    return;
+  }
+  await mkdir(join(repo, '.codjiflo', 'code-review'));
+  if (headPromptType === 'directory') {
+    await mkdir(promptPath);
+    await writeFile(join(promptPath, 'keep'), 'This tracked directory cannot be read as a prompt.');
+    return;
+  }
+  if (headPromptType === 'symlink') {
+    await symlink(hostPrompt, promptPath);
+    return;
+  }
+  if (headPromptType === 'file' && headPrompt !== null) await writeFile(promptPath, headPrompt);
+}
+
+export async function fixture({ filename = 'a.js', previousFilename = filename, oldLine = 'old', newLine = 'new', basePrompt, headPrompt, headPromptType = 'file' } = {}) {
+  if (!['file', 'directory', 'symlink', 'parent-symlink', 'ancestor-symlink', 'submodule'].includes(headPromptType)) throw new Error(`Unknown head prompt type: ${headPromptType}`);
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-fixture-'));
   const repo = join(temp, 'repo');
   await mkdir(repo);
@@ -16,6 +42,11 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   await git(['init', '-b', 'main']);
   const tail = 'context\n'.repeat(8);
   await writeFile(join(repo, previousFilename), `${oldLine}\nsecond\n${tail}`);
+  const promptPath = join(repo, '.codjiflo', 'code-review', 'PROMPT.md');
+  if (basePrompt !== undefined) {
+    await mkdir(join(repo, '.codjiflo', 'code-review'), { recursive: true });
+    await writeFile(promptPath, basePrompt);
+  }
   await git(['add', '.']); await git(['commit', '-m', 'base']);
   const base = (await git(['rev-parse', 'HEAD'])).trim();
   if (filename !== previousFilename) await git(['mv', previousFilename, filename]);
@@ -23,12 +54,41 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   await git(['commit', '-am', 'first']);
   const previous = (await git(['rev-parse', 'HEAD'])).trim();
   await writeFile(join(repo, filename), `${newLine}\nchanged\n${tail}`);
-  await git(['commit', '-am', 'second']);
+  const hostSentinel = 'HOST-ONLY-SENTINEL-résumé-秘密';
+  const hostPromptDirectory = join(temp, 'host', 'code-review');
+  await mkdir(hostPromptDirectory, { recursive: true });
+  const hostPrompt = join(hostPromptDirectory, 'PROMPT.md');
+  await writeFile(hostPrompt, hostSentinel);
+  await setHeadPrompt({ repo, temp, promptPath, hostPromptDirectory, hostPrompt, headPrompt, headPromptType });
+  await git(['add', '.']);
+  if (headPromptType === 'submodule') await git(['update-index', '--add', '--cacheinfo', `160000,${base},.codjiflo/code-review/PROMPT.md`]);
+  await git(['commit', '-m', 'second']);
   const head = (await git(['rev-parse', 'HEAD'])).trim();
   const diffArgs = ['diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', base, head];
   const localDiff = await git(['-c', 'core.quotePath=false', ...diffArgs]);
-  const patch = localDiff.slice(localDiff.indexOf('@@ ')).trimEnd();
+  const fileDiff = await git(['-c', 'core.quotePath=false', ...diffArgs, '--', previousFilename, filename]);
+  const patch = fileDiff.slice(fileDiff.indexOf('@@ ')).replace(/\n$/, '');
   const files = [{ filename, ...(filename !== previousFilename ? { previous_filename: previousFilename } : {}), status: filename === previousFilename ? 'modified' : 'renamed', additions: patch.split('\n').filter(line => line.startsWith('+')).length, deletions: patch.split('\n').filter(line => line.startsWith('-')).length, patch }];
+  // Keep the primary file's synthetic rename/patch behavior used by coordinate tests.
+  // Supplemental paths must still appear in the authoritative full-PR API metadata.
+  const changes = (await git(['diff', '--find-renames', '--name-status', '-z', base, head])).split('\0');
+  for (let index = 0; index < changes.length - 1;) {
+    const status = changes[index++];
+    const oldPath = changes[index++];
+    const newPath = /^[RC]/.test(status) ? changes[index++] : oldPath;
+    if (newPath === filename || oldPath === previousFilename) continue;
+    const fileDiff = await git(['-c', 'core.quotePath=false', ...diffArgs, '--', oldPath, ...(newPath === oldPath ? [] : [newPath])]);
+    const patchStart = fileDiff.indexOf('@@ ');
+    const patch = patchStart === -1 ? '' : fileDiff.slice(patchStart).replace(/\n$/, '');
+    files.push({
+      filename: newPath,
+      ...(/^R/.test(status) ? { previous_filename: oldPath } : {}),
+      status: ({ A: 'added', D: 'removed', R: 'renamed', C: 'copied' })[status[0]] ?? 'modified',
+      additions: patch.split('\n').filter(line => line.startsWith('+')).length,
+      deletions: patch.split('\n').filter(line => line.startsWith('-')).length,
+      patch,
+    });
+  }
   const fake = join(temp, 'fake-cli.mjs');
   const capture = join(temp, 'prompt.txt');
   await writeFile(fake, `#!/usr/bin/env node
@@ -38,6 +98,7 @@ if (process.argv[2] === 'auth') {
  console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'}));
  process.exit(0);
 }
+process.stdin.setEncoding('utf8');
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 await writeFile(process.env.FIXTURE_CAPTURE, input);
 process.stdout.write('fixture CLI streaming live\\n');
@@ -64,6 +125,7 @@ if (process.argv.includes('exec')) {
   await chmod(fake, 0o755); await chmod(fakeClaude, 0o755);
   const state = { requests: [], posts: [], reviews: [], files, changedFiles: files.length, stale: false, reads: 0 };
   const server = createServer(async (request, response) => {
+    request.setEncoding('utf8');
     let body = ''; for await (const chunk of request) body += chunk;
     const parsed = body ? JSON.parse(body) : undefined;
     state.requests.push({ path: request.url, method: request.method, body: parsed });
@@ -83,7 +145,7 @@ if (process.argv.includes('exec')) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const api = `http://127.0.0.1:${server.address().port}`;
-  return { state, head, base, previous, temp, capture, localDiff, env,
+  return { state, head, base, previous, temp, repo, capture, localDiff, env, hostSentinel,
     async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
         timeoutMs,
