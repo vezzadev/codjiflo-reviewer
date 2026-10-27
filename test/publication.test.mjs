@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
-const { publishReview } = await import(process.env.CODJIFLO_PUBLICATION_MODULE || '../src/publication.mjs');
+const { publishReview, reportPublicationFailure } = await import(process.env.CODJIFLO_PUBLICATION_MODULE || '../src/publication.mjs');
 
 const env = { CODJIFLO_APPROVED_USERS: 'alice' };
 function setup() {
@@ -103,7 +103,7 @@ test('review visible only after retry backoff is reconciled before a second POST
   assert.deepEqual(f.state.events, ['list', 'pull', 'post', 'list', 'delay', 'list']);
 });
 
-test('normalization outside the unique marker does not invalidate a submitted receipt', async t => {
+test('normalization outside the trailing marker does not invalidate a submitted receipt', async t => {
   for (const scenario of ['direct', 'recovery', 'ambiguous']) await t.test(scenario, async () => {
     const f = setup();
     f.envelope.payload.body = `Review\r\n\r\n${f.envelope.payload.body.split('\n')[1]}\r\n`;
@@ -122,13 +122,15 @@ test('normalization outside the unique marker does not invalidate a submitted re
   });
 });
 
-test('malformed or ambiguous saved publication markers fail before GitHub calls', async t => {
+test('missing or malformed trailing saved publication markers fail before GitHub calls', async t => {
   for (const body of [
     'Review without an identity',
     '<!-- codjiflo-publication:unique -->',
     '<!-- codjiflo-publication:12345678-1234-4234-1234-123456789abc -->',
     '<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc',
-    `${setup().envelope.payload.body}\n${setup().envelope.payload.body}`,
+    `${setup().envelope.payload.body}\nReview continues after the marker`,
+    `Quoted ${setup().envelope.payload.body.split('\n')[1]}`,
+    `> ${setup().envelope.payload.body.split('\n')[1]}`,
     `${setup().envelope.payload.body}\n<!-- codjiflo-publication:malformed -->`,
   ]) await t.test(body, async () => {
     const f = setup();
@@ -139,7 +141,7 @@ test('malformed or ambiguous saved publication markers fail before GitHub calls'
 });
 
 test('publication identity collisions and invalid matching receipts fail closed', async t => {
-  for (const scenario of ['head', 'state', 'missing-id', 'string-id', 'zero-id', 'unsafe-id', 'duplicate-marker', 'duplicate-review']) await t.test(scenario, async () => {
+  for (const scenario of ['head', 'state', 'missing-id', 'string-id', 'zero-id', 'unsafe-id', 'duplicate-review']) await t.test(scenario, async () => {
     const f = setup();
     const receipt = { ...f.receipt };
     if (scenario === 'head') receipt.commit_id = 'c'.repeat(40);
@@ -148,7 +150,6 @@ test('publication identity collisions and invalid matching receipts fail closed'
     if (scenario === 'string-id') receipt.id = '42';
     if (scenario === 'zero-id') receipt.id = 0;
     if (scenario === 'unsafe-id') receipt.id = Number.MAX_SAFE_INTEGER + 1;
-    if (scenario === 'duplicate-marker') receipt.body += `\n${receipt.body}`;
     f.state.reviews.push(receipt);
     if (scenario === 'duplicate-review') f.state.reviews.push({ ...receipt, id: 43 });
     await assert.rejects(publishReview({ ...f, env }), /refusing.*publication/);
@@ -161,6 +162,84 @@ test('a different publication UUID does not prevent a new publication', async ()
   f.state.reviews.push({ ...f.receipt, body: f.receipt.body.replace('123456789abc', '123456789abd') });
   assert.equal(await publishReview({ ...f, env }), f.receipt);
   assert.equal(f.state.posts, 1);
+});
+
+test('malformed trailing receipt markers cannot confirm publication', async () => {
+  const f = setup();
+  f.receipt.body += '\n<!-- codjiflo-publication:malformed -->';
+  await assert.rejects(publishReview({ ...f, env }), /GitHub did not return a confirmed submitted review/);
+  assert.equal(f.state.posts, 1);
+});
+
+test('summary prose and quoted markers do not override the generated trailing identity', async t => {
+  for (const scenario of ['direct', 'recovery', 'ambiguous']) await t.test(scenario, async () => {
+    const f = setup();
+    const marker = f.receipt.body.split('\n')[1];
+    // Earlier markers, including standalone examples in a code fence, are prose.
+    f.envelope.payload.body = `Explain codjiflo-publication: and quote \`${marker}\`.\n\n\`\`\`html\n${marker}\n\`\`\`\n\n${f.envelope.payload.body}`;
+    f.receipt.body = f.envelope.payload.body;
+    if (scenario === 'recovery') f.state.reviews.push(f.receipt);
+    if (scenario === 'ambiguous') {
+      const get = f.github.request;
+      f.github.request = async (path, options) => {
+        if (!options) return get(path);
+        f.state.posts++;
+        f.state.reviews.push(f.receipt);
+        throw new TypeError('response lost');
+      };
+    }
+    assert.equal(await publishReview({ ...f, env, delay: async () => {} }), f.receipt);
+    assert.equal(f.state.posts, scenario === 'recovery' ? 0 : 1);
+  });
+});
+
+test('ordinary prose mentioning the UUID is not a matching GitHub review', async () => {
+  const f = setup();
+  const marker = f.receipt.body.split('\n')[1];
+  f.state.reviews.push(
+    { ...f.receipt, id: 43, body: `Discuss ${marker} in this review.` },
+    { ...f.receipt, id: 44, body: `> ${marker}` },
+    { ...f.receipt, id: 45, body: `${marker}\nNot a trailing marker.` },
+    { ...f.receipt, id: 46, body: `${marker}\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abd -->` },
+  );
+  assert.equal(await publishReview({ ...f, env }), f.receipt);
+  assert.equal(f.state.posts, 1);
+});
+
+test('failed reconciliation retains the original POST error and both failure diagnostics', async t => {
+  for (const afterBackoff of [false, true]) await t.test(`afterBackoff=${afterBackoff}`, async () => {
+    const f = setup();
+    const original = Object.assign(new Error('Original POST transport failure'), { status: 503 });
+    const lookup = new Error('GitHub reconciliation unavailable');
+    let delayed = false;
+    const get = f.github.request;
+    f.github.request = async (path, options) => {
+      if (!options) return get(path);
+      f.state.posts++;
+      throw original;
+    };
+    f.github.list = async () => {
+      if (f.state.posts && (!afterBackoff || delayed)) throw lookup;
+      return [];
+    };
+    let failure;
+    await assert.rejects(publishReview({ ...f, env, delay: async () => { delayed = true; } }), error => {
+      failure = error;
+      assert.equal(error.cause, original);
+      assert.deepEqual(error.errors, [original, lookup]);
+      assert.match(error.message, /Original POST transport failure/);
+      assert.match(error.message, /GitHub reconciliation unavailable/);
+      return true;
+    });
+    assert.equal(f.state.posts, 1);
+    let comment;
+    await reportPublicationFailure({
+      request: f.envelope.request, env, error: failure,
+      github: { async request(path, options) { comment = options.body.body; } },
+    });
+    assert.match(comment, /Original POST transport failure/);
+    assert.match(comment, /GitHub reconciliation unavailable/);
+  });
 });
 
 test('post-backoff reconciliation failure or changed PR never permits another POST', async t => {

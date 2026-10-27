@@ -76,7 +76,13 @@ test('Codex failed or missing terminal completion cannot publish a valid-looking
   for (const mode of ['failed-turn', 'reconnect-failed', 'fatal-error', 'fatal-exit', 'missing-completion', 'input-too-large']) await t.test(mode, async () => {
     const f = await fixture();
     try {
-      await assert.rejects(f.run({ mode }));
+      await assert.rejects(f.run({ mode }), error => {
+        if (mode === 'fatal-exit') {
+          assert.match(error.stdout, /Fixture fatal transport error/);
+          assert.match(error.message, /Fixture verbose CLI stderr detail/);
+        }
+        return true;
+      });
       assert.equal(verdicts(f).length, 0);
       const failure = f.state.posts.at(-1).body.body;
       assert.match(failure, /failed/);

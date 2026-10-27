@@ -73,7 +73,7 @@ Do not skip, summarize away, or truncate any part of the review scope. If a read
       if (/input_too_large|Input exceeds the maximum length/i.test(diagnostic)) {
         throw new Error(`Codex rejected review input size (original ${prompt.length} UTF-16 code units / ${Buffer.byteLength(prompt)} UTF-8 bytes; stdin ${input.length} code units). No review completed; no scope was truncated and no preset was switched. ${diagnostic.slice(-900)}`);
       }
-      if (error.stdout) error.message += `\nCodex JSONL diagnostics: ${error.stdout.slice(-1200)}`;
+      if (error.stdout) error.message = `Codex JSONL diagnostics: ${error.stdout.slice(-1200)}\n${error.message}`;
       throw error;
     }
     const events = stdout.split('\n').filter(line => line.trim()).map(line => JSON.parse(line));

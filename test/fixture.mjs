@@ -133,7 +133,10 @@ if (process.argv.includes('exec')) {
  }
  if (['reconnect-recovered', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Reconnecting... 1/5 (stream disconnected before completion)'}));
  if (['fatal-error', 'fatal-exit'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Fixture fatal transport error despite result file'}));
- if (process.env.FIXTURE_MODE === 'fatal-exit') process.exit(1);
+ if (process.env.FIXTURE_MODE === 'fatal-exit') {
+  process.stderr.write('x'.repeat(2200) + '\\nFixture verbose CLI stderr detail\\n');
+  process.exit(1);
+ }
  if (['failed-turn', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.failed',error:{message:'Fixture provider failed despite result file'}}));
  else if (!['missing-completion', 'fatal-error'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 } else {
