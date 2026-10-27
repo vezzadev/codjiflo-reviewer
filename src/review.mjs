@@ -6,7 +6,7 @@ import { filesFromApi, inlineComment } from './diff.mjs';
 import { prompt } from './prompt.mjs';
 import { runProcess, runReviewer } from './runner.mjs';
 
-export const MARKER = /<!-- codjiflo-reviewer:v1 (\{[^\n]+\}) -->/;
+export const MARKER = /<!-- codjiflo-reviewer:v2 (\{[^\n]+\}) -->/;
 export function baseline(reviews, base, preset) {
   // The latest marked review governs, including PAT-authored blockers.
   const prior = reviews.filter(review => MARKER.test(review.body ?? '')).at(-1);
@@ -104,7 +104,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     // Read immediately before publication. commit_id also pins the native review to the inspected head.
     const latest = await github.request(pullPath);
     if (latest.head.sha !== head || latest.base.sha !== base || latest.state !== 'open') throw new Error('Pull request changed during review; refusing stale verdict');
-    const marker = `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head, base, preset: request.preset })} -->`;
+    const marker = `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head, base, preset: request.preset })} -->`;
     return await github.request(`${pullPath}/reviews`, { method: 'POST', body: {
       commit_id: head, event: result.verdict,
       body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nScope: **${mode}** (${reason}).\n\n${marker}`,

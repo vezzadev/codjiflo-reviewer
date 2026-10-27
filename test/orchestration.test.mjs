@@ -21,7 +21,7 @@ test('real CLI orchestration streams and publishes pinned native ranged changes 
     assert.equal(result.comments[1].start_side, 'RIGHT');
     assert.equal(result.comments[1].start_line, 1);
     assert.equal(result.comments[1].line, 2);
-    assert.match(result.body, /codjiflo-reviewer:v1/);
+    assert.match(result.body, /codjiflo-reviewer:v2/);
   } finally { await f.close(); }
 });
 
@@ -158,7 +158,7 @@ test('supplemental instruction identity governs successful incremental baselines
   ]) await t.test(scenario, async () => {
     const f = await fixture(options);
     try {
-      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
       await f.run();
       const result = verdicts(f)[0].body;
       const captured = await readFile(f.capture, 'utf8');
@@ -179,6 +179,39 @@ test('supplemental instruction identity governs successful incremental baselines
         assert.ok(scopeDiff.includes('-second\n'));
         assert.ok(scopeDiff.includes('+changed\n'));
       }
+    } finally { await f.close(); }
+  });
+});
+
+test('legacy approvals cannot reuse an unchanged preexisting supplemental prompt', async t => {
+  for (const version of ['v1', 'v2']) await t.test(version, async () => {
+    const instructions = 'Check all source edits against these repository instructions.\n';
+    const f = await fixture({ basePrompt: instructions, headPrompt: instructions });
+    try {
+      f.state.reviews = [{
+        user: { type: 'Bot' }, state: 'APPROVED', commit_id: f.previous,
+        body: `<!-- codjiflo-reviewer:${version} ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->`,
+      }];
+      await f.run();
+      const result = verdicts(f)[0].body;
+      const captured = await readFile(f.capture, 'utf8');
+      const scopeDiff = captured.slice(captured.indexOf('Review-scope unified diff follows:'), captured.indexOf('Authoritative current PR file metadata'));
+      assert.equal(result.event, 'APPROVE');
+      assert.ok(captured.includes(instructions));
+      assert.match(result.body, /codjiflo-reviewer:v2 /);
+      if (version === 'v1') {
+        assert.match(result.body, /Scope: \*\*full\*\* \(no usable successful baseline\)/);
+        assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
+        assert.ok(scopeDiff.includes('-old\n'));
+        assert.ok(scopeDiff.includes('+new\n'));
+      } else {
+        assert.match(result.body, /Scope: \*\*incremental\*\* \(previous approval is an ancestor on the same base\)/);
+        assert.ok(captured.includes(`git diff ${f.previous} ${f.head}`));
+        assert.ok(!scopeDiff.includes('-old\n'));
+        assert.ok(!scopeDiff.includes('+new\n'));
+      }
+      assert.ok(scopeDiff.includes('-second\n'));
+      assert.ok(scopeDiff.includes('+changed\n'));
     } finally { await f.close(); }
   });
 });
@@ -211,14 +244,14 @@ test('local aliases and mixed-case canonical names retain canonical publication 
   for (const [input, preset] of [['CoDeX', 'sol-xhigh'], ['CLAUDE', 'opus-xhigh'], ['SOL-XHIGH', 'sol-xhigh'], ['OpUs-XhIgH', 'opus-xhigh']]) await t.test(input, async () => {
     const f = await fixture();
     try {
-      f.state.reviews = [{ user: { type: 'Bot' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head: f.previous, base: f.base, preset })} -->` }];
+      f.state.reviews = [{ user: { type: 'Bot' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head: f.previous, base: f.base, preset })} -->` }];
       await f.run({ preset: input });
       const result = verdicts(f)[0].body;
       assert.equal(result.event, 'APPROVE');
       assert.match(f.state.posts[0].body.body, new RegExp(`starting \\*\\*${preset}\\*\\*`));
       assert.ok(result.body.startsWith(`## Codjiflo Reviewer — ${preset}\n`));
       assert.match(result.body, /Scope: \*\*incremental\*\*/);
-      const marker = JSON.parse(/<!-- codjiflo-reviewer:v1 (\{[^\n]+\}) -->/.exec(result.body)[1]);
+      const marker = JSON.parse(/<!-- codjiflo-reviewer:v2 (\{[^\n]+\}) -->/.exec(result.body)[1]);
       assert.deepEqual(marker, { head: f.head, base: f.base, preset });
     } finally { await f.close(); }
   });
@@ -249,7 +282,7 @@ test('ancestor approval, explicit full, PAT blockers, same head and changed pres
     try {
       const prior = scenario === 'rebase' ? 'f'.repeat(40) : scenario === 'same-head' ? f.head : f.previous;
       const base = scenario === 'base-change' ? 'c'.repeat(40) : f.base;
-      const approved = { user: { type: 'Bot' }, state: 'APPROVED', commit_id: prior, body: `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head: prior, base, preset: 'sol-xhigh' })} -->` };
+      const approved = { user: { type: 'Bot' }, state: 'APPROVED', commit_id: prior, body: `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head: prior, base, preset: 'sol-xhigh' })} -->` };
       f.state.reviews = [approved, ...(scenario === 'blockers' ? [{ ...approved, user: { type: 'User' }, state: 'CHANGES_REQUESTED' }] : [])];
       await f.run({ full: scenario === 'full', preset: scenario === 'preset-change' ? 'opus-xhigh' : 'sol-xhigh' });
       assert.match(verdicts(f)[0].body.body, new RegExp(`Scope: \\*\\*${scenario === 'incremental' ? 'incremental' : 'full'}\\*\\*`));
@@ -262,7 +295,7 @@ test('full and incremental native coordinates use API patches rather than local 
   for (const full of [false, true]) await t.test(String(full), async () => {
     const f = await fixture();
     try {
-      f.state.reviews = [{ user: { type: 'User' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v1 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
+      f.state.reviews = [{ user: { type: 'User' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v2 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
       f.state.files[0].patch = '@@ -20,2 +20,2 @@\n-old\n-second\n+new\n+changed';
       await f.run({ mode: 'findings', full });
       const result = verdicts(f)[0].body;

@@ -123,10 +123,12 @@ Each self-hosted runner process executes one job at a time. To allow more simult
 Incremental is the default. Each successful native review includes a machine-readable marker:
 
 ```html
-<!-- codjiflo-reviewer:v1 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-xhigh"} -->
+<!-- codjiflo-reviewer:v2 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-xhigh"} -->
 ```
 
-The most recent marked review must be an approval whose marker matches its GitHub `commit_id`, current base, and requested preset. Both App/bot and PAT-authored reviews participate. Its head must be an available ancestor of the new head. Then only changes since that approval are reviewed. Missing baseline, changed base or preset, rewritten/unavailable history, a previous changes-requested verdict, or a same-head rerun forces a **full** review. Earlier blocking findings are revisited rather than discarded. `full` explicitly requests the merge-base-to-head diff. Full Git history is fetched as needed.
+The most recent current-version marked review must be an approval whose marker matches its GitHub `commit_id`, current base, and requested preset. Both App/bot and PAT-authored reviews participate. Its head must be an available ancestor of the new head. Then only changes since that approval are reviewed. Missing baseline, changed base or preset, rewritten/unavailable history, a previous changes-requested verdict, or a same-head rerun forces a **full** review. Earlier blocking findings are revisited rather than discarded. `full` explicitly requests the merge-base-to-head diff. Full Git history is fetched as needed.
+
+Upgrading to supplemental repository instruction support invalidates all legacy `v1` review markers: only `v2` markers qualify as incremental baselines. Unsupported versions are ignored, not migrated or treated as errors. Without a usable `v2` approval, the next review covers the full PR under the current instructions, even if `.codjiflo/code-review/PROMPT.md` already existed unchanged at both heads. A new `v2` approval can establish an incremental baseline for subsequent changes.
 
 Inline coordinates come from GitHub's paginated PR file patches, including the current filename for renamed files. LEFT endpoints must be deleted lines; RIGHT endpoints may be added or unchanged context lines. Local Git diffs supply review scope, not publication coordinates. Missing or truncated patches provide no valid anchors: findings on them go into the review summary and require changes. PRs exceeding GitHub's 3,000-file metadata limit fail without a verdict.
 
