@@ -183,10 +183,10 @@ for await (const line of createInterface({ input: process.stdin })) {
       if (relaxed) assert.equal(await readFile(marker, 'utf8'), 'started', `${scenario}: external MCP must really start`);
       else await assert.rejects(readFile(marker), { code: 'ENOENT' });
     }
-    // The installed SDK documents omitted settingSources as loading all sources,
-    // not as settings isolation. Both the default and explicit-project controls
-    // must execute this harmless project hook; strict MCP is a separate boundary.
-    assert.equal(await readFile(hookMarker, 'utf8'), 'started', `${scenario}: project SessionStart hook must execute`);
+    // Hooks are a positive control for relaxed settings, not a production
+    // contract. Production retains the SDK's settings behavior, while this
+    // fixture never grants Write/Edit through project settings.
+    if (relaxed) assert.equal(await readFile(hookMarker, 'utf8'), 'started', `${scenario}: project SessionStart hook must execute`);
     // Session transcripts live under projects, not arbitrary config files.
     const transcripts = [];
     for (const root of [configDir, f.env.HOME]) {

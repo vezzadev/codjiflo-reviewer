@@ -363,7 +363,15 @@ test('real Git colliding rename headers remain separate alongside type changes',
     const temp = await mkdtemp(join(tmpdir(), 'codjiflo-header-collision-'));
     const cwd = join(temp, 'repository');
     await mkdir(cwd);
-    const git = args => runProcess('git', args, { cwd });
+    const home = join(temp, 'home');
+    await mkdir(home);
+    const gitConfig = join(home, 'empty-gitconfig');
+    await writeFile(gitConfig, '');
+    const env = { ...process.env, HOME: home, USERPROFILE: home };
+    // Inherited explicit config paths and command-scope entries override HOME.
+    for (const key of Object.keys(env)) if (key.startsWith('GIT_CONFIG')) delete env[key];
+    Object.assign(env, { GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_SYSTEM: gitConfig, GIT_CONFIG_NOSYSTEM: '1' });
+    const git = args => runProcess('git', args, { cwd, env });
     const commit = () => git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshot']);
     const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3'];
     try {
