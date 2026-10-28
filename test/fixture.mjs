@@ -92,8 +92,7 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const fake = join(temp, 'fake-cli.mjs');
   const capture = join(temp, 'prompt.txt');
   await writeFile(fake, `#!/usr/bin/env node
-import { readFile, writeFile, cp } from 'node:fs/promises';
-import { join } from 'node:path';
+import { writeFile, cp } from 'node:fs/promises';
 if (process.argv[2] === 'auth') {
  if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth status inherited provider credentials');
  console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'}));
@@ -102,6 +101,7 @@ if (process.argv[2] === 'auth') {
 process.stdin.setEncoding('utf8');
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 await writeFile(process.env.FIXTURE_CAPTURE + '.stdin', input);
+await writeFile(process.env.FIXTURE_CAPTURE + '.cwd', process.cwd(), 'utf8');
 if (process.argv.includes('exec')) {
  const manifestLine = input.split('\\n').find(line => line.startsWith('Navigable review evidence manifest: '));
  if (manifestLine) {

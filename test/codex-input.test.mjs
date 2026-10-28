@@ -29,7 +29,9 @@ test('large full and incremental reviews keep methodology inline and expose comp
       const input = await readFile(f.capture, 'utf8');
       assert.ok(input.length < 16000, 'initial prompt does not grow with duplicated patch evidence');
       const manifest = manifestOf(input);
-      assert.ok(relative(join(manifest.directory, '..', 'repository'), manifest.directory).startsWith('..'));
+      const checkout = await readFile(f.capture + '.cwd', 'utf8');
+      const fromCheckout = relative(checkout, manifest.directory);
+      assert.ok(fromCheckout === '..' || fromCheckout.startsWith('../'), 'evidence is outside the actual CLI checkout');
       const directory = f.capture + '.evidence';
       const scope = await readFile(join(directory, 'review-scope.diff'), 'utf8');
       if (full) assert.equal(scope, f.localDiff);
@@ -96,7 +98,8 @@ test('range inventory preserves escaped rename paths, binary files, UTF-8 and la
     assert.equal(records[0].filename, filename);
     assert.equal(records[0].previous_filename, previous);
     assert.equal(records[1].additions, null);
-    assert.equal(records[3].anchors, false);
+    assert.equal(records.length, 2, 'API ranges join their matching scope records');
+    assert.equal(records[1].anchors, false);
     const late = await readRange(manifest.directory, 'review-scope.diff', records[1].scope.start);
     assert.equal(late.text, last, 'late file can be inspected without loading the earlier huge file');
     const a = await readRange(manifest.directory, 'review-scope.diff', 0, 31);
@@ -104,12 +107,60 @@ test('range inventory preserves escaped rename paths, binary files, UTF-8 and la
     assert.ok(!a.text.includes('\ufffd') && !b.text.includes('\ufffd'));
     assert.equal(a.text + b.text, Buffer.from(first).subarray(0, b.next).toString('utf8'));
     assert.ok(a.bytes <= 31 && b.bytes <= 31);
-    const api = await readRange(manifest.directory, 'pr-patches.json', records[2].api.start, records[2].api.bytes);
+    const api = await readRange(manifest.directory, 'pr-patches.json', records[0].api.start, records[0].api.bytes);
     assert.equal(JSON.parse(api.text).filename, filename);
     await assert.rejects(readRange(manifest.directory, '../repository/secret', 0));
     await assert.rejects(readRange(manifest.directory, 'review-scope.diff', -1));
     await assert.rejects(readRange(manifest.directory, 'review-scope.diff', 0, 6001));
     await assert.rejects(readRange(manifest.directory, 'review-scope.diff', Buffer.byteLength('diff --git a/first b/first\n') + 1));
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test('incremental consumers retrieve joined scope and API ranges while retaining API-only files', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codjiflo-joined-evidence-'));
+  const first = 'diff --git a/scope-only b/scope-only\n' + 'é🙂漢'.repeat(150000) + '\n';
+  const last = 'diff --git a/old-name b/current-name\nsimilarity index 90%\nrename from old-name\nrename to current-name\n';
+  const api = [
+    ...Array.from({ length: 80 }, (_, index) => ({ filename: `other-${index}`, patch: null })),
+    { filename: 'old-name', patch: '@@ -1 +1 @@\n-old\n+other' },
+    { filename: 'current-name', previous_filename: 'old-name', patch: '@@ -1 +1 @@\n-before\n+after' },
+  ];
+  try {
+    const input = await reviewInput({
+      preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+      options: { level: 'xhigh', mode: 'incremental', base: 'a', scope: 'c', head: 'b', diff: first + last, currentDiff: JSON.stringify(api) },
+      git: async () => '1\t1\tscope-only\0' + '1\t1\t\0old-name\0current-name\0',
+    });
+    const manifest = manifestOf(input);
+    // Follow each matching record's ranges without rescanning for API anchors.
+    let inventory = '', next = 0;
+    while (next < manifest.inventoryBytes) {
+      const chunk = await readRange(manifest.directory, 'inventory.jsonl', next);
+      inventory += chunk.text;
+      next = chunk.next;
+    }
+    const records = inventory.trim().split('\n').map(JSON.parse);
+    assert.equal(records.length, 83);
+    const scopeOnly = records.find(record => record.filename === 'scope-only');
+    assert.ok(scopeOnly.scope);
+    assert.equal(scopeOnly.api, undefined);
+    assert.equal(scopeOnly.anchors, undefined);
+    const joined = records.find(record => record.filename === 'current-name');
+    assert.equal(joined.previous_filename, 'old-name');
+    assert.equal(joined.anchors, true);
+    const scopeRange = await readRange(manifest.directory, 'review-scope.diff', joined.scope.start, joined.scope.bytes);
+    assert.equal(scopeRange.text, last);
+    const apiRange = await readRange(manifest.directory, 'pr-patches.json', joined.api.start, joined.api.bytes);
+    assert.deepEqual(JSON.parse(apiRange.text), api.at(-1));
+    const previous = records.find(record => record.filename === 'old-name');
+    assert.equal(previous.scope, undefined, 'previous filename does not join a different current filename');
+    const previousRange = await readRange(manifest.directory, 'pr-patches.json', previous.api.start, previous.api.bytes);
+    assert.deepEqual(JSON.parse(previousRange.text), api.at(-2));
+    const apiOnly = records.find(record => record.filename === 'other-79');
+    assert.equal(apiOnly.scope, undefined);
+    assert.equal(apiOnly.anchors, false);
+    const apiOnlyRange = await readRange(manifest.directory, 'pr-patches.json', apiOnly.api.start, apiOnly.api.bytes);
+    assert.deepEqual(JSON.parse(apiOnlyRange.text), api[79]);
   } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
@@ -126,7 +177,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
       const git = args => runProcess('git', args, { cwd, env });
       const commit = () => git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshot']);
       const toLink = 'a-to-link\t"é\n.txt', fromLink = 'b-from-link\t"漢\n.txt';
-      const names = [...(typeChanges ? [toLink] : []), ...(variant === 'types' ? [fromLink] : []), 'c-content.txt', ...(gitlink ? ['d-submodule'] : []), 'z-padding.txt', 'zz-late.txt'];
+      const names = [...(typeChanges ? [toLink] : []), ...(variant === 'types' ? [fromLink] : []), 'c-content.txt', ...(variant === 'types' ? ['d-renamed.txt'] : []), ...(gitlink ? ['d-submodule', 'e-to-gitlink', 'f-from-gitlink'] : []), 'z-padding.txt', 'zz-late.txt'];
       const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3'];
       try {
         await git(['init', '-q']);
@@ -138,12 +189,15 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           seed = (await git(['rev-parse', 'HEAD'])).trim();
         }
         for (const filename of names) {
-          if (filename === 'd-submodule') continue;
+          if (filename === 'd-submodule' || filename === 'f-from-gitlink') continue;
           if (filename === fromLink) await symlink('old-target', join(cwd, filename));
-          else await writeFile(join(cwd, filename), `old ${filename}\n`);
+          else await writeFile(join(cwd, filename === 'd-renamed.txt' ? 'd-original.txt' : filename), `old ${filename}\n`);
         }
         await git(['add', '--all']);
-        if (gitlink) await git(['update-index', '--add', '--cacheinfo', `160000,${seed},d-submodule`]);
+        if (gitlink) {
+          await git(['update-index', '--add', '--cacheinfo', `160000,${seed},d-submodule`]);
+          await git(['update-index', '--add', '--cacheinfo', `160000,${seed},f-from-gitlink`]);
+        }
         await commit();
         const base = (await git(['rev-parse', 'HEAD'])).trim();
         if (typeChanges) {
@@ -154,12 +208,23 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
             await writeFile(join(cwd, fromLink), 'now a regular file\n');
           }
         }
+        if (variant === 'types') {
+          await writeFile(join(cwd, 'd-renamed.txt'), await readFile(join(cwd, 'd-original.txt')));
+          await rm(join(cwd, 'd-original.txt'));
+        }
+        if (gitlink) {
+          await rm(join(cwd, 'e-to-gitlink'));
+          await writeFile(join(cwd, 'f-from-gitlink'), 'now a regular file\n');
+        }
         const content = ['\r', '\u2028', '\u2029'].map(separator => `content${separator}diff --git a/fake b/fake\n`).join('');
         await writeFile(join(cwd, 'c-content.txt'), content);
         await writeFile(join(cwd, 'z-padding.txt'), 'x'.repeat(MAX_INLINE_INPUT) + '\n');
         await writeFile(join(cwd, 'zz-late.txt'), 'late evidence\n');
         await git(['add', '--all']);
-        if (gitlink) await git(['update-index', '--add', '--cacheinfo', `160000,${base},d-submodule`]);
+        if (gitlink) {
+          await git(['update-index', '--add', '--cacheinfo', `160000,${base},d-submodule`]);
+          await git(['update-index', '--add', '--cacheinfo', `160000,${base},e-to-gitlink`]);
+        }
         await commit();
         const head = (await git(['rev-parse', 'HEAD'])).trim();
         const diff = await git([...diffArgs, base, head, '--']);
@@ -172,7 +237,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           assert.equal(manifest.scopeBytes, stored.length);
           let next = 0;
           for (const record of records.filter(record => record.scope)) {
-            const expected = await git(['--literal-pathspecs', ...diffArgs, base, head, '--', record.filename]);
+            const expected = await git(['--literal-pathspecs', ...diffArgs, base, head, '--', ...(record.previous_filename ? [record.previous_filename] : []), record.filename]);
             assert.equal(record.scope.start, next);
             const end = next + record.scope.bytes;
             assert.equal(stored.subarray(next, end).toString('utf8'), expected);
@@ -214,7 +279,13 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           assert.equal(inspected, true);
           assert.equal(posts.filter(post => post.path.endsWith('/reviews')).length, 0);
         } else {
-          await inspect(await reviewInput({ preset: { cli: 'codex' }, temp, cwd, git, options: { level: 'xhigh', mode: 'full', base, head, scope: base, diff, currentDiff: '[]' } }));
+          const queries = [];
+          const input = await reviewInput({ preset: { cli: 'codex' }, temp, cwd, git: args => {
+            queries.push(args);
+            return git(args);
+          }, options: { level: 'xhigh', mode: 'full', base, head, scope: base, diff, currentDiff: '[]' } });
+          assert.equal(queries.length, 1, 'indexing all type changes uses only the scope numstat query');
+          await inspect(input);
         }
       } finally { await rm(temp, { recursive: true, force: true }); }
     });
@@ -228,6 +299,14 @@ test('unbounded inventory records and inconsistent scope indices fail closed', a
     await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => `1\t0\t${'name'.repeat(2000)}\0` }), /inventory record/);
     await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => '' }), /index complete/);
     await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: temp, git: async () => '' }), /outside the checkout/);
+    for (const diff of [
+      'unindexed prefix\n' + options.diff,
+      options.diff + '\ndiff --git a/another b/another\nnew block\n',
+      options.diff + '\ndiff --git a/a b/a \nnear-identical header\n',
+      options.diff + '\ndiff --git a/other b/other\nmiddle block\ndiff --git a/a b/a\nnonconsecutive repeat\n',
+    ]) {
+      await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options: { ...options, diff }, temp, cwd: join(temp, 'repository'), git: async () => '1\t0\ta\0' }), /index complete/);
+    }
   } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
@@ -262,8 +341,6 @@ test('Codex failed or missing terminal completion cannot publish a valid-looking
       if (mode === 'fatal-error' || mode === 'fatal-exit') assert.match(failure, /Fixture fatal transport error/);
       if (mode === 'input-too-large') {
         assert.match(failure, /1048576/);
-        assert.match(failure, /UTF-8 bytes/);
-        assert.match(failure, /stdin/);
       }
     } finally { await f.close(); }
   });
@@ -325,9 +402,10 @@ test('a 3000-file inventory stays navigable without inflating the initial prompt
     assert.equal(manifest.apiFiles, 3000);
     const inventory = await readFile(join(manifest.directory, 'inventory.jsonl'), 'utf8');
     const records = inventory.trim().split('\n').map(JSON.parse);
-    assert.equal(records.length, 6000);
-    assert.equal(records[2999].filename, names.at(-1));
-    assert.equal(records.at(-1).filename, names.at(-1));
+    assert.deepEqual(records.map(record => record.filename), names);
+    const last = records.at(-1);
+    const anchor = await readRange(manifest.directory, 'pr-patches.json', last.api.start, last.api.bytes);
+    assert.deepEqual(JSON.parse(anchor.text), { filename: names.at(-1), patch: null });
     const late = await readRange(manifest.directory, 'review-scope.diff', records[2999].scope.start);
     assert.equal(late.text, `diff --git a/${names.at(-1)} b/${names.at(-1)}\n`);
     // Simulate retrying a truncated read with a smaller budget at the SAME

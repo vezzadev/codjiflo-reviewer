@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { schema } from './prompt.mjs';
 import { secretRedactor } from './claude.mjs';
+import { MAX_INLINE_INPUT } from './evidence.mjs';
 
 // Only protocol error messages are public diagnostics, never item/tool/model
 // output or stderr. Ignore malformed lines here only when salvaging a failed
@@ -65,8 +66,7 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
     await writeFile(schemaPath, JSON.stringify(schema));
     // Evidence-aware orchestration keeps methodology inline. Never fall back to
     // staging an opaque whole prompt that requires duplicate evidence ingestion.
-    const input = prompt;
-    if (input.length > 512 * 1024) throw new Error('Codex review input exceeds inline budget; structured evidence preparation is required');
+    if (prompt.length > MAX_INLINE_INPUT) throw new Error('Codex review input exceeds inline budget; structured evidence preparation is required');
     let stdout;
     const { redact } = secretRedactor(Object.entries(env)
       .filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY|AUTHORIZATION/i.test(name))
@@ -76,11 +76,11 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
         'exec', '--model', env.CODJIFLO_SOL_MODEL || preset.model,
         '-c', `model_reasoning_effort="${preset.effort}"`, '--sandbox', 'read-only',
         '--output-schema', schemaPath, '--output-last-message', output, '--json', '-',
-      ], { cwd, env, input, stream: true, timeoutMs: 45 * 60 * 1000 });
+      ], { cwd, env, input: prompt, stream: true, timeoutMs: 45 * 60 * 1000 });
     } catch (error) {
       const diagnostic = codexDiagnostics(error.stdout, redact);
       if (/input_too_large|Input exceeds the maximum length/i.test(diagnostic)) {
-        throw new Error(`Codex rejected review input size (original ${prompt.length} UTF-16 code units / ${Buffer.byteLength(prompt)} UTF-8 bytes; stdin ${input.length} code units). No review completed; no scope was truncated and no preset was switched. ${diagnostic}`);
+        throw new Error(`Codex rejected review input size (${prompt.length} UTF-16 code units / ${Buffer.byteLength(prompt)} UTF-8 bytes). No review completed; no scope was truncated and no preset was switched. ${diagnostic}`);
       }
       const status = error.termination === 'timeout' ? 'timed out' : error.termination === 'exit' ? `failed (exit ${error.exitCode})` : error.termination === 'signal' ? `failed (${error.signal})` : 'could not run';
       throw new Error(`Codex review ${status}.${diagnostic ? `\n${diagnostic}` : ' See process logs for details.'}`);

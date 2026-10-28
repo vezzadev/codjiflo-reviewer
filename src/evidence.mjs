@@ -60,43 +60,40 @@ export async function reviewInput({ preset, options, temp, cwd, git }) {
   const scope = scopeFiles(await git(['diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--numstat', '-z', options.scope, options.head, '--']));
   // Git records are LF-delimited, not JavaScript multiline-regexp lines:
   // CR and Unicode line/paragraph separators may occur inside blob content.
-  const starts = [...options.diff.matchAll(/(?:^|\n)diff --git /g)].map(match => match.index + (match[0].startsWith('\n') ? 1 : 0));
-  const typeDiffs = new Map();
-  if (starts.length !== scope.length) {
-    // A type change can emit multiple patch blocks for one numstat record.
-    // Ask Git for raw NUL-delimited paths, never decode its quoted headers.
-    const changedTypes = await git(['diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--diff-filter=T', '--name-only', '-z', options.scope, options.head, '--']);
-    for (const filename of changedTypes.split('\0').filter(Boolean)) {
-      typeDiffs.set(filename, await git(['-c', 'core.quotePath=false', '--literal-pathspecs', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', options.scope, options.head, '--', filename]));
-    }
+  const blocks = [...options.diff.matchAll(/(?:^|\n)(diff --git [^\n]*)(?=\n|$)/g)].map(match => ({
+    start: match.index + (match[0].startsWith('\n') ? 1 : 0),
+    header: match[1],
+  }));
+  // Type changes (including regular-file/gitlink changes) emit deletion and
+  // addition blocks with the exact same header. Renames have one distinct
+  // header. Coalesce adjacent equal LF-delimited headers without parsing Git's
+  // quoted paths or issuing a separate diff for each changed type.
+  const groups = [];
+  for (const block of blocks) {
+    if (groups.at(-1)?.header !== block.header) groups.push(block);
   }
-  let byte = 0, position = 0, block = 0;
-  const inventory = scope.map(file => {
-    if (starts[block] !== position) throw new Error('Cannot index complete review scope');
-    const typeDiff = typeDiffs.get(file.filename);
-    let end;
-    if (typeDiff !== undefined) {
-      if (!typeDiff || !options.diff.startsWith(typeDiff, position)) throw new Error('Cannot index complete review scope');
-      end = position + typeDiff.length;
-      while (block < starts.length && starts[block] < end) block++;
-      if (end !== (starts[block] ?? options.diff.length)) throw new Error('Cannot index complete review scope');
-    } else {
-      end = starts[++block] ?? options.diff.length;
-    }
+  if (groups.length !== scope.length) throw new Error('Cannot index complete review scope');
+  let byte = 0, position = 0;
+  const inventory = scope.map((file, index) => {
+    if (groups[index].start !== position) throw new Error('Cannot index complete review scope');
+    const end = groups[index + 1]?.start ?? options.diff.length;
     const bytes = Buffer.byteLength(options.diff.slice(position, end));
     const entry = { ...file, scope: { start: byte, bytes } };
     byte += bytes;
     position = end;
     return entry;
   });
-  if (position !== options.diff.length || block !== starts.length) throw new Error('Cannot index complete review scope');
+  if (position !== options.diff.length || byte !== Buffer.byteLength(options.diff)) throw new Error('Cannot index complete review scope');
+  const byFilename = new Map(inventory.map(entry => [entry.filename, entry]));
   const records = JSON.parse(options.currentDiff);
   const chunks = ['[\n'];
   let patchBytes = 2;
   for (const [index, record] of records.entries()) {
     const text = JSON.stringify(record, null, 2);
-    const entry = { filename: record.filename, ...(record.previous_filename === undefined ? {} : { previous_filename: record.previous_filename }), anchors: record.patch !== null, api: { start: patchBytes, bytes: Buffer.byteLength(text) } };
-    inventory.push(entry);
+    const entry = byFilename.get(record.filename) ?? { filename: record.filename, ...(record.previous_filename === undefined ? {} : { previous_filename: record.previous_filename }) };
+    entry.anchors = record.patch !== null;
+    entry.api = { start: patchBytes, bytes: Buffer.byteLength(text) };
+    if (!byFilename.has(record.filename)) inventory.push(entry);
     const chunk = text + (index === records.length - 1 ? '\n' : ',\n');
     chunks.push(chunk);
     patchBytes += Buffer.byteLength(chunk);
