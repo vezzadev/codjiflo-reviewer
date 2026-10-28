@@ -7,6 +7,7 @@ import { filesFromApi, inlineComment } from './diff.mjs';
 import { reviewInput } from './evidence.mjs';
 import { runProcess, runReviewer } from './runner.mjs';
 import { publishReview, reportPublicationFailure, workflowRunUrl } from './publication.mjs';
+import { sanitizeGitEnv } from './git-environment.mjs';
 
 export const MARKER = /<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/;
 export function baseline(reviews, base, preset) {
@@ -73,7 +74,8 @@ export async function review({ request, github, env = process.env, reviewer = ru
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-'));
   try {
     const cwd = join(temp, 'repository');
-    const gitEnv = { ...env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${github.token}`).toString('base64')}` };
+    const reviewEnv = sanitizeGitEnv(env);
+    const gitEnv = { ...reviewEnv, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${github.token}`).toString('base64')}` };
     const git = args => runProcess('git', args, { cwd, env: gitEnv, timeoutMs: 5 * 60 * 1000 });
     await runProcess('git', ['init', cwd], { env: gitEnv, timeoutMs: 5 * 60 * 1000 });
     await git(['remote', 'add', 'origin', pr.base.repo.clone_url]);
@@ -107,7 +109,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const currentDiff = JSON.stringify([...files.values()].map(file => ({ filename: file.path, previous_filename: file.previousPath, patch: file.patch })), null, 2);
     const customInstructions = currentPromptBlob === undefined ? undefined : await git(['cat-file', 'blob', currentPromptBlob]);
     const input = await reviewInput({ preset, options: { level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions }, cwd, temp, git });
-    const result = await reviewer({ preset, prompt: input, cwd, temp, env });
+    const result = await reviewer({ preset, prompt: input, cwd, temp, env: reviewEnv });
     const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10);
     const publication = randomUUID();
     const resultPath = output ?? `codjiflo-result-${publication}.json`;

@@ -10,6 +10,7 @@ import { MAX_INLINE_INPUT, MAX_EVIDENCE_READ_BYTES } from '../src/input-budget.m
 import { runProcess } from '../src/runner.mjs';
 import { fixture, isolatedGitEnv } from './fixture.mjs';
 import { prompt } from '../src/prompt.mjs';
+import { sanitizeGitEnv } from '../src/git-environment.mjs';
 
 const verdicts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
 
@@ -229,7 +230,27 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
   });
 });
 
-test('Git fixtures leave an inherited external repository and index untouched', async () => {
+test('Git environment sanitization removes repository and config selectors without mutating transport settings', () => {
+  const selectors = [
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_GLOBAL',
+    'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM', 'GIT_OBJECT_DIRECTORY', 'GIT_DIR',
+    'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX', 'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES',
+  ];
+  const preserved = {
+    PATH: '/git/bin', HOME: '/runner', GIT_EXEC_PATH: '/git/libexec',
+    GIT_SSL_CAINFO: '/certs/ca.pem', GIT_SSL_CAPATH: '/certs',
+    GIT_SSH_COMMAND: 'ssh -i /keys/deploy', GIT_ASKPASS: '/bin/askpass',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+  const inherited = Object.freeze({ ...preserved, ...Object.fromEntries(selectors.map(name => [name, 'caller override'])) });
+  assert.deepEqual(sanitizeGitEnv(inherited), preserved);
+  for (const name of selectors) assert.equal(inherited[name], 'caller override');
+});
+
+test('Git fixtures and production reviews leave an inherited external repository and index untouched', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-hostile-git-env-'));
   const outer = join(temp, 'outer');
   await mkdir(outer);
@@ -264,19 +285,54 @@ test('Git fixtures leave an inherited external repository and index untouched', 
       GIT_CONFIG_KEY_0: 'core.bare',
       GIT_CONFIG_VALUE_0: 'true',
     };
-    // Run in children so the real tests and common fixture inherit these values
-    // without changing process.env underneath other tests.
-    await runProcess(process.execPath, ['--test', '--test-name-pattern=^real Git (type changes|colliding rename)', fileURLToPath(import.meta.url)], { env: hostileEnv });
+    // Only a nested test runner must stop inheriting Node's child-v8 context.
+    // Keep the hostile Git values so these real Git consumers exercise isolation.
+    const childTestEnv = { ...hostileEnv };
+    delete childTestEnv.NODE_TEST_CONTEXT;
+    let tap;
+    try {
+      tap = await runProcess(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^real Git (type changes|colliding rename)', fileURLToPath(import.meta.url)], { env: childTestEnv, timeoutMs: 120000 });
+    } catch (error) {
+      error.message += `\nNested test stdout:\n${error.stdout ?? ''}`;
+      throw error;
+    }
+    assert.match(tap, /^# tests [1-9]\d*$/m, tap);
+    assert.match(tap, /^# fail 0$/m, tap);
     const output = await runProcess(process.execPath, ['--input-type=module', '-e', `
       import assert from 'node:assert/strict';
+      import { readFile } from 'node:fs/promises';
       import { fixture } from ${JSON.stringify(new URL('./fixture.mjs', import.meta.url).href)};
       const f = await fixture();
       try {
-        await f.run({ full: true });
-        assert.equal(f.state.posts.find(post => post.path.endsWith('/reviews')).body.event, 'APPROVE');
+        // Inject at run(), not fixture construction: production must sanitize it.
+        await f.run({ full: true, timeoutMs: 60000, providerEnv: {
+          GIT_DIR: process.env.GIT_DIR,
+          GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+          GIT_INDEX_FILE: process.env.GIT_INDEX_FILE,
+          GIT_OBJECT_DIRECTORY: process.env.GIT_OBJECT_DIRECTORY,
+          GIT_CEILING_DIRECTORIES: process.env.GIT_CEILING_DIRECTORIES,
+          GIT_NAMESPACE: 'caller-namespace',
+          GIT_CONFIG_COUNT: process.env.GIT_CONFIG_COUNT,
+          GIT_CONFIG_KEY_0: process.env.GIT_CONFIG_KEY_0,
+          GIT_CONFIG_VALUE_0: process.env.GIT_CONFIG_VALUE_0,
+          FIXTURE_INSPECT_GIT: '1',
+        } });
+        const reviews = f.state.posts.filter(post => post.path.endsWith('/reviews'));
+        assert.equal(reviews.length, 1);
+        assert.equal(reviews[0].body.event, 'APPROVE');
+        assert.equal(reviews[0].body.commit_id, f.head);
+        const context = JSON.parse(await readFile(f.capture + '.git-context', 'utf8'));
+        assert.equal(context.head, f.head, 'reviewer Git sees the pinned disposable checkout');
+        for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_CEILING_DIRECTORIES', 'GIT_NAMESPACE']) {
+          assert.equal(context.env[name], undefined, name);
+        }
+        assert.equal(Object.keys(context.env).some(name => name.startsWith('GIT_CONFIG')), false, 'reviewer receives neither caller config nor fetch authorization config');
         console.log('isolated fixture reviewed');
       } finally { await f.close(); }
-    `], { env: hostileEnv });
+    `], { env: hostileEnv, timeoutMs: 120000 }).catch(error => {
+      error.message += `\nFixture child stdout:\n${error.stdout ?? ''}`;
+      throw error;
+    });
     assert.match(output, /isolated fixture reviewed/);
     assert.deepEqual(await readFile(index), before.index, 'external staged index is unchanged');
     assert.equal(await git(['rev-parse', 'HEAD']), before.head);

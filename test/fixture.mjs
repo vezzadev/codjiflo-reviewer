@@ -4,15 +4,16 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { runProcess } from '../src/runner.mjs';
+import { sanitizeGitEnv } from '../src/git-environment.mjs';
 
 export async function isolatedGitEnv(temp, inherited = process.env) {
   const home = join(temp, 'home');
   const xdg = join(home, '.config');
   await mkdir(xdg, { recursive: true, mode: 0o700 });
-  const gitConfig = join(home, 'empty-gitconfig');
+  const gitConfig = join(home, '.gitconfig');
   await writeFile(gitConfig, '');
-  const env = Object.fromEntries(Object.entries(inherited).filter(([key]) => !key.startsWith('GIT_')));
-  return { ...env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: xdg, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: '1' };
+  const env = sanitizeGitEnv(inherited);
+  return { ...env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: xdg, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
 }
 
 async function setHeadPrompt({ repo, temp, promptPath, hostPromptDirectory, hostPrompt, headPrompt, headPromptType }) {
@@ -45,7 +46,8 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-fixture-'));
   const repo = join(temp, 'repo');
   await mkdir(repo);
-  const env = { ...await isolatedGitEnv(temp), CLAUDE_CONFIG_DIR: join(temp, 'home', '.claude'), CODJIFLO_ANTHROPIC_KEYS_FILE: join(temp, 'missing-keys.json'), CODJIFLO_CLAUDE_STATE_FILE: join(temp, 'claude-state.json'), GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
+  const env = await isolatedGitEnv(temp);
+  Object.assign(env, { CLAUDE_CONFIG_DIR: join(env.HOME, '.claude'), CODJIFLO_ANTHROPIC_KEYS_FILE: join(temp, 'missing-keys.json'), CODJIFLO_CLAUDE_STATE_FILE: join(temp, 'claude-state.json') });
   const git = args => runProcess('git', args, { cwd: repo, env });
   await git(['init', '-b', 'main']);
   const tail = 'context\n'.repeat(8);
@@ -110,6 +112,13 @@ process.stdin.setEncoding('utf8');
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 await writeFile(process.env.FIXTURE_CAPTURE + '.stdin', input);
 await writeFile(process.env.FIXTURE_CAPTURE + '.cwd', process.cwd(), 'utf8');
+if (process.env.FIXTURE_INSPECT_GIT === '1') {
+ const { execFileSync } = await import('node:child_process');
+ await writeFile(process.env.FIXTURE_CAPTURE + '.git-context', JSON.stringify({
+  head: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10000 }).trim(),
+  env: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('GIT_'))),
+ }));
+}
 if (process.argv.includes('exec')) {
  const manifestLine = input.split('\\n').find(line => line.startsWith('Navigable review evidence manifest: '));
  if (manifestLine) {
