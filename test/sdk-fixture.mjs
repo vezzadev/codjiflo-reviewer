@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 
 // This is a protocol fixture, not a fake SDK. The installed Agent SDK launches
 // its real runtime and sends real Messages requests to this loopback endpoint.
-export async function sdkFixture({ mode = 'success' } = {}) {
+export async function sdkFixture({ mode = 'success', responseContent } = {}) {
   const requests = [];
   const result = { verdict: 'REQUEST_CHANGES', summary: 'Local SDK protocol fixture review.', findings: [
     { path: 'a.js', side: 'RIGHT', start_line: 1, line: 2, priority: 'P2', disposition: 'blocking', title: 'Fixture finding', body: 'Concrete local fixture failure scenario.' },
@@ -37,9 +37,9 @@ export async function sdkFixture({ mode = 'success' } = {}) {
       }
       const structuredTool = body.tools?.find(tool => /structured.?output/i.test(tool.name));
       const alreadyCalled = body.messages?.some(message => Array.isArray(message.content) && message.content.some(block => block.type === 'tool_use' && block.name === structuredTool?.name));
-      const content = structuredTool && !alreadyCalled
+      const content = responseContent?.({ body, result }) ?? (structuredTool && !alreadyCalled
         ? [{ type: 'tool_use', id: 'toolu_fixture_structured', name: structuredTool.name, input: result }]
-        : [{ type: 'text', text: JSON.stringify(result) }];
+        : [{ type: 'text', text: JSON.stringify(result) }]);
       const message = { id: 'msg_local_fixture', type: 'message', role: 'assistant', model: body.model, content, stop_reason: content[0].type === 'tool_use' ? 'tool_use' : 'end_turn', stop_sequence: null, usage: { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } };
       if (!body.stream) {
         response.writeHead(200, { 'Content-Type': 'application/json' });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, symlink, mkdtemp, mkdir, rm } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { review } from '../src/review.mjs';
@@ -31,7 +31,7 @@ test('large full and incremental reviews keep methodology inline and expose comp
       const manifest = manifestOf(input);
       const checkout = await readFile(f.capture + '.cwd', 'utf8');
       const fromCheckout = relative(checkout, manifest.directory);
-      assert.ok(fromCheckout === '..' || fromCheckout.startsWith('../'), 'evidence is outside the actual CLI checkout');
+      assert.ok(fromCheckout === '..' || fromCheckout.startsWith('..' + sep), 'evidence is outside the actual CLI checkout');
       const directory = f.capture + '.evidence';
       const scope = await readFile(join(directory, 'review-scope.diff'), 'utf8');
       if (full) assert.equal(scope, f.localDiff);
@@ -164,6 +164,70 @@ test('incremental consumers retrieve joined scope and API ranges while retaining
   } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
+test('rename disagreements retain primary joins and expose alternate API anchor ranges', async t => {
+  for (const variant of [
+    {
+      name: 'scope deletion and addition with an API rename',
+      scope: [{ filename: 'a' }, { filename: 'b' }],
+      api: [{ filename: 'b', previous_filename: 'a', patch: '@@ -1 +1 @@\n-before\n+after' }],
+      target: 'a', related: 'b',
+    },
+    {
+      name: 'scope rename with API deletion and addition',
+      scope: [{ filename: 'b', previous_filename: 'a' }],
+      api: [{ filename: 'a', patch: '@@ -1 +0,0 @@\n-before' }, { filename: 'b', patch: '@@ -0,0 +1 @@\n+after' }],
+      target: 'b', related: 'a',
+    },
+    {
+      name: 'incremental rename keeps its own previous filename despite same-name API metadata',
+      scope: [{ filename: 'b', previous_filename: 'c' }],
+      api: [{ filename: 'b', previous_filename: 'a', patch: '@@ -1 +1 @@\n-before\n+after' }, { filename: 'c', patch: null }],
+      target: 'b', related: 'c',
+    },
+    {
+      name: 'incremental same-name scope retains primary and alternate rename records',
+      scope: [{ filename: 'a' }],
+      api: [{ filename: 'a', patch: '@@ -0,0 +1 @@\n+replacement' }, { filename: 'b', previous_filename: 'a', patch: '@@ -1 +1 @@\n-before\n+after' }],
+      target: 'a', related: 'b',
+    },
+  ]) await t.test(variant.name, async () => {
+    const temp = await mkdtemp(join(tmpdir(), 'codjiflo-rename-evidence-'));
+    const padding = 'diff --git a/padding b/padding\n' + 'x'.repeat(MAX_INLINE_INPUT) + '\n';
+    const diff = padding + variant.scope.map(file => `diff --git a/${file.previous_filename ?? file.filename} b/${file.filename}\n`).join('');
+    const numstat = '1\t0\tpadding\0' + variant.scope.map(file => file.previous_filename
+      ? `1\t1\t\0${file.previous_filename}\0${file.filename}\0`
+      : `1\t1\t${file.filename}\0`).join('');
+    try {
+      const input = await reviewInput({
+        preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+        options: { level: 'xhigh', mode: 'incremental', base: 'base', scope: 'previous', head: 'head', diff, currentDiff: JSON.stringify(variant.api) },
+        git: async () => numstat,
+      });
+      const manifest = manifestOf(input);
+      const inventory = (await readFile(join(manifest.directory, 'inventory.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+      for (const scope of variant.scope) {
+        const entry = inventory.find(record => record.filename === scope.filename);
+        assert.equal(entry.previous_filename, scope.previous_filename, 'scope rename metadata remains authoritative for scope ranges');
+        const primary = variant.api.find(record => record.filename === scope.filename);
+        if (primary) {
+          const actual = await readRange(manifest.directory, 'pr-patches.json', entry.api.start, entry.api.bytes);
+          assert.deepEqual(JSON.parse(actual.text), primary);
+          assert.equal(entry.anchors, primary.patch !== null);
+        } else assert.equal(entry.api, undefined);
+      }
+      const entry = inventory.find(record => record.filename === variant.target);
+      assert.equal(entry.apiRelated.length, 1);
+      const candidate = entry.apiRelated[0];
+      const expected = variant.api.find(record => record.filename === variant.related);
+      assert.equal(candidate.filename, expected.filename);
+      assert.equal(candidate.previous_filename, expected.previous_filename);
+      assert.equal(candidate.anchors, expected.patch !== null);
+      const actual = await readRange(manifest.directory, 'pr-patches.json', candidate.api.start, candidate.api.bytes);
+      assert.deepEqual(JSON.parse(actual.text), expected, 'alternate API record is reachable without rescanning unrelated evidence');
+    } finally { await rm(temp, { recursive: true, force: true }); }
+  });
+});
+
 test('real Git type changes and non-LF content preserve complete consumer-visible ranges', async t => {
   for (const variant of ['separators', 'types', 'submodule']) {
     const typeChanges = variant !== 'separators', gitlink = variant === 'submodule';
@@ -178,11 +242,12 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
       const commit = () => git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshot']);
       const toLink = 'a-to-link\t"é\n.txt', fromLink = 'b-from-link\t"漢\n.txt';
       const names = [...(typeChanges ? [toLink] : []), ...(variant === 'types' ? [fromLink] : []), 'c-content.txt', ...(variant === 'types' ? ['d-renamed.txt'] : []), ...(gitlink ? ['d-submodule', 'e-to-gitlink', 'f-from-gitlink'] : []), 'z-padding.txt', 'zz-late.txt'];
-      const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3'];
+      const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3'];
       try {
         await git(['init', '-q']);
         await git(['config', 'diff.submodule', 'log']);
         await git(['config', '--global', 'diff.submodule', 'log']);
+        if (gitlink) await git(['config', '--global', 'color.ui', 'always']);
         let seed;
         if (gitlink) {
           await git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'submodule seed']);
@@ -265,7 +330,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           };
           let inspected = false;
           // Exercise the production scope command in its disposable checkout,
-          // inheriting diff.submodule=log through ordinary Git configuration.
+          // inheriting diff.submodule=log and color.ui=always from Git config.
           await assert.rejects(review({
             request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'full' },
             github,
@@ -290,6 +355,33 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
       } finally { await rm(temp, { recursive: true, force: true }); }
     });
   }
+});
+
+test('empty incremental scope remains navigable when only current PR evidence is large', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codjiflo-empty-scope-'));
+  const api = [{ filename: 'earlier-change', patch: 'x'.repeat(MAX_INLINE_INPUT) }];
+  try {
+    const input = await reviewInput({
+      preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+      options: { level: 'xhigh', mode: 'incremental', base: 'base', head: 'head', scope: 'head', diff: '', currentDiff: JSON.stringify(api) },
+      git: async () => '',
+    });
+    const manifest = manifestOf(input);
+    assert.equal(manifest.scopeFiles, 0);
+    assert.equal(manifest.scopeBytes, 0);
+    assert.equal(await readFile(join(manifest.directory, 'review-scope.diff'), 'utf8'), '');
+    const inventory = (await readFile(join(manifest.directory, 'inventory.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(inventory.length, 1);
+    assert.equal(inventory[0].scope, undefined);
+    const patches = await readFile(join(manifest.directory, 'pr-patches.json'));
+    const range = inventory[0].api;
+    assert.deepEqual(JSON.parse(patches.subarray(range.start, range.start + range.bytes)), api[0]);
+    await assert.rejects(reviewInput({
+      preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+      options: { level: 'xhigh', mode: 'incremental', base: 'base', head: 'head', scope: 'head', diff: 'unindexed data', currentDiff: JSON.stringify(api) },
+      git: async () => '',
+    }), /index complete/);
+  } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
 test('unbounded inventory records and inconsistent scope indices fail closed', async () => {

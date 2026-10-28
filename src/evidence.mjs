@@ -72,33 +72,41 @@ export async function reviewInput({ preset, options, temp, cwd, git }) {
   for (const block of blocks) {
     if (groups.at(-1)?.header !== block.header) groups.push(block);
   }
-  if (groups.length !== scope.length) throw new Error('Cannot index complete review scope');
-  let byte = 0, position = 0;
+  if (groups.length !== scope.length || (groups[0]?.start ?? 0) !== 0 || (!groups.length && options.diff.length)) throw new Error('Cannot index complete review scope');
+  let byte = 0;
   const inventory = scope.map((file, index) => {
-    if (groups[index].start !== position) throw new Error('Cannot index complete review scope');
     const end = groups[index + 1]?.start ?? options.diff.length;
-    const bytes = Buffer.byteLength(options.diff.slice(position, end));
+    const bytes = Buffer.byteLength(options.diff.slice(groups[index].start, end));
     const entry = { ...file, scope: { start: byte, bytes } };
     byte += bytes;
-    position = end;
     return entry;
   });
-  if (position !== options.diff.length || byte !== Buffer.byteLength(options.diff)) throw new Error('Cannot index complete review scope');
   const byFilename = new Map(inventory.map(entry => [entry.filename, entry]));
   const records = JSON.parse(options.currentDiff);
   const chunks = ['[\n'];
   let patchBytes = 2;
+  const apiByPath = new Map();
   for (const [index, record] of records.entries()) {
     const text = JSON.stringify(record, null, 2);
     const entry = byFilename.get(record.filename) ?? { filename: record.filename, ...(record.previous_filename === undefined ? {} : { previous_filename: record.previous_filename }) };
     entry.anchors = record.patch !== null;
     entry.api = { start: patchBytes, bytes: Buffer.byteLength(text) };
+    const candidate = { filename: record.filename, ...(record.previous_filename === undefined ? {} : { previous_filename: record.previous_filename }), api: entry.api, anchors: entry.anchors };
+    for (const path of new Set([record.filename, record.previous_filename].filter(path => path !== undefined))) {
+      if (!apiByPath.has(path)) apiByPath.set(path, []);
+      apiByPath.get(path).push(candidate);
+    }
     if (!byFilename.has(record.filename)) inventory.push(entry);
     const chunk = text + (index === records.length - 1 ? '\n' : ',\n');
     chunks.push(chunk);
     patchBytes += Buffer.byteLength(chunk);
   }
   chunks.push(']\n');
+  for (const entry of inventory.filter(entry => entry.scope)) {
+    const related = new Set([...(apiByPath.get(entry.filename) ?? []), ...(apiByPath.get(entry.previous_filename) ?? [])]);
+    entry.apiRelated = [...related].filter(candidate => candidate.filename !== entry.filename);
+    if (!entry.apiRelated.length) delete entry.apiRelated;
+  }
   const patches = chunks.join('');
   const lines = inventory.map(entry => JSON.stringify(entry) + '\n');
   if (lines.some(line => Buffer.byteLength(line) > MAX_INVENTORY_RECORD)) throw new Error('Review inventory record exceeds bounded read budget; no scope was truncated');
