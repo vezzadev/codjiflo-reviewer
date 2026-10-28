@@ -1,19 +1,17 @@
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { prompt } from './prompt.mjs';
-
-export const MAX_INLINE_INPUT = 512 * 1024;
-const MAX_INVENTORY_RECORD = 6000;
+import { MAX_INLINE_INPUT, MAX_EVIDENCE_READ_BYTES } from './input-budget.mjs';
 
 // Generated names only: repository paths are JSON data, never staging paths or
 // shell syntax. The helper is trusted runner code, not executable PR content.
 const reader = `import { open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-const [name, startText = '0', sizeText = '6000'] = process.argv.slice(2);
+const [name, startText = '0', sizeText = '${MAX_EVIDENCE_READ_BYTES}'] = process.argv.slice(2);
 if (!['inventory.jsonl', 'review-scope.diff', 'pr-patches.json'].includes(name)) throw new Error('Unknown evidence file');
 const start = Number(startText), size = Number(sizeText);
-if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(size) || size < 1 || size > 6000) throw new Error('Invalid byte range (maximum 6000)');
+if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(size) || size < 1 || size > ${MAX_EVIDENCE_READ_BYTES}) throw new Error('Invalid byte range (maximum ${MAX_EVIDENCE_READ_BYTES})');
 const file = await open(join(fileURLToPath(new URL('.', import.meta.url)), name), 'r');
 try {
  const total = (await file.stat()).size;
@@ -54,23 +52,26 @@ export async function reviewInput({ preset, options, temp, cwd, git }) {
     throw new Error('Review instructions exceed the inline Codex input budget; no review completed and no instructions were truncated');
   }
   const parent = resolve(temp), checkout = resolve(cwd);
-  const directory = await mkdtemp(join(parent, 'review-evidence-'));
-  const fromCheckout = relative(checkout, directory);
+  const fromCheckout = relative(checkout, parent);
   if (fromCheckout === '' || (!fromCheckout.startsWith('..' + sep) && fromCheckout !== '..' && !isAbsolute(fromCheckout))) throw new Error('Review evidence must be outside the checkout');
+  const directory = await mkdtemp(join(parent, 'review-evidence-'));
   const scope = scopeFiles(await git(['diff', '--no-ext-diff', '--no-textconv', '--find-renames', '--numstat', '-z', options.scope, options.head, '--']));
   // Git records are LF-delimited, not JavaScript multiline-regexp lines:
   // CR and Unicode line/paragraph separators may occur inside blob content.
   const blocks = [...options.diff.matchAll(/(?:^|\n)(diff --git [^\n]*)(?=\n|$)/g)].map(match => ({
     start: match.index + (match[0].startsWith('\n') ? 1 : 0),
     header: match[1],
+    mode: options.diff.slice(match.index + match[0].length + 1, match.index + match[0].length + 33).match(/^(deleted|new) file mode ([0-7]{6})\n/),
   }));
-  // Type changes (including regular-file/gitlink changes) emit deletion and
-  // addition blocks with the exact same header. Renames have one distinct
-  // header. Coalesce adjacent equal LF-delimited headers without parsing Git's
-  // quoted paths or issuing a separate diff for each changed type.
+  // Only proven delete/add type-change pairs share one numstat record.
+  // Rename headers can collide for distinct paths containing " b/"; their
+  // text is not an unambiguous path encoding and must never be decoded.
   const groups = [];
-  for (const block of blocks) {
-    if (groups.at(-1)?.header !== block.header) groups.push(block);
+  for (let index = 0; index < blocks.length; index++) {
+    const block = blocks[index], next = blocks[index + 1];
+    groups.push(block);
+    if (block.header === next?.header && block.mode?.[1] === 'deleted' &&
+        next.mode?.[1] === 'new' && block.mode[2].slice(0, 3) !== next.mode[2].slice(0, 3)) index++;
   }
   if (groups.length !== scope.length || (groups[0]?.start ?? 0) !== 0 || (!groups.length && options.diff.length)) throw new Error('Cannot index complete review scope');
   let byte = 0;
@@ -89,7 +90,7 @@ export async function reviewInput({ preset, options, temp, cwd, git }) {
   for (const [index, record] of records.entries()) {
     const text = JSON.stringify(record, null, 2);
     const entry = byFilename.get(record.filename) ?? { filename: record.filename, ...(record.previous_filename === undefined ? {} : { previous_filename: record.previous_filename }) };
-    entry.anchors = record.patch !== null;
+    entry.anchors = record.patch !== null ? 'inline' : 'none';
     entry.api = { start: patchBytes, bytes: Buffer.byteLength(text) };
     const candidate = { filename: record.filename, ...(record.previous_filename === undefined ? {} : { previous_filename: record.previous_filename }), api: entry.api, anchors: entry.anchors };
     for (const path of new Set([record.filename, record.previous_filename].filter(path => path !== undefined))) {
@@ -109,7 +110,7 @@ export async function reviewInput({ preset, options, temp, cwd, git }) {
   }
   const patches = chunks.join('');
   const lines = inventory.map(entry => JSON.stringify(entry) + '\n');
-  if (lines.some(line => Buffer.byteLength(line) > MAX_INVENTORY_RECORD)) throw new Error('Review inventory record exceeds bounded read budget; no scope was truncated');
+  if (lines.some(line => Buffer.byteLength(line) > MAX_EVIDENCE_READ_BYTES)) throw new Error('Review inventory record exceeds bounded read budget; no scope was truncated');
   const index = lines.join('');
   await Promise.all([
     writeFile(join(directory, 'review-scope.diff'), options.diff, { mode: 0o400 }),

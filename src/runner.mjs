@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { schema } from './prompt.mjs';
 import { secretRedactor } from './claude.mjs';
-import { MAX_INLINE_INPUT } from './evidence.mjs';
+import { MAX_INLINE_INPUT } from './input-budget.mjs';
 
 // Only protocol error messages are public diagnostics, never item/tool/model
 // output or stderr. Ignore malformed lines here only when salvaging a failed

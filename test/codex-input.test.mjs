@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, symlink, mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { readFile, readdir, writeFile, symlink, mkdtemp, mkdir, rm, rename } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { review } from '../src/review.mjs';
-import { reviewInput, MAX_INLINE_INPUT } from '../src/evidence.mjs';
+import { reviewInput } from '../src/evidence.mjs';
+import { MAX_INLINE_INPUT, MAX_EVIDENCE_READ_BYTES } from '../src/input-budget.mjs';
 import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
 import { prompt } from '../src/prompt.mjs';
@@ -14,7 +15,7 @@ const verdicts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'
 
 const manifestOf = input => JSON.parse(input.split('\n').find(line => line.startsWith('Navigable review evidence manifest: ')).slice('Navigable review evidence manifest: '.length));
 
-async function readRange(directory, name, start, size = 6000) {
+async function readRange(directory, name, start, size = MAX_EVIDENCE_READ_BYTES) {
   const output = await runProcess(process.execPath, [join(directory, 'read-evidence.mjs'), name, String(start), String(size)]);
   const newline = output.indexOf('\n');
   return { ...JSON.parse(output.slice(0, newline)), text: output.slice(newline + 1) };
@@ -99,7 +100,7 @@ test('range inventory preserves escaped rename paths, binary files, UTF-8 and la
     assert.equal(records[0].previous_filename, previous);
     assert.equal(records[1].additions, null);
     assert.equal(records.length, 2, 'API ranges join their matching scope records');
-    assert.equal(records[1].anchors, false);
+    assert.equal(records[1].anchors, 'none');
     const late = await readRange(manifest.directory, 'review-scope.diff', records[1].scope.start);
     assert.equal(late.text, last, 'late file can be inspected without loading the earlier huge file');
     const a = await readRange(manifest.directory, 'review-scope.diff', 0, 31);
@@ -111,7 +112,7 @@ test('range inventory preserves escaped rename paths, binary files, UTF-8 and la
     assert.equal(JSON.parse(api.text).filename, filename);
     await assert.rejects(readRange(manifest.directory, '../repository/secret', 0));
     await assert.rejects(readRange(manifest.directory, 'review-scope.diff', -1));
-    await assert.rejects(readRange(manifest.directory, 'review-scope.diff', 0, 6001));
+    await assert.rejects(readRange(manifest.directory, 'review-scope.diff', 0, MAX_EVIDENCE_READ_BYTES + 1));
     await assert.rejects(readRange(manifest.directory, 'review-scope.diff', Buffer.byteLength('diff --git a/first b/first\n') + 1));
   } finally { await rm(temp, { recursive: true, force: true }); }
 });
@@ -147,7 +148,7 @@ test('incremental consumers retrieve joined scope and API ranges while retaining
     assert.equal(scopeOnly.anchors, undefined);
     const joined = records.find(record => record.filename === 'current-name');
     assert.equal(joined.previous_filename, 'old-name');
-    assert.equal(joined.anchors, true);
+    assert.equal(joined.anchors, 'inline');
     const scopeRange = await readRange(manifest.directory, 'review-scope.diff', joined.scope.start, joined.scope.bytes);
     assert.equal(scopeRange.text, last);
     const apiRange = await readRange(manifest.directory, 'pr-patches.json', joined.api.start, joined.api.bytes);
@@ -158,7 +159,7 @@ test('incremental consumers retrieve joined scope and API ranges while retaining
     assert.deepEqual(JSON.parse(previousRange.text), api.at(-2));
     const apiOnly = records.find(record => record.filename === 'other-79');
     assert.equal(apiOnly.scope, undefined);
-    assert.equal(apiOnly.anchors, false);
+    assert.equal(apiOnly.anchors, 'none');
     const apiOnlyRange = await readRange(manifest.directory, 'pr-patches.json', apiOnly.api.start, apiOnly.api.bytes);
     assert.deepEqual(JSON.parse(apiOnlyRange.text), api[79]);
   } finally { await rm(temp, { recursive: true, force: true }); }
@@ -212,7 +213,7 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
         if (primary) {
           const actual = await readRange(manifest.directory, 'pr-patches.json', entry.api.start, entry.api.bytes);
           assert.deepEqual(JSON.parse(actual.text), primary);
-          assert.equal(entry.anchors, primary.patch !== null);
+          assert.equal(entry.anchors, primary.patch !== null ? 'inline' : 'none');
         } else assert.equal(entry.api, undefined);
       }
       const entry = inventory.find(record => record.filename === variant.target);
@@ -221,7 +222,7 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
       const expected = variant.api.find(record => record.filename === variant.related);
       assert.equal(candidate.filename, expected.filename);
       assert.equal(candidate.previous_filename, expected.previous_filename);
-      assert.equal(candidate.anchors, expected.patch !== null);
+      assert.equal(candidate.anchors, expected.patch !== null ? 'inline' : 'none');
       const actual = await readRange(manifest.directory, 'pr-patches.json', candidate.api.start, candidate.api.bytes);
       assert.deepEqual(JSON.parse(actual.text), expected, 'alternate API record is reachable without rescanning unrelated evidence');
     } finally { await rm(temp, { recursive: true, force: true }); }
@@ -355,6 +356,87 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
       } finally { await rm(temp, { recursive: true, force: true }); }
     });
   }
+});
+
+test('real Git colliding rename headers remain separate alongside type changes', async t => {
+  for (const typeChange of [false, true]) await t.test(typeChange ? 'collision and type change' : 'collision only', async () => {
+    const temp = await mkdtemp(join(tmpdir(), 'codjiflo-header-collision-'));
+    const cwd = join(temp, 'repository');
+    await mkdir(cwd);
+    const git = args => runProcess('git', args, { cwd });
+    const commit = () => git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshot']);
+    const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3'];
+    try {
+      await git(['init', '-q']);
+      await mkdir(join(cwd, 'x b'));
+      await writeFile(join(cwd, 'x b/y'), 'first distinct rename content\n');
+      await writeFile(join(cwd, 'x'), 'second unrelated rename content\n');
+      await writeFile(join(cwd, 'zz-padding'), 'before\n');
+      if (typeChange) await writeFile(join(cwd, 'a-type'), 'regular file\n');
+      await git(['add', '--all']);
+      await commit();
+      const base = (await git(['rev-parse', 'HEAD'])).trim();
+      await mkdir(join(cwd, 'y b'));
+      await rename(join(cwd, 'x b/y'), join(cwd, 'z'));
+      await rename(join(cwd, 'x'), join(cwd, 'y b/z'));
+      await writeFile(join(cwd, 'zz-padding'), 'x'.repeat(MAX_INLINE_INPUT) + '\n');
+      if (typeChange) {
+        await rm(join(cwd, 'a-type'));
+        await symlink('new-target', join(cwd, 'a-type'));
+      }
+      await git(['add', '--all']);
+      await commit();
+      const head = (await git(['rev-parse', 'HEAD'])).trim();
+      const diff = await git([...diffArgs, base, head, '--']);
+      assert.equal(diff.split('\n').filter(line => line === 'diff --git a/x b/y b/z').length, 2, 'distinct renames produce identical headers');
+      let queries = 0;
+      const input = await reviewInput({
+        preset: { cli: 'codex' }, temp, cwd,
+        options: { level: 'xhigh', mode: 'full', base, scope: base, head, diff, currentDiff: '[]' },
+        git: args => { queries++; return git(args); },
+      });
+      assert.equal(queries, 1, 'one numstat query indexes both collisions and type changes');
+      const manifest = manifestOf(input);
+      const records = (await readFile(join(manifest.directory, 'inventory.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+      assert.deepEqual(records.map(record => record.filename).sort(), [...(typeChange ? ['a-type'] : []), 'y b/z', 'z', 'zz-padding']);
+      assert.equal(records.find(record => record.filename === 'z').previous_filename, 'x b/y');
+      assert.equal(records.find(record => record.filename === 'y b/z').previous_filename, 'x');
+      const stored = await readFile(join(manifest.directory, 'review-scope.diff'));
+      assert.equal(stored.toString('utf8'), diff);
+      let next = 0;
+      for (const record of records) {
+        const expected = await git(['--literal-pathspecs', ...diffArgs, base, head, '--', ...(record.previous_filename ? [record.previous_filename] : []), record.filename]);
+        assert.equal(record.scope.start, next);
+        next += record.scope.bytes;
+        assert.equal(stored.subarray(record.scope.start, next).toString('utf8'), expected, `complete range for ${record.filename}`);
+        if (record.filename !== 'zz-padding') {
+          const range = await readRange(manifest.directory, 'review-scope.diff', record.scope.start, record.scope.bytes);
+          assert.equal(range.text, expected);
+        }
+      }
+      assert.equal(next, stored.length, 'every scope byte is covered exactly once');
+    } finally { await rm(temp, { recursive: true, force: true }); }
+  });
+});
+
+test('an evidence parent inside the checkout is rejected before creating any files', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codjiflo-contained-evidence-'));
+  const cwd = join(temp, 'repository');
+  await mkdir(cwd);
+  await mkdir(join(cwd, 'nested'));
+  await writeFile(join(cwd, 'sentinel'), 'unchanged checkout\n');
+  const options = { level: 'xhigh', mode: 'full', base: 'a', scope: 'a', head: 'b', diff: 'x'.repeat(MAX_INLINE_INPUT), currentDiff: '[]' };
+  try {
+    for (const parent of [cwd, join(cwd, 'nested')]) {
+      await assert.rejects(reviewInput({
+        preset: { cli: 'codex' }, options, temp: parent, cwd,
+        git: () => { throw new Error('Rejected parent must not query Git'); },
+      }), /outside the checkout/);
+      assert.deepEqual((await readdir(cwd)).sort(), ['nested', 'sentinel']);
+      assert.deepEqual(await readdir(join(cwd, 'nested')), []);
+      assert.equal(await readFile(join(cwd, 'sentinel'), 'utf8'), 'unchanged checkout\n');
+    }
+  } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
 test('empty incremental scope remains navigable when only current PR evidence is large', async () => {

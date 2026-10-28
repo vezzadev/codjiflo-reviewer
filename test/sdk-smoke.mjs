@@ -63,18 +63,22 @@ for (const mode of ['success', 'credit-exhaustion', 'rate-limit']) {
 }
 
 // Exercise the installed SDK's permission consumer, not the adapter's options
-// object. The loopback model deliberately requests forbidden mutations, then an
-// allowed Bash command as a positive control that native tools actually ran.
-{
+// object. Each isolated run requests the same real tools. The relaxed controls
+// prove that denied mutations, absent external MCP starts, and absent transcripts
+// in the production run are not inert fixture artifacts.
+for (const scenario of ['production', 'relaxed-default-settings', 'relaxed-project-settings']) {
+  const relaxed = scenario !== 'production';
   const f = await fixture();
   const target = join(f.repo, 'a.js');
   const original = await readFile(target, 'utf8');
   const bashMarker = join(f.repo, 'allowed-bash-marker');
   const mcpMarker = join(f.temp, 'external-mcp-started');
+  const projectMcpMarker = join(f.temp, 'project-mcp-started');
+  const hookMarker = join(f.temp, 'project-hook-started');
   const attempts = [
     { id: 'toolu_security_read', name: 'Read', input: { file_path: target } },
-    { id: 'toolu_security_write', name: 'Write', input: { file_path: target, content: 'FORBIDDEN WRITE\n' } },
-    { id: 'toolu_security_edit', name: 'Edit', input: { file_path: target, old_string: 'new', new_string: 'FORBIDDEN EDIT' } },
+    { id: 'toolu_security_write', name: 'Write', input: { file_path: target, content: 'CONTROL WRITE\n' } },
+    { id: 'toolu_security_edit', name: 'Edit', input: { file_path: target, old_string: relaxed ? 'CONTROL WRITE' : 'new', new_string: 'CONTROL EDIT' } },
     { id: 'toolu_security_bash', name: 'Bash', input: { command: `printf allowed > '${bashMarker}'`, description: 'Local smoke positive control' } },
   ];
   const observed = new Map();
@@ -113,17 +117,35 @@ for await (const line of createInterface({ input: process.stdin })) {
     // Cover both the default HOME location and the custom-config-dir location.
     await writeFile(join(f.env.HOME, '.claude.json'), externalConfig);
     await writeFile(join(configDir, '.claude.json'), externalConfig);
+    const projectMcpScript = join(f.temp, 'project-mcp.mjs');
+    await writeFile(projectMcpScript, (await readFile(mcpScript, 'utf8')).replace(JSON.stringify(mcpMarker), JSON.stringify(projectMcpMarker)));
+    await writeFile(join(f.repo, '.mcp.json'), JSON.stringify({ mcpServers: {
+      'project-security-smoke': { type: 'stdio', command: process.execPath, args: [projectMcpScript] },
+    } }));
+    await mkdir(join(f.repo, '.claude'), { recursive: true });
+    await writeFile(join(f.repo, '.claude', 'settings.json'), JSON.stringify({
+      enableAllProjectMcpServers: true,
+      hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `printf started > '${hookMarker}'` }] }] },
+    }));
     const keysFile = join(f.temp, 'sdk-security-keys.json');
     await writeFile(keysFile, JSON.stringify({ keys: Array.from({ length: 3 }, (_, index) => ({ id: `security-${index}`, apiKey: `sk-ant-api03-local-security-not-real-${index}` })) }), { mode: 0o600 });
     // Isolate SDK parent-side initialization too, not only its native child.
     const output = await runProcess(process.execPath, ['--input-type=module', '-e', `
       import { runClaudeReview } from ${JSON.stringify(new URL('../src/claude.mjs', import.meta.url).href)};
+      import { query as sdkQuery } from ${JSON.stringify(import.meta.resolve('@anthropic-ai/claude-agent-sdk'))};
       const result = await runClaudeReview({
         preset: { model: 'claude-opus-4-6', effort: 'high' },
         prompt: 'Exercise the local protocol security fixture, then return its review.',
         cwd: process.cwd(), timeoutMs: 90_000,
         stdout: { write() {} }, stderr: process.stderr,
         runProcess() { throw new Error('Security smoke must not fall back to OAuth CLI'); },
+        ${relaxed ? `query({ prompt, options }) {
+          return sdkQuery({ prompt, options: {
+            ...options, allowedTools: [...options.allowedTools, 'Write', 'Edit'],
+            strictMcpConfig: false, persistSession: true,
+            ${scenario === 'relaxed-project-settings' ? "settingSources: ['project']," : ''}
+          } });
+        },` : ''}
       });
       console.log(JSON.stringify(result));
     `], {
@@ -140,20 +162,45 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.ok(read && !read.is_error, 'Read must succeed before Edit to rule out the unread-file precondition');
     assert.ok(JSON.stringify(read.content).includes('changed'), 'Read must return actual sentinel file contents');
     for (const id of ['toolu_security_write', 'toolu_security_edit']) {
-      const denied = observed.get(id);
-      assert.equal(denied?.is_error, true, `${id} must return a native tool error to the model`);
-      assert.match(JSON.stringify(denied.content), /permission|not allowed|denied|not permitted/i, `${id} must fail for permissions, not malformed tool input`);
+      const toolResult = observed.get(id);
+      assert.ok(toolResult, `${scenario}: ${id} must return a native tool result`);
+      if (relaxed) {
+        assert.ok(!toolResult.is_error, `${scenario}: ${id} must succeed with relaxed native permissions`);
+      } else {
+        assert.equal(toolResult.is_error, true, `${id} must return a native tool error to the model`);
+        assert.match(JSON.stringify(toolResult.content), /permission|not allowed|denied|not permitted/i, `${id} must fail for permissions, not malformed tool input`);
+      }
     }
-    assert.equal(await readFile(target, 'utf8'), original, 'denied tools must leave the sentinel unchanged');
+    assert.equal(await readFile(target, 'utf8'), relaxed ? 'CONTROL EDIT\n' : original,
+      `${scenario}: native Write and Edit must ${relaxed ? 'both mutate' : 'leave unchanged'} the sentinel`);
     assert.ok(observed.has('toolu_security_bash') && !observed.get('toolu_security_bash').is_error);
     assert.equal(await readFile(bashMarker, 'utf8'), 'allowed', 'allowed Bash must actually execute');
-    await assert.rejects(readFile(mcpMarker), { code: 'ENOENT' });
-    // Session transcripts live under projects, not arbitrary config files:
-    // SDK caches/settings are allowed, but review conversation JSONL is not.
+    // The default-settings control reverses both external-MCP exclusions.
+    // The project-only control targets project configuration; user MCP loading
+    // is not part of its assertion because its settings source was excluded.
+    const mcpMarkers = scenario === 'relaxed-project-settings' ? [projectMcpMarker] : [mcpMarker, projectMcpMarker];
+    for (const marker of mcpMarkers) {
+      if (relaxed) assert.equal(await readFile(marker, 'utf8'), 'started', `${scenario}: external MCP must really start`);
+      else await assert.rejects(readFile(marker), { code: 'ENOENT' });
+    }
+    // The installed SDK documents omitted settingSources as loading all sources,
+    // not as settings isolation. Both the default and explicit-project controls
+    // must execute this harmless project hook; strict MCP is a separate boundary.
+    assert.equal(await readFile(hookMarker, 'utf8'), 'started', `${scenario}: project SessionStart hook must execute`);
+    // Session transcripts live under projects, not arbitrary config files.
+    const transcripts = [];
     for (const root of [configDir, f.env.HOME]) {
       const entries = await readdir(root, { recursive: true });
-      assert.deepEqual(entries.filter(name => name.endsWith('.jsonl')), [], 'isolated HOME/config must contain no persisted session transcript');
+      transcripts.push(...entries.filter(name => name.endsWith('.jsonl')).map(name => join(root, name)));
     }
-    console.log('PASS actual Agent SDK native tool permissions, strict external MCP isolation, and no session persistence');
+    if (relaxed) {
+      assert.ok(transcripts.length > 0, `${scenario}: persistence control must save a real conversation transcript`);
+      const contents = await Promise.all(transcripts.map(path => readFile(path, 'utf8')));
+      assert.ok(contents.some(content => content.includes('toolu_security_write') && content.includes('toolu_security_edit')),
+        `${scenario}: saved transcript must contain this run's actual tool conversation`);
+    } else {
+      assert.deepEqual(transcripts, [], 'isolated HOME/config must contain no persisted session transcript');
+    }
+    console.log(`PASS actual Agent SDK native security boundaries and project settings: ${scenario}`);
   } finally { await api.close(); await f.close(); }
 }
