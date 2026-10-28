@@ -5,6 +5,16 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { runProcess } from '../src/runner.mjs';
 
+export async function isolatedGitEnv(temp, inherited = process.env) {
+  const home = join(temp, 'home');
+  const xdg = join(home, '.config');
+  await mkdir(xdg, { recursive: true, mode: 0o700 });
+  const gitConfig = join(home, 'empty-gitconfig');
+  await writeFile(gitConfig, '');
+  const env = Object.fromEntries(Object.entries(inherited).filter(([key]) => !key.startsWith('GIT_')));
+  return { ...env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: xdg, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: '1' };
+}
+
 async function setHeadPrompt({ repo, temp, promptPath, hostPromptDirectory, hostPrompt, headPrompt, headPromptType }) {
   if (headPrompt === undefined && headPromptType === 'file') return;
   await rm(join(repo, '.codjiflo'), { recursive: true, force: true });
@@ -35,9 +45,7 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-fixture-'));
   const repo = join(temp, 'repo');
   await mkdir(repo);
-  const home = join(temp, 'home');
-  await mkdir(home, { mode: 0o700 });
-  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: join(home, '.claude'), CODJIFLO_ANTHROPIC_KEYS_FILE: join(temp, 'missing-keys.json'), CODJIFLO_CLAUDE_STATE_FILE: join(temp, 'claude-state.json'), GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
+  const env = { ...await isolatedGitEnv(temp), CLAUDE_CONFIG_DIR: join(temp, 'home', '.claude'), CODJIFLO_ANTHROPIC_KEYS_FILE: join(temp, 'missing-keys.json'), CODJIFLO_CLAUDE_STATE_FILE: join(temp, 'claude-state.json'), GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
   const git = args => runProcess('git', args, { cwd: repo, env });
   await git(['init', '-b', 'main']);
   const tail = 'context\n'.repeat(8);

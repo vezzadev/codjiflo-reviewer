@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { readFile, readdir, writeFile, symlink, mkdtemp, mkdir, rm, rename } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { review } from '../src/review.mjs';
 import { reviewInput } from '../src/evidence.mjs';
 import { MAX_INLINE_INPUT, MAX_EVIDENCE_READ_BYTES } from '../src/input-budget.mjs';
 import { runProcess } from '../src/runner.mjs';
-import { fixture } from './fixture.mjs';
+import { fixture, isolatedGitEnv } from './fixture.mjs';
 import { prompt } from '../src/prompt.mjs';
 
 const verdicts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
@@ -229,6 +229,63 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
   });
 });
 
+test('Git fixtures leave an inherited external repository and index untouched', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codjiflo-hostile-git-env-'));
+  const outer = join(temp, 'outer');
+  await mkdir(outer);
+  const env = await isolatedGitEnv(temp);
+  const git = args => runProcess('git', args, { cwd: outer, env });
+  try {
+    await git(['init', '-q']);
+    const sentinel = join(outer, 'sentinel.txt');
+    await writeFile(sentinel, 'committed outer content\n');
+    await git(['add', '.']);
+    await git(['-c', 'user.name=Outer Test', '-c', 'user.email=outer@example.invalid', 'commit', '-qm', 'outer commit']);
+    await writeFile(sentinel, 'staged outer content\n');
+    await git(['add', '.']);
+    await writeFile(sentinel, 'unstaged outer content\n');
+    const gitDir = join(outer, '.git');
+    const index = join(gitDir, 'index');
+    const before = {
+      head: await git(['rev-parse', 'HEAD']),
+      status: await git(['status', '--porcelain']),
+      index: await readFile(index),
+      config: await readFile(join(gitDir, 'config')),
+      content: await readFile(sentinel),
+    };
+    const hostileEnv = {
+      ...env,
+      GIT_DIR: gitDir,
+      GIT_WORK_TREE: outer,
+      GIT_INDEX_FILE: index,
+      GIT_OBJECT_DIRECTORY: join(gitDir, 'objects'),
+      GIT_CEILING_DIRECTORIES: temp,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.bare',
+      GIT_CONFIG_VALUE_0: 'true',
+    };
+    // Run in children so the real tests and common fixture inherit these values
+    // without changing process.env underneath other tests.
+    await runProcess(process.execPath, ['--test', '--test-name-pattern=^real Git (type changes|colliding rename)', fileURLToPath(import.meta.url)], { env: hostileEnv });
+    const output = await runProcess(process.execPath, ['--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import { fixture } from ${JSON.stringify(new URL('./fixture.mjs', import.meta.url).href)};
+      const f = await fixture();
+      try {
+        await f.run({ full: true });
+        assert.equal(f.state.posts.find(post => post.path.endsWith('/reviews')).body.event, 'APPROVE');
+        console.log('isolated fixture reviewed');
+      } finally { await f.close(); }
+    `], { env: hostileEnv });
+    assert.match(output, /isolated fixture reviewed/);
+    assert.deepEqual(await readFile(index), before.index, 'external staged index is unchanged');
+    assert.equal(await git(['rev-parse', 'HEAD']), before.head);
+    assert.equal(await git(['status', '--porcelain']), before.status);
+    assert.deepEqual(await readFile(join(gitDir, 'config')), before.config);
+    assert.deepEqual(await readFile(sentinel), before.content, 'external worktree is unchanged');
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
 test('real Git type changes and non-LF content preserve complete consumer-visible ranges', async t => {
   for (const variant of ['separators', 'types', 'submodule']) {
     const typeChanges = variant !== 'separators', gitlink = variant === 'submodule';
@@ -236,9 +293,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
       const temp = await mkdtemp(join(tmpdir(), 'codjiflo-git-evidence-'));
       const cwd = join(temp, 'repository');
       await mkdir(cwd);
-      const home = join(temp, 'home');
-      await mkdir(home);
-      const env = { ...process.env, HOME: home, USERPROFILE: home };
+      const env = await isolatedGitEnv(temp);
       const git = args => runProcess('git', args, { cwd, env });
       const commit = () => git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshot']);
       const toLink = 'a-to-link\t"é\n.txt', fromLink = 'b-from-link\t"漢\n.txt';
@@ -363,14 +418,7 @@ test('real Git colliding rename headers remain separate alongside type changes',
     const temp = await mkdtemp(join(tmpdir(), 'codjiflo-header-collision-'));
     const cwd = join(temp, 'repository');
     await mkdir(cwd);
-    const home = join(temp, 'home');
-    await mkdir(home);
-    const gitConfig = join(home, 'empty-gitconfig');
-    await writeFile(gitConfig, '');
-    const env = { ...process.env, HOME: home, USERPROFILE: home };
-    // Inherited explicit config paths and command-scope entries override HOME.
-    for (const key of Object.keys(env)) if (key.startsWith('GIT_CONFIG')) delete env[key];
-    Object.assign(env, { GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_SYSTEM: gitConfig, GIT_CONFIG_NOSYSTEM: '1' });
+    const env = await isolatedGitEnv(temp);
     const git = args => runProcess('git', args, { cwd, env });
     const commit = () => git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshot']);
     const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3'];
