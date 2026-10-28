@@ -116,7 +116,8 @@ if (process.env.FIXTURE_INSPECT_GIT === '1') {
  const { execFileSync } = await import('node:child_process');
  await writeFile(process.env.FIXTURE_CAPTURE + '.git-context', JSON.stringify({
   head: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10000 }).trim(),
-  env: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('GIT_'))),
+  config: execFileSync('git', ['config', '--list', '--show-origin'], { encoding: 'utf8', timeout: 10000 }),
+  env: Object.fromEntries(Object.entries(process.env).filter(([name]) => /^(?:GIT_|GITHUB_TOKEN$|GH_TOKEN$|OPENAI_API_KEY$)/i.test(name))),
  }));
 }
 if (process.argv.includes('exec')) {
@@ -152,7 +153,7 @@ if (process.argv.includes('exec')) {
  if (process.env.FIXTURE_MODE === 'fatal-exit') {
   console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',aggregated_output:'HOST-TOOL-SECRET-do-not-publish'}}));
   console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'PRIVATE-MODEL-TEXT-do-not-publish'}}));
-  console.log(JSON.stringify({type:'error',message:'Fixture safe terminal diagnostic token=' + process.env.GITHUB_TOKEN,aggregated_output:'ERROR-EXTRA-SECRET-do-not-publish'}));
+  console.log(JSON.stringify({type:'error',message:'Fixture safe terminal diagnostic token=' + process.env.OPENAI_API_KEY,aggregated_output:'ERROR-EXTRA-SECRET-do-not-publish'}));
   process.stderr.write('x'.repeat(2200) + '\\nFixture verbose CLI stderr detail STDERR-HOST-SECRET-do-not-publish\\n');
   process.exit(1);
  }
@@ -210,7 +211,7 @@ if (process.argv.includes('exec')) {
     async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
         timeoutMs,
-        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
+        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
       });
     },
     async close() { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },

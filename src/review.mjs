@@ -76,6 +76,9 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const cwd = join(temp, 'repository');
     const reviewEnv = sanitizeGitEnv(env);
     const gitEnv = { ...reviewEnv, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${github.token}`).toString('base64')}` };
+    for (const name of Object.keys(reviewEnv)) {
+      if (['GITHUB_TOKEN', 'GH_TOKEN'].includes(name.toUpperCase())) delete reviewEnv[name];
+    }
     const git = args => runProcess('git', args, { cwd, env: gitEnv, timeoutMs: 5 * 60 * 1000 });
     await runProcess('git', ['init', cwd], { env: gitEnv, timeoutMs: 5 * 60 * 1000 });
     await git(['remote', 'add', 'origin', pr.base.repo.clone_url]);

@@ -230,11 +230,11 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
   });
 });
 
-test('Git environment sanitization removes repository and config selectors without mutating transport settings', () => {
+test('Git environment sanitization removes only repository and command config selectors without mutating input', () => {
   const selectors = [
     'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
-    'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_GLOBAL',
-    'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM', 'GIT_OBJECT_DIRECTORY', 'GIT_DIR',
+    'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_17',
+    'GIT_CONFIG_VALUE_17', 'GIT_OBJECT_DIRECTORY', 'GIT_DIR',
     'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE',
     'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX', 'GIT_SHALLOW_FILE',
     'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES',
@@ -244,10 +244,16 @@ test('Git environment sanitization removes repository and config selectors witho
     GIT_SSL_CAINFO: '/certs/ca.pem', GIT_SSL_CAPATH: '/certs',
     GIT_SSH_COMMAND: 'ssh -i /keys/deploy', GIT_ASKPASS: '/bin/askpass',
     GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_GLOBAL: '/runner/global.gitconfig', GIT_CONFIG_SYSTEM: '/etc/gitconfig',
+    GIT_CONFIG_NOSYSTEM: '1', Git_Config_Global: '/runner/mixed-global.gitconfig',
+    Git_Config_System: '/etc/mixed-gitconfig', Git_Config_NoSystem: '1',
+    GITHUB_TOKEN: 'publication-token', GH_TOKEN: 'fallback-token',
+    OPENAI_API_KEY: 'provider-token',
   };
-  const inherited = Object.freeze({ ...preserved, ...Object.fromEntries(selectors.map(name => [name, 'caller override'])) });
+  const spellings = selectors.flatMap(name => [name, name.toLowerCase(), name.replaceAll('GIT_', 'Git_')]);
+  const inherited = Object.freeze({ ...preserved, ...Object.fromEntries(spellings.map(name => [name, 'caller override'])) });
   assert.deepEqual(sanitizeGitEnv(inherited), preserved);
-  for (const name of selectors) assert.equal(inherited[name], 'caller override');
+  for (const name of spellings) assert.equal(inherited[name], 'caller override');
 });
 
 test('Git fixtures and production reviews leave an inherited external repository and index untouched', async () => {
@@ -282,8 +288,11 @@ test('Git fixtures and production reviews leave an inherited external repository
       GIT_OBJECT_DIRECTORY: join(gitDir, 'objects'),
       GIT_CEILING_DIRECTORIES: temp,
       GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_PARAMETERS: "'core.bare=true'",
       GIT_CONFIG_KEY_0: 'core.bare',
       GIT_CONFIG_VALUE_0: 'true',
+      GIT_CONFIG_KEY_7: 'core.bare',
+      GIT_CONFIG_VALUE_7: 'true',
     };
     // Only a nested test runner must stop inheriting Node's child-v8 context.
     // Keep the hostile Git values so these real Git consumers exercise isolation.
@@ -300,10 +309,11 @@ test('Git fixtures and production reviews leave an inherited external repository
     assert.match(tap, /^# fail 0$/m, tap);
     const output = await runProcess(process.execPath, ['--input-type=module', '-e', `
       import assert from 'node:assert/strict';
-      import { readFile } from 'node:fs/promises';
+      import { readFile, writeFile } from 'node:fs/promises';
       import { fixture } from ${JSON.stringify(new URL('./fixture.mjs', import.meta.url).href)};
       const f = await fixture();
       try {
+        await writeFile(f.env.GIT_CONFIG_GLOBAL, '[codjiflo]\\nfixtureglobal = operator-config-survives\\n');
         // Inject at run(), not fixture construction: production must sanitize it.
         await f.run({ full: true, timeoutMs: 60000, providerEnv: {
           GIT_DIR: process.env.GIT_DIR,
@@ -315,6 +325,16 @@ test('Git fixtures and production reviews leave an inherited external repository
           GIT_CONFIG_COUNT: process.env.GIT_CONFIG_COUNT,
           GIT_CONFIG_KEY_0: process.env.GIT_CONFIG_KEY_0,
           GIT_CONFIG_VALUE_0: process.env.GIT_CONFIG_VALUE_0,
+          GIT_CONFIG_PARAMETERS: process.env.GIT_CONFIG_PARAMETERS,
+          GIT_CONFIG_KEY_7: process.env.GIT_CONFIG_KEY_7,
+          GIT_CONFIG_VALUE_7: process.env.GIT_CONFIG_VALUE_7,
+          Git_Config_Parameters: "'core.bare=true'",
+          Git_Dir: process.env.GIT_DIR,
+          GITHUB_TOKEN: 'fixture-publication-token',
+          GH_TOKEN: 'fixture-fallback-token',
+          GitHub_Token: 'fixture-mixed-publication-token',
+          Gh_Token: 'fixture-mixed-fallback-token',
+          OPENAI_API_KEY: 'fixture-provider-token',
           FIXTURE_INSPECT_GIT: '1',
         } });
         const reviews = f.state.posts.filter(post => post.path.endsWith('/reviews'));
@@ -323,10 +343,15 @@ test('Git fixtures and production reviews leave an inherited external repository
         assert.equal(reviews[0].body.commit_id, f.head);
         const context = JSON.parse(await readFile(f.capture + '.git-context', 'utf8'));
         assert.equal(context.head, f.head, 'reviewer Git sees the pinned disposable checkout');
-        for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_CEILING_DIRECTORIES', 'GIT_NAMESPACE']) {
-          assert.equal(context.env[name], undefined, name);
+        for (const name of Object.keys(context.env)) {
+          const normalized = name.toUpperCase();
+          assert.equal(['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_CEILING_DIRECTORIES', 'GIT_NAMESPACE', 'GITHUB_TOKEN', 'GH_TOKEN'].includes(normalized), false, name);
+          assert.equal(/^(?:GIT_CONFIG(?:_PARAMETERS|_COUNT)?|GIT_CONFIG_(?:KEY|VALUE)_\\d+)$/.test(normalized), false, name);
         }
-        assert.equal(Object.keys(context.env).some(name => name.startsWith('GIT_CONFIG')), false, 'reviewer receives neither caller config nor fetch authorization config');
+        assert.equal(context.env.OPENAI_API_KEY, 'fixture-provider-token', 'provider API credentials remain available');
+        assert.equal(context.env.GIT_CONFIG_GLOBAL, f.env.GIT_CONFIG_GLOBAL);
+        assert.match(context.config, /codjiflo\\.fixtureglobal=operator-config-survives/, 'reviewer Git reads operator global configuration');
+        assert.doesNotMatch(context.config, /extraheader|AUTHORIZATION|fixture-publication-token|fixture-fallback-token/i, 'reviewer Git has no fetch authorization configuration');
         console.log('isolated fixture reviewed');
       } finally { await f.close(); }
     `], { env: hostileEnv, timeoutMs: 120000 }).catch(error => {
@@ -635,7 +660,7 @@ test('Codex failed or missing terminal completion cannot publish a valid-looking
 test('nonzero Codex CLI posts only redacted protocol diagnostics, never tool/model output or stderr', async () => {
   const f = await fixture();
   try {
-    await assert.rejects(f.run({ mode: 'fatal-exit' }), error => {
+    await assert.rejects(f.run({ mode: 'fatal-exit', providerEnv: { OPENAI_API_KEY: 'fixture-provider-token-not-real' } }), error => {
       assert.match(error.stdout, /HOST-TOOL-SECRET-do-not-publish/);
       assert.match(error.stdout, /PRIVATE-MODEL-TEXT-do-not-publish/);
       assert.match(error.message, /STDERR-HOST-SECRET-do-not-publish/);
@@ -646,7 +671,7 @@ test('nonzero Codex CLI posts only redacted protocol diagnostics, never tool/mod
     assert.match(body, /Codex review failed \(exit 1\)/);
     assert.match(body, /Fixture fatal transport error/);
     assert.match(body, /Fixture safe terminal diagnostic token=\[REDACTED\]/);
-    assert.doesNotMatch(body, /HOST-TOOL-SECRET|PRIVATE-MODEL-TEXT|ERROR-EXTRA-SECRET|STDERR-HOST-SECRET|fixture-token-not-real|verbose CLI stderr/);
+    assert.doesNotMatch(body, /HOST-TOOL-SECRET|PRIVATE-MODEL-TEXT|ERROR-EXTRA-SECRET|STDERR-HOST-SECRET|fixture-provider-token-not-real|verbose CLI stderr/);
   } finally { await f.close(); }
 });
 

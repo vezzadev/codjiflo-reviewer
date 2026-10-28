@@ -1,5 +1,6 @@
-// Repository/config selectors belong to the caller's checkout, not the disposable
-// review checkout. Keep installation, TLS, and authentication transport settings.
+// Repository and command-level config selectors belong to the caller's checkout,
+// not the disposable review checkout. Keep operator global/system config and
+// installation, TLS, and authentication transport settings.
 const repositoryVariables = [
   'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_OBJECT_DIRECTORY', 'GIT_DIR',
   'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE',
@@ -9,9 +10,9 @@ const repositoryVariables = [
 
 export function sanitizeGitEnv(inherited) {
   const env = { ...inherited };
-  for (const name of repositoryVariables) delete env[name];
   for (const name of Object.keys(env)) {
-    if (name.startsWith('GIT_CONFIG')) delete env[name];
+    const normalized = name.toUpperCase();
+    if (repositoryVariables.includes(normalized) || /^(?:GIT_CONFIG(?:_PARAMETERS|_COUNT)?|GIT_CONFIG_(?:KEY|VALUE)_\d+)$/.test(normalized)) delete env[name];
   }
   return env;
 }
