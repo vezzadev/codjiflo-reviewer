@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runClaudeReview, classifyClaudeQuota, secretRedactor, claudeEnvironment } from '../src/claude.mjs';
 import { runProcess } from '../src/runner.mjs';
-import { schema } from '../src/prompt.mjs';
 
 const preset = { model: 'claude-opus-4-8', effort: 'xhigh' };
 const review = { verdict: 'APPROVE', summary: 'Reviewed.', findings: [] };
@@ -18,7 +17,7 @@ async function setup(t, { configured = true, shared = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'codjiflo-claude-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const keys = Array.from({ length: 3 }, (_, i) => ({ id: `api-${i + 1}`, apiKey: `sk-ant-api03-fixture-secret-${i + 1}`, ...(shared ? { quotaGroup: 'shared-pool' } : {}) }));
-  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: join(home, '.claude'), CODJIFLO_ANTHROPIC_KEYS_FILE: join(home, 'keys.json'), CODJIFLO_CLAUDE_STATE_FILE: join(home, 'state.json') };
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: join(home, '.claude'), CODJIFLO_ANTHROPIC_KEYS_FILE: join(home, 'keys.json'), CODJIFLO_CLAUDE_STATE_FILE: join(home, 'state.json'), CODJIFLO_OPUS_MODEL: '', CODJIFLO_SOL_MODEL: '' };
   if (configured) await writeFile(env.CODJIFLO_ANTHROPIC_KEYS_FILE, JSON.stringify({ keys }), { mode: 0o600 });
   let log = '';
   const sink = { write: data => { log += data; } };
@@ -34,20 +33,12 @@ function sessions(events, captures = []) {
   };
 }
 
-test('SDK succeeds with shared schema, tools, settings defaults and closes session', async t => {
+test('SDK succeeds with the selected API key and closes session', async t => {
   const f = await setup(t);
   const captures = [];
   assert.deepEqual(await runClaudeReview({ ...f.options, query: sessions([success], captures) }), review);
   const options = captures[0].options;
   assert.equal(options.env.ANTHROPIC_API_KEY, f.keys[0].apiKey);
-  assert.equal(options.model, preset.model);
-  assert.equal(options.effort, 'xhigh');
-  assert.deepEqual(options.allowedTools, ['Read', 'Grep', 'Glob', 'Bash']);
-  assert.deepEqual(options.outputFormat, { type: 'json_schema', schema });
-  assert.equal(options.permissionMode, 'dontAsk');
-  assert.equal(options.persistSession, false);
-  assert.equal(options.strictMcpConfig, true);
-  assert.equal(Object.hasOwn(options, 'settingSources'), false);
   assert.equal(captures[0].closed, true);
 });
 

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PRESETS, isApproved } from './commands.mjs';
 import { filesFromApi, inlineComment } from './diff.mjs';
-import { prompt } from './prompt.mjs';
+import { reviewInput } from './evidence.mjs';
 import { runProcess, runReviewer } from './runner.mjs';
 import { publishReview, reportPublicationFailure, workflowRunUrl } from './publication.mjs';
 
@@ -103,10 +103,11 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const metadata = await github.list(`${pullPath}/files`);
     if (metadata.length !== pr.changed_files || new Set(metadata.map(file => file.filename)).size !== metadata.length) throw new Error('Incomplete PR file metadata');
     const files = filesFromApi(metadata);
-    const diff = await git(['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', scope, head]);
+    const diff = await git(['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', scope, head, '--']);
     const currentDiff = JSON.stringify([...files.values()].map(file => ({ filename: file.path, previous_filename: file.previousPath, patch: file.patch })), null, 2);
     const customInstructions = currentPromptBlob === undefined ? undefined : await git(['cat-file', 'blob', currentPromptBlob]);
-    const result = await reviewer({ preset, prompt: prompt({ level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions }), cwd, temp, env });
+    const input = await reviewInput({ preset, options: { level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions }, cwd, temp, git });
+    const result = await reviewer({ preset, prompt: input, cwd, temp, env });
     const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10);
     const publication = randomUUID();
     const resultPath = output ?? `codjiflo-result-${publication}.json`;

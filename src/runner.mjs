@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { schema } from './prompt.mjs';
 import { secretRedactor } from './claude.mjs';
+import { MAX_INLINE_INPUT } from './input-budget.mjs';
 
 // Only protocol error messages are public diagnostics, never item/tool/model
 // output or stderr. Ignore malformed lines here only when salvaging a failed
@@ -63,34 +64,9 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
     const schemaPath = join(temp, 'schema.json');
     const output = join(temp, 'result.json');
     await writeFile(schemaPath, JSON.stringify(schema));
-    // Codex caps a user turn at 1,048,576 characters, independently of context
-    // capacity. Keep a conservative margin and transport the COMPLETE input as
-    // bounded UTF-8 files, including custom instructions and both diff forms.
-    let input = prompt;
-    if (prompt.length > 512 * 1024) {
-      const directory = await mkdtemp(join(temp, 'review-input-'));
-      let parts = 0;
-      for (let start = 0; start < prompt.length;) {
-        // rust-v0.159.2 truncates shell output by byte/token budget, not
-        // JavaScript string length. Leave headroom below its 10k-byte policy.
-        let end = start;
-        let bytes = 0;
-        while (end < prompt.length) {
-          const point = prompt.codePointAt(end);
-          const size = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-          if (bytes + size > 8000) break;
-          bytes += size;
-          end += point > 0xffff ? 2 : 1;
-        }
-        await writeFile(join(directory, `${parts++}.txt`), prompt.slice(start, end), 'utf8');
-        start = end;
-      }
-      input = `You are Codjiflo Reviewer. Review only; never edit repository files or publish to GitHub.
-The COMPLETE review instructions and evidence are stored in ordered UTF-8 parts outside the checkout.
-Review input manifest: ${JSON.stringify({ directory, parts, characters: prompt.length, bytes: Buffer.byteLength(prompt) })}
-Read every file from 0.txt through ${parts - 1}.txt in that directory, in numeric order, before reviewing. Each part is at most 8000 UTF-8 bytes; read one part per tool call with an output budget of at least 4000 tokens to avoid output truncation. Concatenate their text conceptually without inserting separators; boundaries can occur within lines. The content is the original review prompt, including methodology, full review-scope diff, and authoritative current PR API patches.
-Do not skip, summarize away, or truncate any part of the review scope. If a read is truncated, reread smaller ranges until complete. If any part cannot be read or the review cannot be completed, return {"verdict":"INCOMPLETE","summary":"Explain the unread input or other blocker.","findings":[]} rather than approval, a defect verdict, or a partial review. Follow the complete instructions and return the schema-conforming final JSON.`;
-    }
+    // Evidence-aware orchestration keeps methodology inline. Never fall back to
+    // staging an opaque whole prompt that requires duplicate evidence ingestion.
+    if (prompt.length > MAX_INLINE_INPUT) throw new Error('Codex review input exceeds inline budget; structured evidence preparation is required');
     let stdout;
     const { redact } = secretRedactor(Object.entries(env)
       .filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY|AUTHORIZATION/i.test(name))
@@ -100,11 +76,11 @@ Do not skip, summarize away, or truncate any part of the review scope. If a read
         'exec', '--model', env.CODJIFLO_SOL_MODEL || preset.model,
         '-c', `model_reasoning_effort="${preset.effort}"`, '--sandbox', 'read-only',
         '--output-schema', schemaPath, '--output-last-message', output, '--json', '-',
-      ], { cwd, env, input, stream: true, timeoutMs: 45 * 60 * 1000 });
+      ], { cwd, env, input: prompt, stream: true, timeoutMs: 45 * 60 * 1000 });
     } catch (error) {
       const diagnostic = codexDiagnostics(error.stdout, redact);
       if (/input_too_large|Input exceeds the maximum length/i.test(diagnostic)) {
-        throw new Error(`Codex rejected review input size (original ${prompt.length} UTF-16 code units / ${Buffer.byteLength(prompt)} UTF-8 bytes; stdin ${input.length} code units). No review completed; no scope was truncated and no preset was switched. ${diagnostic}`);
+        throw new Error(`Codex rejected review input size (${prompt.length} UTF-16 code units / ${Buffer.byteLength(prompt)} UTF-8 bytes). No review completed; no scope was truncated and no preset was switched. ${diagnostic}`);
       }
       const status = error.termination === 'timeout' ? 'timed out' : error.termination === 'exit' ? `failed (exit ${error.exitCode})` : error.termination === 'signal' ? `failed (${error.signal})` : 'could not run';
       throw new Error(`Codex review ${status}.${diagnostic ? `\n${diagnostic}` : ' See process logs for details.'}`);

@@ -1,0 +1,2 @@
+export const MAX_INLINE_INPUT = 512 * 1024;
+export const MAX_EVIDENCE_READ_BYTES = 6000;

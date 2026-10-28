@@ -92,8 +92,7 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const fake = join(temp, 'fake-cli.mjs');
   const capture = join(temp, 'prompt.txt');
   await writeFile(fake, `#!/usr/bin/env node
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { writeFile, cp } from 'node:fs/promises';
 if (process.argv[2] === 'auth') {
  if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth status inherited provider credentials');
  console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'}));
@@ -102,20 +101,14 @@ if (process.argv[2] === 'auth') {
 process.stdin.setEncoding('utf8');
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 await writeFile(process.env.FIXTURE_CAPTURE + '.stdin', input);
+await writeFile(process.env.FIXTURE_CAPTURE + '.cwd', process.cwd(), 'utf8');
 if (process.argv.includes('exec')) {
- const manifestLine = input.split('\\n').find(line => line.startsWith('Review input manifest: '));
- if (manifestLine && process.env.FIXTURE_MODE !== 'incomplete-input') {
-  const manifest = JSON.parse(manifestLine.slice('Review input manifest: '.length));
-  let complete = '';
-  const sizes = [];
-  for (let part = 0; part < manifest.parts; part++) {
-   const text = await readFile(join(manifest.directory, part + '.txt'), 'utf8');
-   sizes.push(Buffer.byteLength(text));
-   complete += text;
-  }
-  await writeFile(process.env.FIXTURE_CAPTURE + '.parts', JSON.stringify(sizes));
-  if (complete.length !== manifest.characters || Buffer.byteLength(complete) !== manifest.bytes) throw new Error('Incomplete staged review input');
-  input = complete;
+ const manifestLine = input.split('\\n').find(line => line.startsWith('Navigable review evidence manifest: '));
+ if (manifestLine) {
+  const manifest = JSON.parse(manifestLine.slice('Navigable review evidence manifest: '.length));
+  // Capture evidence, not a reconstructed mega-prompt. Reader behavior is
+  // exercised explicitly by tests, never silently emulated by this CLI.
+  await cp(manifest.directory, process.env.FIXTURE_CAPTURE + '.evidence', { recursive: true, force: true });
  }
 }
 await writeFile(process.env.FIXTURE_CAPTURE, input);
@@ -128,7 +121,7 @@ const findings = process.env.FIXTURE_MODE === 'findings' ? [
  {path:'a.js',side:'RIGHT',start_line:1,line:2,priority:'P2',disposition:'blocking',title:'Range bug',body:'Concrete failure scenario.'}
 ] : [];
 const result = process.env.FIXTURE_MODE === 'incomplete-input'
- ? {verdict:'INCOMPLETE',summary:'A required review input part could not be read.',findings:[]}
+ ? {verdict:'INCOMPLETE',summary:'A required review scope range could not be processed.',findings:[]}
  : {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings};
 if (process.argv.includes('exec')) {
  const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
