@@ -49,6 +49,11 @@ function apiErrorText(event) {
 
 function resetFromText(text, now) {
   // Anthropic's workspace/user-defined spend-limit response names a reset date.
+  const regain = /\bYou will regain access on (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2}) UTC\b/.exec(text);
+  if (regain) {
+    const value = Date.parse(`${regain[1]}T${regain[2]}:00Z`);
+    return Number.isFinite(value) && value > now ? value : null;
+  }
   const match = /(?:reset|resets|until|on|at)\s+(?:(?:at|on)\s+)?(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)?)/i.exec(text);
   const value = match ? Date.parse(match[1]) : NaN;
   return Number.isFinite(value) && value > now ? value : null;
@@ -59,13 +64,17 @@ function resetFromText(text, now) {
 export function classifyClaudeQuota(event, now = Date.now(), retryDelayMs) {
   if (event?.type !== 'assistant' || !event.error) return null;
   const text = apiErrorText(event);
-  if (['rate_limit', 'invalid_request', 'billing_error'].includes(event.error)) {
-    if (/\benforced_spend_limit_reached\b/.test(text) || /(?:^|API Error:\s*400\s*[^\n]*?"message"\s*:\s*")You have reached your specified (?:workspace )?API usage limits\b/.test(text)) {
+  // Newer runtimes label the plain-text HTTP 400 spend-limit response
+  // "unknown". Require its explicit API-message marker and status as well as
+  // the known limit sentence; unknown errors otherwise remain fatal.
+  const unknown400 = event.error === 'unknown' && event.is_api_error_message === true && event.api_error_status === 400;
+  if (['rate_limit', 'invalid_request', 'billing_error'].includes(event.error) || unknown400) {
+    if (/\benforced_spend_limit_reached\b/.test(text) || /^(?:API Error:\s*400\s+(?:[^\n]*?"message"\s*:\s*")?)?You have reached your specified (?:workspace )?API usage limits\b/.test(text)) {
       return { status: 'exhausted', retryAt: resetFromText(text, now), reason: 'spend-limit' };
     }
     // The SDK normalizes the API's full credit-balance sentence to this exact
     // synthetic billing_error text before emitting the terminal error result.
-    if ((event.error === 'billing_error' && text === 'Credit balance is too low') || /\bYour credit balance is too low to access the Anthropic API\b/i.test(text) || /\bInsufficient (?:API )?credits\b/i.test(text)) {
+    if (!unknown400 && ((event.error === 'billing_error' && text === 'Credit balance is too low') || /\bYour credit balance is too low to access the Anthropic API\b/i.test(text) || /\bInsufficient (?:API )?credits\b/i.test(text))) {
       return { status: 'exhausted', retryAt: null, reason: 'credit-balance' };
     }
   }
@@ -124,7 +133,7 @@ async function sdkAttempt({ query, credential, preset, prompt, cwd, env, remaini
           // authorize falling back to a paid subscription.
           const quota = ['success', 'error_during_execution'].includes(event.subtype) ? classifyClaudeQuota(lastApiError) : null;
           if (quota) return { quota };
-          throw new Error(`Claude did not complete successfully (${event.subtype})`);
+          throw new Error(`Claude did not complete successfully (subtype=${event.subtype}, is_error=${event.is_error === true})`);
         }
       }
       throw new Error('Claude SDK ended without a terminal result');

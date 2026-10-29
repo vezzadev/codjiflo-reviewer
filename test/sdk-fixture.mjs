@@ -30,6 +30,13 @@ export async function sdkFixture({ mode = 'success', responseContent } = {}) {
         response.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.' }, request_id: 'req_local_fixture' }));
         return;
       }
+      if (mode === 'spend-limit') {
+        // The runtime emits this HTTP 400 as assistant.error="unknown", not
+        // invalid_request/billing_error. Match the production #27 response.
+        response.writeHead(400, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'You have reached your specified API usage limits. You will regain access on 2099-11-01 at 13:45 UTC.' }, request_id: 'req_local_spend_limit' }));
+        return;
+      }
       if (mode === 'rate-limit') {
         response.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '120' });
         response.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'This request would exceed your organization rate limit.' }, request_id: 'req_local_rate_limit' }));

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runClaudeReview, classifyClaudeQuota, secretRedactor, claudeEnvironment } from '../src/claude.mjs';
@@ -12,6 +12,8 @@ const success = { type: 'result', subtype: 'success', is_error: false, structure
 const failure = { type: 'result', subtype: 'success', is_error: true };
 const oauthSuccess = async (_command, args) => JSON.stringify(args[0] === 'auth' ? { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' } : success);
 const apiError = (error, text = '') => ({ type: 'assistant', error, message: { content: [{ type: 'text', text }] } });
+const spendLimitText = 'API Error: 400 You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.';
+const unknownSpendLimit = { ...apiError('unknown', spendLimitText), is_api_error_message: true, api_error_status: 400 };
 
 async function setup(t, { configured = true, shared = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'codjiflo-claude-'));
@@ -100,6 +102,56 @@ test('quota classifiers require typed API errors and known exhaustion evidence',
     { type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning', overageStatus: 'rejected' } },
     { type: 'result', subtype: 'error_max_budget_usd', errors: ['Insufficient credits'] },
   ]) assert.equal(classifyClaudeQuota(event, now), null);
+});
+
+test('observed unknown HTTP 400 spend limits exhaust keys until the stated UTC reset, then use OAuth', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-29T12:00:00Z') });
+  const f = await setup(t);
+  const captures = [];
+  const result = await runClaudeReview({ ...f.options, query: sessions([
+    unknownSpendLimit, { ...failure, api_error_status: 400, terminal_reason: 'api_error', result: spendLimitText },
+  ], captures), runProcess: oauthSuccess });
+  assert.deepEqual(result, review);
+  assert.equal(captures.length, 3);
+  assert.ok(captures.every(capture => capture.closed));
+  const state = JSON.parse(await readFile(f.env.CODJIFLO_CLAUDE_STATE_FILE, 'utf8'));
+  for (const key of f.keys) {
+    assert.equal(state.keys[key.id].status, 'exhausted');
+    assert.equal(state.keys[key.id].reason, 'spend-limit');
+    assert.equal(state.keys[key.id].retryAt, Date.parse('2026-11-01T00:00:00Z'));
+  }
+});
+
+test('unknown errors need typed HTTP 400 API evidence and a known spend-limit sentence', async t => {
+  const now = Date.parse('2026-10-29T12:00:00Z');
+  const atTime = { ...unknownSpendLimit, message: { content: [{ type: 'text', text: spendLimitText.replace('00:00', '13:45') }] } };
+  assert.equal(classifyClaudeQuota(atTime, now).retryAt, Date.parse('2026-11-01T13:45:00Z'));
+  assert.equal(classifyClaudeQuota(unknownSpendLimit, Date.parse('2026-11-02T00:00:00Z')).retryAt, null);
+  for (const event of [
+    apiError('unknown', spendLimitText),
+    { ...unknownSpendLimit, is_api_error_message: false },
+    { ...unknownSpendLimit, api_error_status: 401 },
+    { ...unknownSpendLimit, message: { content: [{ type: 'text', text: 'API Error: 400 Invalid model' }] } },
+    { ...unknownSpendLimit, message: { content: [{ type: 'text', text: `The API documentation says: ${spendLimitText}` }] } },
+    { type: 'result', subtype: 'success', is_error: true, result: spendLimitText, api_error_status: 400 },
+  ]) {
+    assert.equal(classifyClaudeQuota(event, now), null);
+    const f = await setup(t);
+    const captures = [];
+    await assert.rejects(runClaudeReview({ ...f.options, query: sessions([event, failure], captures) }), /is_error=true/);
+    assert.equal(captures.length, 1, 'unrecognized failures must not rotate or use OAuth');
+  }
+});
+
+test('success subtype with is_error remains a failure even with structured output', async t => {
+  const f = await setup(t);
+  const captures = [];
+  await assert.rejects(runClaudeReview({ ...f.options, query: sessions([{ ...success, is_error: true }], captures) }), /subtype=success, is_error=true/);
+  assert.equal(captures.length, 1);
+  const oauth = await setup(t, { configured: false });
+  await assert.rejects(runClaudeReview({ ...oauth.options, runProcess: async (_command, args) => JSON.stringify(args[0] === 'auth'
+    ? { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }
+    : { ...success, is_error: true }) }), /Claude did not complete successfully/);
 });
 
 test('non-quota SDK retries and nonterminal assistant errors may recover', async t => {

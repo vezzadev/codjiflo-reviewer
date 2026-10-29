@@ -8,7 +8,7 @@ import { runProcess } from '../src/runner.mjs';
 // No paid calls or live OAuth: HOME/config/state are temporary, API keys are fake,
 // and ANTHROPIC_BASE_URL sends the actual installed SDK to a loopback Messages API.
 // The fallback executable is the existing fixture CLI, never the user's Claude.
-for (const mode of ['success', 'credit-exhaustion', 'rate-limit']) {
+for (const mode of ['success', 'credit-exhaustion', 'spend-limit', 'rate-limit']) {
   const f = await fixture();
   const api = await sdkFixture({ mode });
   try {
@@ -52,6 +52,20 @@ for (const mode of ['success', 'credit-exhaustion', 'rate-limit']) {
         // Terminal typed 429 events do not expose Retry-After; the adapter
         // conservatively uses its documented 60-second cooldown.
         assert.ok(state.keys[key.id].retryAt >= started + 60_000);
+      }
+    }
+    if (mode === 'spend-limit') {
+      const events = log.split('\n').flatMap(line => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
+      assert.ok(events.some(event => event.type === 'assistant' && event.error === 'unknown'
+        && event.message?.content?.some(block => block.type === 'text' && block.text.includes('You have reached your specified API usage limits'))),
+      'actual SDK must reproduce the production unknown spend-limit event');
+      const state = JSON.parse(await readFile(f.env.CODJIFLO_CLAUDE_STATE_FILE, 'utf8'));
+      for (const key of keys) {
+        assert.equal(state.keys[key.id].status, 'exhausted');
+        assert.equal(state.keys[key.id].reason, 'spend-limit');
+        assert.equal(state.keys[key.id].retryAt, Date.parse('2099-11-01T13:45:00Z'));
       }
     }
     for (const key of keys) {
