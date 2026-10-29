@@ -22,6 +22,24 @@ function setup() {
   return { envelope, receipt, state, github };
 }
 
+test('failure sink redacts client-only publication credentials and provider secrets before truncation', async () => {
+  const token = 'fixture-client-token-not-in-env';
+  const provider = 'fixture-provider-secret-not-real';
+  const posts = [];
+  await reportPublicationFailure({
+    request: { repo: 'org/repo', number: 1 },
+    github: { token, async request(path, options) { posts.push({ path, ...options }); } },
+    env: { OPENAI_API_KEY: provider },
+    error: new Error(`client=${token} provider=${provider}\n${'x'.repeat(1450)}${token}`),
+  });
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].path, '/repos/org/repo/issues/1/comments');
+  assert.match(posts[0].body.body, /client=\[REDACTED\] provider=\[REDACTED\]/);
+  assert.ok(!posts[0].body.body.includes(token));
+  assert.ok(!posts[0].body.body.includes(provider));
+  assert.ok(!posts[0].body.body.includes('fixture-client-'));
+});
+
 test('ambiguous committed POST is reconciled without creating duplicate review', async () => {
   const f = setup();
   const get = f.github.request;

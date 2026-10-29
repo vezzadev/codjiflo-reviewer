@@ -39,6 +39,33 @@ test('Codex failures, malformed JSON, stale heads and Claude error results never
   });
 });
 
+test('real failure publication redacts known publication and provider secrets without passing publication tokens to reviewer', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(f.run({
+      mode: 'publication-secret-failure',
+      providerEnv: {
+        GH_TOKEN: 'fixture-gh-token-not-real',
+        gItHuB_tOkEn: 'fixture-mixed-token-not-real',
+        OPENAI_API_KEY: 'fixture-provider-key-not-real',
+        FIXTURE_INSPECT_GIT: '1',
+      },
+    }));
+    const context = JSON.parse(await readFile(f.capture + '.git-context', 'utf8'));
+    assert.ok(!Object.keys(context.env).some(name => /^(?:GITHUB_TOKEN|GH_TOKEN)$/i.test(name)));
+    assert.equal(context.env.OPENAI_API_KEY, 'fixture-provider-key-not-real');
+    assert.equal(verdicts(f).length, 0);
+    assert.equal(f.state.posts.length, 2);
+    const failure = f.state.posts.at(-1);
+    assert.equal(failure.path, '/repos/org/repo/issues/1/comments');
+    assert.match(failure.body.body, /Codjiflo Reviewer failed/);
+    assert.match(failure.body.body, /Fixture publication diagnostic github=\[REDACTED\] gh=\[REDACTED\] mixed=\[REDACTED\] provider=\[REDACTED\]/);
+    for (const secret of ['fixture-token-not-real', 'fixture-gh-token-not-real', 'fixture-mixed-token-not-real', 'fixture-provider-key-not-real']) {
+      assert.ok(!JSON.stringify(f.state.posts).includes(secret), secret);
+    }
+  } finally { await f.close(); }
+});
+
 test('environment-blocked and legacy defect-free outputs post only a neutral failure comment', async t => {
   for (const verdict of ['INCOMPLETE', 'REQUEST_CHANGES']) await t.test(verdict, async () => {
     const f = await fixture();

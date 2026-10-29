@@ -134,6 +134,12 @@ if (process.argv.includes('exec')) console.log(JSON.stringify({type:'thread.star
 else process.stdout.write('fixture CLI streaming live\\n');
 process.stderr.write('fixture stderr streaming live\\n');
 if (process.env.FIXTURE_MODE === 'failure') process.exit(9);
+if (process.env.FIXTURE_MODE === 'publication-secret-failure') {
+ // Fake publication credentials are intentionally embedded, not inherited by
+ // this reviewer. Model/tool access can supply diagnostics from outside env.
+ console.log(JSON.stringify({type:'turn.failed',error:{message:'Fixture publication diagnostic github=fixture-token-not-real gh=fixture-gh-token-not-real mixed=fixture-mixed-token-not-real provider=' + process.env.OPENAI_API_KEY}}));
+ process.exit(1);
+}
 const findings = process.env.FIXTURE_MODE === 'findings' ? [
  {path:'a.js',side:'LEFT',start_line:1,line:1,priority:'P1',disposition:'blocking',title:'Old-side bug',body:'Concrete failure scenario.'},
  {path:'a.js',side:'RIGHT',start_line:1,line:2,priority:'P2',disposition:'blocking',title:'Range bug',body:'Concrete failure scenario.'}
