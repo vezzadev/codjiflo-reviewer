@@ -88,6 +88,7 @@ All runners under the same OS account share `~/.local/state/codjiflo/claude-rout
 
 - Each review tries an eligible key through `@anthropic-ai/claude-agent-sdk`; each key is attempted at most once per review.
 - Recognized quota failures make that key's quota group unavailable. Temporary rate limits use the SDK's retry delay when exposed, otherwise a 60-second cooldown. The pinned SDK can emit terminal 429 errors without HTTP headers, so `Retry-After` is not always available. Explicit credit/spend exhaustion waits for a known reset, a replacement key, or operator reset.
+- Anthropic's HTTP 400 “specified API usage limits” response is spend exhaustion, including when the SDK labels it `unknown`. Its “regain access” timestamp supplies the UTC reset. Other HTTP 400 errors still fail without credential rotation. A terminal SDK result with `subtype: "success"` and `is_error: true` is an error, not a completed review.
 - When no eligible key remains, the review restarts through the installed Claude CLI using its subscription login. This includes a missing key file.
 - Authentication, model, network, schema, and unrelated provider errors fail the review; they do not silently switch credentials. Partial attempts never publish a review.
 
