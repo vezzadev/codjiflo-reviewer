@@ -112,7 +112,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const mergeBase = (await git(['merge-base', base, head])).trim();
     const currentPromptBlob = await repositoryPromptBlob(git, head);
     if (dependencies.length) {
-      const entries = (await git(['ls-tree', '-r', '-z', head])).split('\0');
+      const entries = (await git(['--literal-pathspecs', 'ls-tree', '-r', '-z', head, '--', ...dependencies])).split('\0');
       const gitlinks = new Set(entries.filter(entry => entry.startsWith('160000 commit ')).map(entry => entry.slice(entry.indexOf('\t') + 1)));
       for (const path of dependencies) {
         if (!gitlinks.has(path)) throw new Error(`Source submodule is not an exact gitlink path at the inspected head: ${JSON.stringify(path)}`);

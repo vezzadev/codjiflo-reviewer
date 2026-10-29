@@ -97,10 +97,11 @@ test('source selection rejects malformed values, unsafe paths, and non-gitlinks 
 });
 
 for (const selection of [undefined, '[]', '["SolidworksMCP-python"]', '["private-references"]']) {
-  test(`unavailable private root dependency is fetched only when selected: ${selection ?? 'unset'}`, async () => {
+  test(`unavailable private root dependency is fetched only when selected: ${selection ?? 'unset'}`, async t => {
     // Real HTTP 404 matches a private repository unavailable to the root-scoped
     // token. It is a tracked gitlink, not a mocked subprocess failure.
     const unavailable = await gitHttpServer({});
+    t.after(() => unavailable.close());
     const s = await submoduleFixture({ unavailableUrl: `${unavailable.origin}/private-references` });
     try {
       let invoked = false;
@@ -139,14 +140,14 @@ for (const selection of [undefined, '[]', '["SolidworksMCP-python"]', '["private
         assert.equal(s.posts.filter(post => post.path.endsWith('/reviews')).length, 1);
       }
     } finally {
-      await unavailable.close();
       await s.f.close();
     }
   });
 }
 
-test('real Git treats wildcard characters in selected gitlink paths literally', async () => {
+test('real Git treats wildcard characters in selected gitlink paths literally', async t => {
   const unavailable = await gitHttpServer({});
+  t.after(() => unavailable.close());
   const s = await submoduleFixture({
     sdkPath: 'vendor/sdk[1]', unavailablePath: 'vendor/sdk1', unavailableUrl: `${unavailable.origin}/private-references`,
   });
@@ -166,7 +167,6 @@ test('real Git treats wildcard characters in selected gitlink paths literally', 
     assert.equal(invoked, true);
     assert.deepEqual(unavailable.calls, []);
   } finally {
-    await unavailable.close();
     await s.f.close();
   }
 });
