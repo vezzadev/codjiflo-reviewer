@@ -33,7 +33,7 @@ Bare mentions, casual mentions such as `Thanks @codjiflo for reviewing`, `Could 
 
 Preset names and aliases are case-insensitive in mentions and local `--preset` arguments. Aliases resolve to their canonical preset before kickoff, review publication, and baseline selection; they do not add extra presets. An alias and its canonical name still count as two preset arguments and are rejected together in a mention. `sol-high` and `opus-high` have been replaced by `sol-xhigh` and `opus-xhigh`; the old names are no longer accepted. Model effort remains `high`, and medium presets are unchanged. Historical reviews marked with the old names do not match the new presets, so the next review falls back to full scope.
 
-`CODJIFLO_SOL_MODEL` and `CODJIFLO_OPUS_MODEL` override model IDs for their preset families. Configure a model available through your normal OMP installation; there is no Codjiflo cross-provider fallback. The `codex` and `claude` names are command aliases, not executable selections.
+`CODJIFLO_SOL_MODEL` and `CODJIFLO_OPUS_MODEL` override model IDs for their preset families. Overrides must be fully provider-qualified and match the family: `openai-codex/…` for Sol and `anthropic/…` for Opus. Configure a model available through your normal OMP installation; there is no Codjiflo cross-provider fallback. The `codex` and `claude` names are command aliases, not executable selections.
 
 When `.codjiflo/code-review/PROMPT.md` is absent, the default high and xhigh methodology uses eight/ten sequential independent angles (no subagent fanout), deduplication without verification, severity ordering, a gap sweep for xhigh, and caps of ten/fifteen findings. These instructions are adapted from the e-code-review skill and embedded for both providers; no skill installation is required on the runner. Structured JSON/native GitHub reviews replace ReportFindings; the unrelated native-observer pilot and later fix reporting are omitted. See `src/prompt.mjs` for the complete instructions.
 
@@ -182,3 +182,12 @@ Tests cover authorization, native review coordinates, incremental baselines, mal
 The smoke runs the **real entry point and orchestration**, native fetch against a loopback GitHub fixture, Git fetch/checkout of a temporary repository, and a fixture OMP executable for both preset families. It checks native review payloads and LEFT/RIGHT ranges, plus stale-head rejection. The deterministic suite makes no paid model calls or remote writes and cleans up afterward; hosted CI needs no self-hosted runner or live authentication.
 
 Fixture executables prove adapter behavior, not real OMP authentication, account selection, model analysis, or OS isolation. Live acceptance requires the installed OMP and actual model to consume evidence and produce the structured verdict; a fixture payload or copied CLI options alone is not that proof.
+
+Opt-in native smokes exercise the installed OMP and actual models:
+
+```sh
+node test/omp-native-smoke.mjs sol-medium
+node test/omp-native-smoke.mjs opus-medium
+```
+
+They require `omp` on PATH and normally authenticated OMP accounts with access to the selected models, and consume model quota. They require the model to inspect source evidence containing a fresh nonce and submit its own structured verdict, then verify publication against the local GitHub fixture. They make no remote GitHub writes and do not require executing scripts from the reviewed code. These live smokes are separate from deterministic CI and are not proof of an OS sandbox.
