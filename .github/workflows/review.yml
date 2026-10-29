@@ -14,10 +14,10 @@ on:
         default: self-hosted
       sol-model:
         type: string
-        default: gpt-6.1-sol
+        default: openai-codex/gpt-6.1-sol
       opus-model:
         type: string
-        default: opus
+        default: anthropic/claude-opus-5-5
       prepare-command:
         description: Trusted host-side prerequisite command, run before credentials and review
         type: string
