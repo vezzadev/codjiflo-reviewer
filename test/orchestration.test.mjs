@@ -27,6 +27,15 @@ test('real CLI orchestration streams and publishes pinned native ranged changes 
   } finally { await f.close(); }
 });
 
+test('native publication records the workflow attempt without moving its final identity marker', async () => {
+  const f = await fixture();
+  try {
+    await f.run({ providerEnv: { GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2' } });
+    assert.equal(verdicts(f).length, 1);
+    assert.match(verdicts(f)[0].body.body, /<!-- codjiflo-workflow:123:2 -->\n<!-- codjiflo-publication:[a-f0-9-]+ -->$/);
+  } finally { await f.close(); }
+});
+
 test('Codex failures, malformed JSON, stale heads and Claude error results never approve', async t => {
   for (const scenario of ['failure', 'malformed', 'stale', 'error-result']) await t.test(scenario, async () => {
     const f = await fixture();
