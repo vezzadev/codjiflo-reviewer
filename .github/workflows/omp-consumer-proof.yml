@@ -21,7 +21,7 @@ jobs:
           owner: pedropaulovc
           repositories: harmonic-analyzer
           permission-contents: read
-          permission-issues: write
+          permission-issues: read
           permission-pull-requests: write
       - name: Review consumer through deployed OMP runtime
         env:
