@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { isApproved, PRESETS } from './commands.mjs';
-import { secretRedactor } from './claude.mjs';
+import { secretRedactor } from './redaction.mjs';
 
 export function workflowRunUrl(request, env) {
   return env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${request.repo}/actions/runs/${env.GITHUB_RUN_ID}` : null;
