@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4c98f65ab0f6addffd63bd996dd44193603c9ad9
+          ref: aa8e93499215ebb34dad75e63dcaa468b309f073
           persist-credentials: false
       - uses: actions/create-github-app-token@v2
         id: app
