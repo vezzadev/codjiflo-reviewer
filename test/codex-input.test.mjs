@@ -428,6 +428,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
       const cwd = join(temp, 'repository');
       await mkdir(cwd);
       const env = await isolatedGitEnv(temp);
+      if (gitlink) env.GIT_ALLOW_PROTOCOL = 'file';
       const git = args => runProcess('git', args, { cwd, env });
       const commit = () => git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshot']);
       const toLink = 'a-to-link\t"é\n.txt', fromLink = 'b-from-link\t"漢\n.txt';
@@ -438,10 +439,29 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
         await git(['config', 'diff.submodule', 'log']);
         await git(['config', '--global', 'diff.submodule', 'log']);
         if (gitlink) await git(['config', '--global', 'color.ui', 'always']);
-        let seed;
+        let seed, submoduleHead;
         if (gitlink) {
-          await git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'submodule seed']);
-          seed = (await git(['rev-parse', 'HEAD'])).trim();
+          const remote = join(temp, 'submodule-remote');
+          await mkdir(remote);
+          const submoduleGit = args => runProcess('git', args, { cwd: remote, env });
+          await submoduleGit(['init', '-q']);
+          await writeFile(join(remote, 'content.txt'), 'submodule seed\n');
+          await submoduleGit(['add', '--all']);
+          await submoduleGit(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'submodule seed']);
+          seed = (await submoduleGit(['rev-parse', 'HEAD'])).trim();
+          await writeFile(join(remote, 'content.txt'), 'submodule head\n');
+          await submoduleGit(['add', '--all']);
+          await submoduleGit(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'submodule head']);
+          submoduleHead = (await submoduleGit(['rev-parse', 'HEAD'])).trim();
+          const url = pathToFileURL(remote).href;
+          for (const path of ['d-submodule', 'f-from-gitlink']) {
+            await git(['submodule', 'add', '-q', url, path]);
+            await git(['-C', path, 'checkout', '-q', seed]);
+          }
+          // Keep mappings unchanged across the regular-file/gitlink swaps so
+          // .gitmodules is not an extra changed evidence file.
+          await git(['config', '-f', '.gitmodules', 'submodule.e-to-gitlink.path', 'e-to-gitlink']);
+          await git(['config', '-f', '.gitmodules', 'submodule.e-to-gitlink.url', url]);
         }
         for (const filename of names) {
           if (filename === 'd-submodule' || filename === 'f-from-gitlink') continue;
@@ -449,10 +469,6 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           else await writeFile(join(cwd, filename === 'd-renamed.txt' ? 'd-original.txt' : filename), `old ${filename}\n`);
         }
         await git(['add', '--all']);
-        if (gitlink) {
-          await git(['update-index', '--add', '--cacheinfo', `160000,${seed},d-submodule`]);
-          await git(['update-index', '--add', '--cacheinfo', `160000,${seed},f-from-gitlink`]);
-        }
         await commit();
         const base = (await git(['rev-parse', 'HEAD'])).trim();
         if (typeChanges) {
@@ -469,6 +485,8 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
         }
         if (gitlink) {
           await rm(join(cwd, 'e-to-gitlink'));
+          await rm(join(cwd, 'f-from-gitlink'), { recursive: true, force: true });
+          await git(['-C', 'd-submodule', 'checkout', '-q', submoduleHead]);
           await writeFile(join(cwd, 'f-from-gitlink'), 'now a regular file\n');
         }
         const content = ['\r', '\u2028', '\u2029'].map(separator => `content${separator}diff --git a/fake b/fake\n`).join('');
@@ -477,8 +495,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
         await writeFile(join(cwd, 'zz-late.txt'), 'late evidence\n');
         await git(['add', '--all']);
         if (gitlink) {
-          await git(['update-index', '--add', '--cacheinfo', `160000,${base},d-submodule`]);
-          await git(['update-index', '--add', '--cacheinfo', `160000,${base},e-to-gitlink`]);
+          await git(['update-index', '--add', '--cacheinfo', `160000,${submoduleHead},e-to-gitlink`]);
         }
         await commit();
         const head = (await git(['rev-parse', 'HEAD'])).trim();
