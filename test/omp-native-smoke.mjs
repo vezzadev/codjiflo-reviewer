@@ -19,6 +19,8 @@ const f = await fixture({
   filename: 'notes.txt', oldLine: 'old note', newLine: 'updated note',
   headPrompt: `This is a native runtime acceptance review of a tiny text-only fixture. Inspect the complete diff and touched text. Also read the source evidence file at ${JSON.stringify(source)} using read or bash without executing it. Include the exact reviewEvidence value from that file in your human-readable summary as proof of source consumption; it is deliberately not provided in these instructions. No tests, execution of source, network calls or repository edits. If the notes and these instructions have no concrete blocking defect, submit APPROVE with no findings using final_review exactly once. Do not invent defects in this intentionally text-only fixture. End with a short acknowledgement.`,
 });
+let log = '';
+let failed = false;
 try {
   // The Git fixture isolates HOME for git configuration. Restore only the normal
   // user roots for the native reviewer so OMP keeps its real shared auth store.
@@ -28,10 +30,11 @@ try {
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
     CODJIFLO_OMP_BIN: process.env.CODJIFLO_OMP_BIN || 'omp',
   };
-  const log = await f.run({ preset, full: true, providerEnv, timeoutMs: 46 * 60 * 1000 });
+  log = await f.run({ preset, full: true, providerEnv, timeoutMs: 46 * 60 * 1000 });
   const records = log.split('\n').flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
   const calls = records.filter(event => event.type === 'tool_execution_start');
   const completions = records.filter(event => event.type === 'tool_execution_end');
+  assert.ok(calls.every(call => REVIEW_TOOLS.includes(call.toolName)), 'Every actually executed tool must belong to the review allowlist');
   const sourceRead = calls.find(call => ['read', 'bash'].includes(call.toolName)
     && JSON.stringify(call.args).includes(source)
     && completions.some(end => end.toolCallId === call.toolCallId && end.isError === false && JSON.stringify(end.result).includes(nonce)));
@@ -42,12 +45,21 @@ try {
   assert.equal(final[0].args.verdict, 'APPROVE');
   const assistants = records.filter(event => event.type === 'message_end' && event.message?.role === 'assistant').map(event => event.message);
   assert.ok(assistants.length, 'Real OMP assistant event evidence is required');
+  let declaredToolMessages = 0;
   for (const message of assistants) {
     const tools = message.requestControls?.tools;
-    assert.ok(Array.isArray(tools?.declared), 'OMP must expose actual request tool declarations');
+    // Anthropic exposes requestControls; OpenAI Codex responses may omit it.
+    // Validate observed declarations without claiming missing metadata proves
+    // the unobserved tool surface. Executed-tool checks above apply to both.
+    if (tools?.declared === undefined && PRESETS[preset].provider === 'openai-codex') {
+      if (tools?.active !== undefined) assert.ok(Array.isArray(tools.active) && tools.active.every(tool => REVIEW_TOOLS.includes(tool)), 'Observed active tools must be restricted');
+      continue;
+    }
+    assert.ok(Array.isArray(tools?.declared), 'OMP must expose valid request tool declarations when metadata is available');
     assert.ok(tools.declared.includes('final_review'), 'Trusted completion tool must reach the model');
     assert.ok(tools.declared.every(tool => REVIEW_TOOLS.includes(tool)), `Unexpected declared tool: ${tools.declared.join(',')}`);
     assert.ok(Array.isArray(tools.active) && tools.active.every(tool => REVIEW_TOOLS.includes(tool)), 'Active tool set must be restricted');
+    declaredToolMessages++;
   }
   const terminal = records.filter(event => event.type === 'agent_end').at(-1);
   assert.equal(terminal?.isTerminal, true);
@@ -62,10 +74,16 @@ try {
   const credentialIds = [...new Set(assistants.map(message => message.credentialId).filter(id => id !== undefined))];
   // Persist only to an explicitly requested local file. Useful for a parent-run
   // account-switch experiment; no credentials or raw transcript are included.
-  const evidence = { preset, model: PRESETS[preset].model, credentialIds, sourceConsumed: true, finalReviewSubmitted: true, terminalSuccess: true, nativeReviewPublished: true, head: f.head };
+  const evidence = { preset, model: PRESETS[preset].model, credentialIds, sourceConsumed: true, finalReviewSubmitted: true, terminalSuccess: true, nativeReviewPublished: true, executedToolsRestricted: true, declaredToolEvidence: declaredToolMessages === assistants.length ? 'complete' : declaredToolMessages ? 'partial' : 'unavailable', declaredToolMessages, assistantMessages: assistants.length, head: f.head };
   if (process.env.CODJIFLO_NATIVE_SMOKE_EVIDENCE) await writeFile(resolve(process.env.CODJIFLO_NATIVE_SMOKE_EVIDENCE), JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify(evidence));
+} catch (error) {
+  failed = true;
+  const transcript = join(proof, 'failed-stdout.log');
+  await writeFile(transcript, log || error.stdout || '', { mode: 0o600 });
+  console.error(`Native OMP smoke failed; captured stdout retained at ${transcript}`);
+  throw error;
 } finally {
   await f.close();
-  await rm(proof, { recursive: true, force: true });
+  if (!failed) await rm(proof, { recursive: true, force: true });
 }

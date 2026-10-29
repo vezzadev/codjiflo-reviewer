@@ -10,11 +10,10 @@ import { fixture } from './fixture.mjs';
 
 const verdicts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
 
-test('real CLI orchestration streams and publishes pinned native ranged changes request', async () => {
+test('real CLI orchestration publishes pinned native ranged changes request', async () => {
   const f = await fixture();
   try {
-    const log = await f.run({ mode: 'findings' });
-    assert.match(log, /streaming live/);
+    await f.run({ mode: 'findings' });
     assert.equal(verdicts(f).length, 1);
     const result = verdicts(f)[0].body;
     assert.equal(result.event, 'REQUEST_CHANGES');

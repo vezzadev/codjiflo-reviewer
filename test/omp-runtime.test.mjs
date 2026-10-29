@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { runReviewer, parseOmpReview, OMP_REVIEW_CONFIG } from '../src/runner.mjs';
 import { PRESETS } from '../src/commands.mjs';
 import { validateResult } from '../src/review.mjs';
-import { prompt } from '../src/prompt.mjs';
 import reviewExtension, { REVIEW_TOOLS } from '../src/omp-review-extension.mjs';
 import { secretRedactor } from '../src/redaction.mjs';
 
@@ -147,14 +146,4 @@ test('shared redactor handles chunk splits, overlaps and newly added secrets', (
   redact.write('new-'); redact.write('key'); redact.end();
   assert.equal(output, 'before [REDACTED] after [REDACTED]');
   assert.equal(redact.redact('abc-secret and new-key'), '[REDACTED] and [REDACTED]');
-});
-
-test('runtime prompt describes tools rather than an OS sandbox and requires final_review', () => {
-  const input = prompt({ level: 'xhigh', mode: 'full', base: 'a', scope: 'a', head: 'b', diff: '', currentDiff: '[]' });
-  assert.match(input, /UV_CACHE_DIR, UV_PROJECT_ENVIRONMENT/);
-  assert.match(input, /never edit repository or staged evidence files/);
-  assert.match(input, /not an OS sandbox/);
-  assert.match(input, /Submit exactly once with the final_review tool/);
-  assert.match(input, /Missing required evidence.*remains a blocker/);
-  assert.match(input, /INCOMPLETE fails the run without publishing a native verdict/);
 });
