@@ -1,0 +1,31 @@
+name: OMP consumer cutover acceptance
+on:
+  push:
+    branches: [test/omp-consumer-proof]
+permissions:
+  contents: read
+jobs:
+  review:
+    runs-on: [self-hosted, codjiflo-reviewer]
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ad57c1aa1ae776524478e5190628ca1f2bef05b7
+          persist-credentials: false
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.CODJIFLO_APP_ID }}
+          private-key: ${{ secrets.CODJIFLO_APP_PRIVATE_KEY }}
+          owner: pedropaulovc
+          repositories: harmonic-analyzer
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Review consumer through deployed OMP runtime
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+          CODJIFLO_APPROVED_USERS: pedropaulovc
+          CODJIFLO_RESULT_PATH: ${{ runner.temp }}/omp-consumer-proof-${{ github.run_id }}.json
+        run: node bin/codjiflo-reviewer.mjs --repo pedropaulovc/harmonic-analyzer --pr 2076 --requester pedropaulovc --preset claude --full
