@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { basename, isAbsolute, join, relative, sep } from 'node:path';
 import { schema } from './prompt.mjs';
 import { secretRedactor } from './claude.mjs';
 import { MAX_INLINE_INPUT } from './input-budget.mjs';
@@ -67,16 +67,36 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
     // Evidence-aware orchestration keeps methodology inline. Never fall back to
     // staging an opaque whole prompt that requires duplicate evidence ingestion.
     if (prompt.length > MAX_INLINE_INPUT) throw new Error('Codex review input exceeds inline budget; structured evidence preparation is required');
+    // Read-only repository inspection still needs runtime scratch (uv locks,
+    // temporary files, and an isolated project environment). Never grant the
+    // whole checkout, evidence directory, host cache, or /tmp write access.
+    const parent = await realpath(temp), checkout = await realpath(cwd);
+    const fromCheckout = relative(checkout, parent);
+    if (fromCheckout === '' || (fromCheckout !== '..' && !fromCheckout.startsWith('..' + sep) && !isAbsolute(fromCheckout))) {
+      throw new Error('Codex runtime scratch must be outside the checkout');
+    }
+    const scratch = await mkdtemp(join(parent, 'review-runtime-'));
+    const runtimeEnv = {
+      TMPDIR: join(scratch, 'tmp'), TMP: join(scratch, 'tmp'), TEMP: join(scratch, 'tmp'),
+      XDG_CACHE_HOME: join(scratch, 'cache'), UV_CACHE_DIR: join(scratch, 'uv-cache'),
+      UV_PROJECT_ENVIRONMENT: join(scratch, 'venv'), PYTHONPYCACHEPREFIX: join(scratch, 'pycache'),
+    };
+    const profile = basename(scratch);
     let stdout;
     const { redact } = secretRedactor(Object.entries(env)
       .filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY|AUTHORIZATION/i.test(name))
       .map(([, value]) => value));
     try {
+      await mkdir(runtimeEnv.TMPDIR);
       stdout = await runProcess(env.CODJIFLO_CODEX_BIN || 'codex', [
-        'exec', '--model', env.CODJIFLO_SOL_MODEL || preset.model,
-        '-c', `model_reasoning_effort="${preset.effort}"`, '--sandbox', 'read-only',
+        'exec', '--strict-config', '--model', env.CODJIFLO_SOL_MODEL || preset.model,
+        '-c', `model_reasoning_effort="${preset.effort}"`,
+        '-c', 'approval_policy="never"',
+        '-c', `default_permissions=${JSON.stringify(profile)}`,
+        '-c', `permissions.${profile}={extends=":read-only",filesystem={${JSON.stringify(scratch)}="write"},network={enabled=false}}`,
+        ...Object.entries(runtimeEnv).flatMap(([name, value]) => ['-c', `shell_environment_policy.set.${name}=${JSON.stringify(value)}`]),
         '--output-schema', schemaPath, '--output-last-message', output, '--json', '-',
-      ], { cwd, env, input: prompt, stream: true, timeoutMs: 45 * 60 * 1000 });
+      ], { cwd, env: { ...env, ...runtimeEnv }, input: prompt, stream: true, timeoutMs: 45 * 60 * 1000 });
     } catch (error) {
       const diagnostic = codexDiagnostics(error.stdout, redact);
       if (/input_too_large|Input exceeds the maximum length/i.test(diagnostic)) {
@@ -84,6 +104,8 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
       }
       const status = error.termination === 'timeout' ? 'timed out' : error.termination === 'exit' ? `failed (exit ${error.exitCode})` : error.termination === 'signal' ? `failed (${error.signal})` : 'could not run';
       throw new Error(`Codex review ${status}.${diagnostic ? `\n${diagnostic}` : ' See process logs for details.'}`);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
     }
     let events;
     try { events = stdout.split('\n').filter(line => line.trim()).map(line => JSON.parse(line)); }
