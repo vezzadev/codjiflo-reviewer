@@ -22,6 +22,10 @@ on:
         description: Trusted host-side prerequisite command, run before credentials and review
         type: string
         default: ''
+      source-submodules:
+        description: JSON array of exact PR-root gitlink paths to fetch recursively at pinned commits; no submodules by default
+        type: string
+        default: '[]'
       app-id:
         type: string
         default: ''
@@ -108,6 +112,7 @@ jobs:
           CODJIFLO_APPROVED_USERS: ${{ inputs.approved-users }}
           CODJIFLO_SOL_MODEL: ${{ inputs.sol-model }}
           CODJIFLO_OPUS_MODEL: ${{ inputs.opus-model }}
+          CODJIFLO_SOURCE_SUBMODULES: ${{ inputs.source-submodules }}
       - name: Retain review result
         id: artifact
         if: always()
