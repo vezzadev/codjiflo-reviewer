@@ -22,6 +22,15 @@ async function readRange(directory, name, start, size = MAX_EVIDENCE_READ_BYTES)
   return { ...JSON.parse(output.slice(0, newline)), text: output.slice(newline + 1) };
 }
 
+function assertNestedGitScenarios(tap) {
+  assert.match(tap, /^ok \d+ - real Git type changes and non-LF content preserve complete consumer-visible ranges$/m, tap);
+  assert.match(tap, /^ok \d+ - real Git colliding rename headers remain separate alongside type changes$/m, tap);
+  for (const scenario of ['separators', 'types', 'submodule', 'collision only', 'collision and type change']) {
+    assert.match(tap, new RegExp(`^    ok \\d+ - ${scenario}$`, 'm'), `Missing successful real-Git scenario: ${scenario}\n${tap}`);
+  }
+  assert.match(tap, /^# fail 0$/m, tap);
+}
+
 test('large full and incremental reviews keep methodology inline and expose complete navigable evidence', async () => {
   const f = await fixture({ newLine: 'é🙂漢'.repeat(300000) });
   try {
@@ -230,7 +239,7 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
   });
 });
 
-test('Git environment sanitization removes only repository and command config selectors without mutating input', () => {
+test('Git environment sanitization removes repository, pathspec and command config selectors without mutating input', () => {
   const selectors = [
     'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
     'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_17',
@@ -238,6 +247,7 @@ test('Git environment sanitization removes only repository and command config se
     'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE',
     'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX', 'GIT_SHALLOW_FILE',
     'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES',
+    'GIT_ICASE_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_LITERAL_PATHSPECS',
   ];
   const preserved = {
     PATH: '/git/bin', HOME: '/runner', GIT_EXEC_PATH: '/git/libexec',
@@ -254,6 +264,48 @@ test('Git environment sanitization removes only repository and command config se
   const inherited = Object.freeze({ ...preserved, ...Object.fromEntries(spellings.map(name => [name, 'caller override'])) });
   assert.deepEqual(sanitizeGitEnv(inherited), preserved);
   for (const name of spellings) assert.equal(inherited[name], 'caller override');
+});
+
+test('hostile Git pathspec modes preserve current-head prompt authority and operator transport through review orchestration', async t => {
+  const modes = ['GIT_ICASE_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_LITERAL_PATHSPECS'];
+  for (const names of [...modes.map(name => [name]), modes]) await t.test(names.join(' + '), async () => {
+    const instructions = 'CURRENT-HEAD-INSTRUCTIONS: review résumé handling.\n';
+    const f = await fixture({ basePrompt: 'OLD-BASE-INSTRUCTIONS\n', headPrompt: instructions });
+    try {
+      await writeFile(join(f.repo, '.codjiflo', 'code-review', 'PROMPT.md'), 'UNCOMMITTED-SOURCE-INSTRUCTIONS\n');
+      await writeFile(f.env.GIT_CONFIG_GLOBAL, '[codjiflo]\npathspecfixture = operator-config-survives\n');
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
+      const transport = {
+        GIT_SSH_COMMAND: 'ssh -oBatchMode=yes',
+        GIT_SSL_CAINFO: f.env.GIT_CONFIG_GLOBAL,
+        GIT_SSL_CAPATH: f.env.HOME,
+        GIT_ASKPASS: process.execPath,
+        GIT_TERMINAL_PROMPT: '0',
+      };
+      // Inject only at the production entry point, after real Git fixture setup.
+      await f.run({ providerEnv: {
+        ...transport,
+        ...Object.fromEntries(names.map(name => [name, '1'])),
+        FIXTURE_INSPECT_GIT: '1',
+      } });
+      const published = verdicts(f);
+      assert.equal(published.length, 1);
+      assert.equal(published[0].body.event, 'APPROVE');
+      assert.equal(published[0].body.commit_id, f.head);
+      assert.match(published[0].body.body, /Scope: \*\*full\*\* \(repository review instructions changed since the previous approval\)/);
+      const captured = await readFile(f.capture, 'utf8');
+      const section = captured.slice(captured.indexOf('Repository review instructions'), captured.indexOf('Review-scope unified diff follows:'));
+      assert.ok(section.includes(`--- BEGIN REPOSITORY REVIEW INSTRUCTIONS ---\n${instructions}\n--- END REPOSITORY REVIEW INSTRUCTIONS ---`));
+      assert.doesNotMatch(section, /OLD-BASE-INSTRUCTIONS|UNCOMMITTED-SOURCE-INSTRUCTIONS|e-code-review/);
+      assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
+      const context = JSON.parse(await readFile(f.capture + '.git-context', 'utf8'));
+      assert.equal(context.head, f.head);
+      for (const name of modes) assert.equal(context.env[name], undefined, name);
+      for (const [name, value] of Object.entries(transport)) assert.equal(context.env[name], value, name);
+      assert.equal(context.env.GIT_CONFIG_GLOBAL, f.env.GIT_CONFIG_GLOBAL);
+      assert.match(context.config, /codjiflo\.pathspecfixture=operator-config-survives/);
+    } finally { await f.close(); }
+  });
 });
 
 test('Git fixtures and production reviews leave an inherited external repository and index untouched', async () => {
@@ -305,8 +357,9 @@ test('Git fixtures and production reviews leave an inherited external repository
       error.message += `\nNested test stdout:\n${error.stdout ?? ''}`;
       throw error;
     }
-    assert.match(tap, /^# tests [1-9]\d*$/m, tap);
-    assert.match(tap, /^# fail 0$/m, tap);
+    assertNestedGitScenarios(tap);
+    const unmatched = await runProcess(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^no matching Git regression scenario$', fileURLToPath(import.meta.url)], { env: childTestEnv, timeoutMs: 120000 });
+    assert.throws(() => assertNestedGitScenarios(unmatched), { code: 'ERR_ASSERTION' }, 'a successful file wrapper cannot stand in for executed scenarios');
     const output = await runProcess(process.execPath, ['--input-type=module', '-e', `
       import assert from 'node:assert/strict';
       import { readFile, writeFile } from 'node:fs/promises';
