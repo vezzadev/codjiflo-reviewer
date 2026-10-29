@@ -372,7 +372,7 @@ test('real CLI retains validated payload and publication-only recovery does not 
     assert.equal(envelope.payload.comments.length, 2);
     const posts = f.state.posts.length;
     const recovery = await runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], {
-      env: { ...f.env, GITHUB_EVENT_PATH: 'ignored-during-publication', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_CODEX_BIN: '/no-provider-needed' },
+      env: { ...f.env, GITHUB_EVENT_PATH: 'ignored-during-publication', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' },
     });
     assert.match(recovery, /publication confirmed/);
     assert.equal(f.state.posts.length, posts);
@@ -390,7 +390,7 @@ test('publication rejection retains result, reports failure and exits nonzero; l
     const envelope = JSON.parse(await readFile(path, 'utf8'));
     assert.equal(envelope.payload.event, 'REQUEST_CHANGES');
     f.state.publicationStatus = undefined;
-    const recoveryEnv = { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_CODEX_BIN: '/no-provider-needed' };
+    const recoveryEnv = { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' };
     f.state.stale = true;
     await assert.rejects(runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], { env: recoveryEnv }), /refusing stale verdict/);
     assert.equal(f.state.reviews.length, 0);
@@ -412,7 +412,7 @@ test('default CLI result paths preserve a failed review when the next review suc
       env: {
         ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
         CODJIFLO_RESULT_PATH: '', CODJIFLO_APPROVED_USERS: 'alice',
-        CODJIFLO_CODEX_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
+        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
       },
     });
     const results = async () => (await readdir(f.temp)).filter(name => /^codjiflo-result-[a-f0-9-]+\.json$/.test(name));
@@ -450,7 +450,7 @@ test('explicit result path remains caller-selected and may overwrite an earlier 
       env: {
         ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
         CODJIFLO_RESULT_PATH: join(f.temp, 'ignored-result.json'), CODJIFLO_APPROVED_USERS: 'alice',
-        CODJIFLO_CODEX_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
+        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
       },
     });
     assert.notEqual(await readFile(path, 'utf8'), earlier);

@@ -31,12 +31,12 @@ function assertNestedGitScenarios(tap) {
   assert.match(tap, /^# fail 0$/m, tap);
 }
 
-test('large full and incremental reviews keep methodology inline and expose complete navigable evidence', async () => {
+test('both OMP families keep full and incremental methodology inline with complete navigable evidence', async () => {
   const f = await fixture({ newLine: 'é🙂漢'.repeat(300000) });
   try {
-    for (const full of [true, false]) {
-      if (!full) f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
-      await f.run({ full });
+    for (const [preset, canonical] of [['codex', 'sol-xhigh'], ['claude', 'opus-xhigh']]) for (const full of [true, false]) {
+      f.state.reviews = full ? [] : [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: canonical })} -->` }];
+      await f.run({ full, preset });
       const input = await readFile(f.capture, 'utf8');
       assert.ok(input.length < 16000, 'initial prompt does not grow with duplicated patch evidence');
       const manifest = manifestOf(input);
@@ -64,27 +64,31 @@ test('large full and incremental reviews keep methodology inline and expose comp
   } finally { await f.close(); }
 });
 
-test('oversized custom methodology fails closed before provider invocation or publication', async () => {
-  const f = await fixture({ headPrompt: 'Inspect café 🙂 cancellation.\n'.repeat(45000) });
-  try {
-    await assert.rejects(f.run({ full: true }));
-    assert.equal(verdicts(f).length, 0);
-    await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
-    assert.match(f.state.posts.at(-1).body.body, /instructions exceed/);
-  } finally { await f.close(); }
+test('oversized custom methodology fails closed for both families before OMP invocation or publication', async t => {
+  for (const preset of ['codex', 'claude']) await t.test(preset, async () => {
+    const f = await fixture({ headPrompt: 'Inspect café 🙂 cancellation.\n'.repeat(45000) });
+    try {
+      await assert.rejects(f.run({ preset, full: true }));
+      assert.equal(verdicts(f).length, 0);
+      await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+      assert.match(f.state.posts.at(-1).body.body, /instructions exceed/);
+    } finally { await f.close(); }
+  });
 });
 
-test('unprocessed large scope returns INCOMPLETE without publishing a defect verdict', async () => {
-  const f = await fixture({ newLine: 'x'.repeat(600000) });
-  try {
-    await assert.rejects(f.run({ mode: 'incomplete-input', full: true }));
-    assert.equal(verdicts(f).length, 0);
-  } finally { await f.close(); }
+test('unprocessed large scope returns INCOMPLETE for both families without publishing a defect verdict', async t => {
+  for (const preset of ['codex', 'claude']) await t.test(preset, async () => {
+    const f = await fixture({ newLine: 'x'.repeat(600000) });
+    try {
+      await assert.rejects(f.run({ preset, mode: 'incomplete-input', full: true }));
+      assert.equal(verdicts(f).length, 0);
+    } finally { await f.close(); }
+  });
 });
 
-test('small Codex prompts are unchanged and require no evidence query', async () => {
+test('small OMP prompts are unchanged and require no evidence query', async () => {
   const options = { level: 'xhigh', mode: 'full', base: 'a', head: 'b', scope: 'a', diff: 'small', currentDiff: '[]' };
-  assert.equal(await reviewInput({ preset: { cli: 'codex' }, options, git: () => { throw new Error('Unexpected git query'); } }), prompt(options));
+  assert.equal(await reviewInput({ options, git: () => { throw new Error('Unexpected git query'); } }), prompt(options));
 });
 
 test('range inventory preserves escaped rename paths, binary files, UTF-8 and late-file evidence', async () => {
@@ -97,7 +101,7 @@ test('range inventory preserves escaped rename paths, binary files, UTF-8 and la
   const last = 'diff --git a/last b/last\nBinary files differ\n';
   const options = { level: 'xhigh', mode: 'incremental', base: 'a', head: 'b', scope: 'c', diff: first + last, currentDiff: JSON.stringify([{ filename, previous_filename: previous, patch: '@@ -1 +1 @@\n-old\n+new' }, { filename: 'last', patch: null }]), customInstructions: 'Inspect complete scope with custom methodology.' };
   try {
-    const input = await reviewInput({ preset: { cli: 'codex' }, options, temp, cwd, git: async args => {
+    const input = await reviewInput({ options, temp, cwd, git: async args => {
       assert.ok(args.includes('-z'));
       assert.deepEqual(args.slice(-3), ['c', 'b', '--']);
       return `1\t1\t\0${previous}\0${filename}\0-\t-\tlast\0`;
@@ -138,7 +142,7 @@ test('incremental consumers retrieve joined scope and API ranges while retaining
   ];
   try {
     const input = await reviewInput({
-      preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+      temp, cwd: join(temp, 'repository'),
       options: { level: 'xhigh', mode: 'incremental', base: 'a', scope: 'c', head: 'b', diff: first + last, currentDiff: JSON.stringify(api) },
       git: async () => '1\t1\tscope-only\0' + '1\t1\t\0old-name\0current-name\0',
     });
@@ -210,7 +214,7 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
       : `1\t1\t${file.filename}\0`).join('');
     try {
       const input = await reviewInput({
-        preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+        temp, cwd: join(temp, 'repository'),
         options: { level: 'xhigh', mode: 'incremental', base: 'base', scope: 'previous', head: 'head', diff, currentDiff: JSON.stringify(variant.api) },
         git: async () => numstat,
       });
@@ -552,7 +556,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           assert.equal(posts.filter(post => post.path.endsWith('/reviews')).length, 0);
         } else {
           const queries = [];
-          const input = await reviewInput({ preset: { cli: 'codex' }, temp, cwd, git: args => {
+          const input = await reviewInput({ temp, cwd, git: args => {
             queries.push(args);
             return git(args);
           }, options: { level: 'xhigh', mode: 'full', base, head, scope: base, diff, currentDiff: '[]' } });
@@ -598,7 +602,7 @@ test('real Git colliding rename headers remain separate alongside type changes',
       assert.equal(diff.split('\n').filter(line => line === 'diff --git a/x b/y b/z').length, 2, 'distinct renames produce identical headers');
       let queries = 0;
       const input = await reviewInput({
-        preset: { cli: 'codex' }, temp, cwd,
+        temp, cwd,
         options: { level: 'xhigh', mode: 'full', base, scope: base, head, diff, currentDiff: '[]' },
         git: args => { queries++; return git(args); },
       });
@@ -636,7 +640,7 @@ test('an evidence parent inside the checkout is rejected before creating any fil
   try {
     for (const parent of [cwd, join(cwd, 'nested')]) {
       await assert.rejects(reviewInput({
-        preset: { cli: 'codex' }, options, temp: parent, cwd,
+        options, temp: parent, cwd,
         git: () => { throw new Error('Rejected parent must not query Git'); },
       }), /outside the checkout/);
       assert.deepEqual((await readdir(cwd)).sort(), ['nested', 'sentinel']);
@@ -651,7 +655,7 @@ test('empty incremental scope remains navigable when only current PR evidence is
   const api = [{ filename: 'earlier-change', patch: 'x'.repeat(MAX_INLINE_INPUT) }];
   try {
     const input = await reviewInput({
-      preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+      temp, cwd: join(temp, 'repository'),
       options: { level: 'xhigh', mode: 'incremental', base: 'base', head: 'head', scope: 'head', diff: '', currentDiff: JSON.stringify(api) },
       git: async () => '',
     });
@@ -666,7 +670,7 @@ test('empty incremental scope remains navigable when only current PR evidence is
     const range = inventory[0].api;
     assert.deepEqual(JSON.parse(patches.subarray(range.start, range.start + range.bytes)), api[0]);
     await assert.rejects(reviewInput({
-      preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+      temp, cwd: join(temp, 'repository'),
       options: { level: 'xhigh', mode: 'incremental', base: 'base', head: 'head', scope: 'head', diff: 'unindexed data', currentDiff: JSON.stringify(api) },
       git: async () => '',
     }), /index complete/);
@@ -677,57 +681,35 @@ test('unbounded inventory records and inconsistent scope indices fail closed', a
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-inventory-test-'));
   const options = { level: 'xhigh', mode: 'full', base: 'a', head: 'b', scope: 'a', diff: 'diff --git a/a b/a\n' + 'x'.repeat(600000), currentDiff: '[]' };
   try {
-    await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => `1\t0\t${'name'.repeat(2000)}\0` }), /inventory record/);
-    await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => '' }), /index complete/);
-    await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: temp, git: async () => '' }), /outside the checkout/);
+    await assert.rejects(reviewInput({ options, temp, cwd: join(temp, 'repository'), git: async () => `1\t0\t${'name'.repeat(2000)}\0` }), /inventory record/);
+    await assert.rejects(reviewInput({ options, temp, cwd: join(temp, 'repository'), git: async () => '' }), /index complete/);
+    await assert.rejects(reviewInput({ options, temp, cwd: temp, git: async () => '' }), /outside the checkout/);
     for (const diff of [
       'unindexed prefix\n' + options.diff,
       options.diff + '\ndiff --git a/another b/another\nnew block\n',
       options.diff + '\ndiff --git a/a b/a \nnear-identical header\n',
       options.diff + '\ndiff --git a/other b/other\nmiddle block\ndiff --git a/a b/a\nnonconsecutive repeat\n',
     ]) {
-      await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options: { ...options, diff }, temp, cwd: join(temp, 'repository'), git: async () => '1\t0\ta\0' }), /index complete/);
+      await assert.rejects(reviewInput({ options: { ...options, diff }, temp, cwd: join(temp, 'repository'), git: async () => '1\t0\ta\0' }), /index complete/);
     }
   } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
-test('Codex reconnect errors followed by turn.completed publish the completed review', async () => {
-  const f = await fixture();
-  try {
-    const output = await f.run({ mode: 'reconnect-recovered' });
-    assert.match(output, /Reconnecting/);
-    assert.equal(verdicts(f).length, 1);
-    assert.equal(verdicts(f)[0].body.event, 'APPROVE');
-  } finally { await f.close(); }
-});
-
-test('Codex failed or missing terminal completion cannot publish a valid-looking result file', async t => {
-  for (const mode of ['failed-turn', 'reconnect-failed', 'fatal-error', 'fatal-exit', 'missing-completion', 'input-too-large']) await t.test(mode, async () => {
+test('OMP invalid, missing, failed, aborted or truncated completion cannot publish valid-looking results', async t => {
+  for (const preset of ['codex', 'claude']) for (const mode of [
+    'malformed', 'missing-result', 'duplicate-result', 'missing-tool-end', 'mismatched-tool-end',
+    'error-result', 'fatal-error', 'fatal-exit', 'missing-completion', 'aborted', 'length', 'truncated',
+  ]) await t.test(`${preset}: ${mode}`, async () => {
     const f = await fixture();
     try {
-      await assert.rejects(f.run({ mode }), error => {
-        if (mode === 'fatal-exit') {
-          assert.match(error.stdout, /Fixture fatal transport error/);
-          assert.match(error.message, /Fixture verbose CLI stderr detail/);
-        }
-        return true;
-      });
+      await assert.rejects(f.run({ mode, preset }));
       assert.equal(verdicts(f).length, 0);
-      const failure = f.state.posts.at(-1).body.body;
-      assert.match(failure, /failed/);
-      if (mode === 'reconnect-failed') {
-        assert.match(failure, /Reconnecting/);
-        assert.match(failure, /Fixture provider failed/);
-      }
-      if (mode === 'fatal-error' || mode === 'fatal-exit') assert.match(failure, /Fixture fatal transport error/);
-      if (mode === 'input-too-large') {
-        assert.match(failure, /1048576/);
-      }
+      assert.match(f.state.posts.at(-1).body.body, /failed/);
     } finally { await f.close(); }
   });
 });
 
-test('nonzero Codex CLI posts only redacted protocol diagnostics, never tool/model output or stderr', async () => {
+test('nonzero OMP CLI posts only redacted protocol diagnostics, never tool/model output or stderr', async () => {
   const f = await fixture();
   try {
     await assert.rejects(f.run({ mode: 'fatal-exit', providerEnv: { OPENAI_API_KEY: 'fixture-provider-token-not-real' } }), error => {
@@ -738,25 +720,24 @@ test('nonzero Codex CLI posts only redacted protocol diagnostics, never tool/mod
     });
     assert.equal(verdicts(f).length, 0);
     const body = f.state.posts.at(-1).body.body;
-    assert.match(body, /Codex review failed \(exit 1\)/);
-    assert.match(body, /Fixture fatal transport error/);
+    assert.match(body, /OMP review failed \(exit 1\)/);
     assert.match(body, /Fixture safe terminal diagnostic token=\[REDACTED\]/);
     assert.doesNotMatch(body, /HOST-TOOL-SECRET|PRIVATE-MODEL-TEXT|ERROR-EXTRA-SECRET|STDERR-HOST-SECRET|fixture-provider-token-not-real|verbose CLI stderr/);
   } finally { await f.close(); }
 });
 
-test('nonzero Codex CLI without protocol diagnostics uses a safe fixed fallback', async () => {
+test('nonzero OMP CLI without protocol diagnostics uses a safe fixed fallback', async () => {
   const f = await fixture();
   try {
     await assert.rejects(f.run({ mode: 'raw-exit' }));
     assert.equal(verdicts(f).length, 0);
     const body = f.state.posts.at(-1).body.body;
-    assert.match(body, /Codex review failed \(exit 7\)\. See process logs for details/);
+    assert.match(body, /OMP review failed \(exit 7\)\. See process logs for details/);
     assert.doesNotMatch(body, /RAW-STDOUT-SECRET|STDERR-HOST-SECRET/);
   } finally { await f.close(); }
 });
 
-test('non-JSON Codex stdout fails closed even with completion and a valid result', async () => {
+test('non-JSON OMP stdout fails closed even with completion and a valid result', async () => {
   const f = await fixture();
   try {
     await assert.rejects(f.run({ mode: 'non-json-completed' }));
@@ -776,7 +757,7 @@ test('a 3000-file inventory stays navigable without inflating the initial prompt
     currentDiff: JSON.stringify(names.map(filename => ({ filename, patch: null }))),
   };
   try {
-    const input = await reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => names.map(name => `0\t0\t${name}\0`).join('') });
+    const input = await reviewInput({ options, temp, cwd: join(temp, 'repository'), git: async () => names.map(name => `0\t0\t${name}\0`).join('') });
     const manifest = manifestOf(input);
     assert.ok(input.length < 16000);
     assert.equal(manifest.scopeFiles, 3000);

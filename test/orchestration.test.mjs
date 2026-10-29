@@ -36,7 +36,7 @@ test('native publication records the workflow attempt without moving its final i
   } finally { await f.close(); }
 });
 
-test('Codex failures, malformed JSON, stale heads and Claude error results never approve', async t => {
+test('OMP failures, malformed results, stale heads and tool errors never approve', async t => {
   for (const scenario of ['failure', 'malformed', 'stale', 'error-result']) await t.test(scenario, async () => {
     const f = await fixture();
     try {
@@ -132,7 +132,7 @@ test('repository prompt replaces the default methodology with PR-head UTF-8 or e
       assert.ok(section.includes(`--- BEGIN REPOSITORY REVIEW INSTRUCTIONS ---\n${instructions}\n--- END REPOSITORY REVIEW INSTRUCTIONS ---`));
       for (const defaultText of ['e-code-review', 'independent angles', 'Target at least', 'Cap final findings', 'Conventions:', 'Do not run a verifier', 'do NOT spawn subagents', 'ReportFindings']) assert.ok(!captured.includes(defaultText), defaultText);
       assert.match(captured, /Review only; never edit repository files or publish to GitHub/);
-      assert.match(captured, /exactly one final JSON object matching the supplied schema/);
+      assert.match(captured, /final_review/);
       assert.match(captured, /The output must contain no more than 15 findings/);
       assert.match(captured, /All native comment locations must use the authoritative CURRENT PR API patches/);
       assert.ok(captured.includes(`PR head ${f.head}`));
@@ -319,29 +319,6 @@ test('legacy approvals cannot reuse an unchanged preexisting repository prompt',
   });
 });
 
-test('Claude OAuth fallback clears inherited API and cloud-provider environment', async () => {
-  const f = await fixture();
-  try {
-    await f.run({ preset: 'claude', providerEnv: {
-      ANTHROPIC_API_KEY: 'host-key-must-not-be-used', ANTHROPIC_AUTH_TOKEN: 'host-token-must-not-be-used',
-      ANTHROPIC_BASE_URL: 'https://must-not-contact.invalid', CLAUDE_CODE_OAUTH_TOKEN: 'must-use-stored-login',
-      CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDE_CODE_USE_FOUNDRY: '1',
-    } });
-    assert.equal(verdicts(f).length, 1);
-    assert.equal(verdicts(f)[0].body.event, 'APPROVE');
-  } finally { await f.close(); }
-});
-
-test('present invalid Claude key configuration fails closed before CLI launch or publication', async () => {
-  const f = await fixture();
-  try {
-    await writeFile(f.env.CODJIFLO_ANTHROPIC_KEYS_FILE, '{', { mode: 0o600 });
-    await assert.rejects(f.run({ preset: 'claude' }));
-    assert.equal(verdicts(f).length, 0);
-    await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
-    assert.match(f.state.posts.at(-1).body.body, /failed/);
-  } finally { await f.close(); }
-});
 
 test('local aliases and mixed-case canonical names retain canonical publication and baseline scope', async t => {
   for (const [input, preset] of [['CoDeX', 'sol-xhigh'], ['CLAUDE', 'opus-xhigh'], ['SOL-XHIGH', 'sol-xhigh'], ['OpUs-XhIgH', 'opus-xhigh']]) await t.test(input, async () => {

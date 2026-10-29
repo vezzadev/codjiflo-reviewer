@@ -47,7 +47,6 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const repo = join(temp, 'repo');
   await mkdir(repo);
   const env = await isolatedGitEnv(temp);
-  Object.assign(env, { CLAUDE_CONFIG_DIR: join(env.HOME, '.claude'), CODJIFLO_ANTHROPIC_KEYS_FILE: join(temp, 'missing-keys.json'), CODJIFLO_CLAUDE_STATE_FILE: join(temp, 'claude-state.json') });
   const git = args => runProcess('git', args, { cwd: repo, env });
   await git(['init', '-b', 'main']);
   const tail = 'context\n'.repeat(8);
@@ -103,11 +102,6 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   const capture = join(temp, 'prompt.txt');
   await writeFile(fake, `#!/usr/bin/env node
 import { writeFile, cp } from 'node:fs/promises';
-if (process.argv[2] === 'auth') {
- if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth status inherited provider credentials');
- console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'}));
- process.exit(0);
-}
 process.stdin.setEncoding('utf8');
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 await writeFile(process.env.FIXTURE_CAPTURE + '.stdin', input);
@@ -120,24 +114,20 @@ if (process.env.FIXTURE_INSPECT_GIT === '1') {
   env: Object.fromEntries(Object.entries(process.env).filter(([name]) => /^(?:GIT_|GITHUB_TOKEN$|GH_TOKEN$|OPENAI_API_KEY$)/i.test(name))),
  }));
 }
-if (process.argv.includes('exec')) {
- const manifestLine = input.split('\\n').find(line => line.startsWith('Navigable review evidence manifest: '));
- if (manifestLine) {
-  const manifest = JSON.parse(manifestLine.slice('Navigable review evidence manifest: '.length));
-  // Capture evidence, not a reconstructed mega-prompt. Reader behavior is
-  // exercised explicitly by tests, never silently emulated by this CLI.
-  await cp(manifest.directory, process.env.FIXTURE_CAPTURE + '.evidence', { recursive: true, force: true });
- }
+const manifestLine = input.split('\\n').find(line => line.startsWith('Navigable review evidence manifest: '));
+if (manifestLine) {
+ const manifest = JSON.parse(manifestLine.slice('Navigable review evidence manifest: '.length));
+ // Capture full evidence without pretending the fake CLI analyzed it.
+ await cp(manifest.directory, process.env.FIXTURE_CAPTURE + '.evidence', { recursive: true, force: true });
 }
 await writeFile(process.env.FIXTURE_CAPTURE, input);
-if (process.argv.includes('exec')) console.log(JSON.stringify({type:'thread.started',thread_id:'fixture CLI streaming live'}));
-else process.stdout.write('fixture CLI streaming live\\n');
+console.log(JSON.stringify({type:'agent_start'}));
 process.stderr.write('fixture stderr streaming live\\n');
 if (process.env.FIXTURE_MODE === 'failure') process.exit(9);
 if (process.env.FIXTURE_MODE === 'publication-secret-failure') {
  // Fake publication credentials are intentionally embedded, not inherited by
  // this reviewer. Model/tool access can supply diagnostics from outside env.
- console.log(JSON.stringify({type:'turn.failed',error:{message:'Fixture publication diagnostic github=fixture-token-not-real gh=fixture-gh-token-not-real mixed=fixture-mixed-token-not-real provider=' + process.env.OPENAI_API_KEY}}));
+ console.log(JSON.stringify({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'Fixture publication diagnostic github=fixture-token-not-real gh=fixture-gh-token-not-real mixed=fixture-mixed-token-not-real provider=' + process.env.OPENAI_API_KEY}]}));
  process.exit(1);
 }
 const findings = process.env.FIXTURE_MODE === 'findings' ? [
@@ -147,41 +137,32 @@ const findings = process.env.FIXTURE_MODE === 'findings' ? [
 const result = process.env.FIXTURE_MODE === 'incomplete-input'
  ? {verdict:'INCOMPLETE',summary:'A required review scope range could not be processed.',findings:[]}
  : {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings};
-if (process.argv.includes('exec')) {
- const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
- await writeFile(output, process.env.FIXTURE_MODE === 'malformed' ? '{' : JSON.stringify(result));
- if (process.env.FIXTURE_MODE === 'input-too-large') {
-  console.log(JSON.stringify({type:'error',message:'Input exceeds the maximum length of 1048576 characters. input_too_large'}));
-  process.exit(1);
- }
- if (['reconnect-recovered', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Reconnecting... 1/5 (stream disconnected before completion)'}));
- if (['fatal-error', 'fatal-exit'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'error',message:'Fixture fatal transport error despite result file'}));
- if (process.env.FIXTURE_MODE === 'fatal-exit') {
-  console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',aggregated_output:'HOST-TOOL-SECRET-do-not-publish'}}));
-  console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'PRIVATE-MODEL-TEXT-do-not-publish'}}));
-  console.log(JSON.stringify({type:'error',message:'Fixture safe terminal diagnostic token=' + process.env.OPENAI_API_KEY,aggregated_output:'ERROR-EXTRA-SECRET-do-not-publish'}));
-  process.stderr.write('x'.repeat(2200) + '\\nFixture verbose CLI stderr detail STDERR-HOST-SECRET-do-not-publish\\n');
-  process.exit(1);
- }
- if (process.env.FIXTURE_MODE === 'raw-exit') {
-  console.log('RAW-STDOUT-SECRET-do-not-publish');
-  process.stderr.write('STDERR-HOST-SECRET-do-not-publish'.repeat(100));
-  process.exit(7);
- }
- if (process.env.FIXTURE_MODE === 'non-json-completed') console.log('BANNER-SECRET-do-not-publish');
- if (['failed-turn', 'reconnect-failed'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.failed',error:{message:'Fixture provider failed despite result file'}}));
- else if (!['missing-completion', 'fatal-error'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
-} else {
- // stdout is valid JSONL in Claude mode (no unstructured status lines).
- if (Object.keys(process.env).some(name => /^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_))/.test(name))) throw new Error('OAuth fixture inherited provider credentials');
- console.log(JSON.stringify({type:'result',subtype:'success',is_error:process.env.FIXTURE_MODE === 'error-result',structured_output:result}));
+const emit = event => console.log(JSON.stringify(event));
+const mode = process.env.FIXTURE_MODE;
+if (mode === 'raw-exit') {
+ console.log('RAW-STDOUT-SECRET-do-not-publish');
+ process.stderr.write('STDERR-HOST-SECRET-do-not-publish'.repeat(100));
+ process.exit(7);
 }
+if (mode === 'non-json-completed') console.log('BANNER-SECRET-do-not-publish');
+if (mode === 'truncated') {
+ process.stdout.write('{"type":"tool_execution_start"');
+ process.exit(0);
+}
+if (mode !== 'missing-result') {
+ emit({type:'tool_execution_start',toolName:'final_review',toolCallId:'review-1',args:mode === 'malformed' ? {verdict:'APPROVE'} : result});
+ if (mode === 'duplicate-result') emit({type:'tool_execution_start',toolName:'final_review',toolCallId:'review-2',args:result});
+ if (mode !== 'missing-tool-end') emit({type:'tool_execution_end',toolName:'final_review',toolCallId:mode === 'mismatched-tool-end' ? 'wrong-id' : 'review-1',isError:mode === 'error-result',result:{content:[{type:'text',text:'Review captured.'}],details:{accepted:true}}});
+}
+if (mode === 'fatal-exit') {
+ emit({type:'tool_execution_end',toolName:'bash',toolCallId:'private-tool',result:{content:[{type:'text',text:'HOST-TOOL-SECRET-do-not-publish'}]}});
+ emit({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'PRIVATE-MODEL-TEXT-do-not-publish'}]}});
+ process.stderr.write('x'.repeat(2200) + '\\nFixture verbose CLI stderr detail STDERR-HOST-SECRET-do-not-publish\\n');
+}
+if (mode !== 'missing-completion') emit({type:'agent_end',messages:[{role:'assistant',content:[{type:'text',text:'Review submitted.'}],stopReason:['fatal-error','fatal-exit'].includes(mode) ? 'error' : mode === 'aborted' ? 'aborted' : mode === 'length' ? 'length' : 'stop',...(['fatal-error','fatal-exit'].includes(mode) ? {errorMessage:'Fixture safe terminal diagnostic token=' + process.env.OPENAI_API_KEY} : {})}]});
+if (mode === 'fatal-exit') process.exit(1);
 `);
-  // Claude's real stream is JSONL, so keep fake status in stderr only in this mode.
-  const fakeClaude = join(temp, 'fake-claude.mjs');
-  const source = await readFile(fake, 'utf8');
-  await writeFile(fakeClaude, source.replace("process.stdout.write('fixture CLI streaming live\\n');", "console.log(JSON.stringify({type:'assistant',message:'fixture live'}));"));
-  await chmod(fake, 0o755); await chmod(fakeClaude, 0o755);
+  await chmod(fake, 0o755);
   const state = { requests: [], posts: [], reviews: [], files, changedFiles: files.length, stale: false, reads: 0 };
   const server = createServer(async (request, response) => {
     request.setEncoding('utf8');
@@ -217,7 +198,7 @@ if (process.argv.includes('exec')) {
     async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
         timeoutMs,
-        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_CODEX_BIN: fake, CODJIFLO_CLAUDE_BIN: fakeClaude, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
+        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: fake, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
       });
     },
     async close() { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },
