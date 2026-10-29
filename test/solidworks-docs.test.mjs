@@ -52,7 +52,7 @@ async function fixture(t) {
   };
   const run = (onOutput, onError) => {
     const result = execFileAsync(process.execPath, [script, '--home', home], {
-      env: { ...process.env, HOME: home, CODEX_HOME: codexHome, CODJIFLO_CODEX_BIN: cli }, timeout: 10000,
+      env: { ...process.env, HOME: home, CODEX_HOME: codexHome, CODJIFLO_DOCS_CODEX_BIN: cli }, timeout: 10000,
     });
     if (onOutput) result.child.stdout.on('data', chunk => onOutput(chunk.toString()));
     if (onError) result.child.stderr.on('data', chunk => onError(chunk.toString()));

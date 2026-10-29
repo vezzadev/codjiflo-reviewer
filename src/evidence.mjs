@@ -43,13 +43,13 @@ function scopeFiles(numstat) {
   return files;
 }
 
-export async function reviewInput({ preset, options, temp, cwd, git }) {
+export async function reviewInput({ options, temp, cwd, git }) {
   const inline = prompt(options);
-  if (preset.cli !== 'codex' || inline.length <= MAX_INLINE_INPUT) return inline;
+  if (inline.length <= MAX_INLINE_INPUT) return inline;
   // Methodology is never hidden behind evidence reads. Refuse an oversized
   // custom recipe before invoking the provider, rather than truncate it.
   if (prompt({ ...options, diff: '', currentDiff: '' }).length > MAX_INLINE_INPUT - 16000) {
-    throw new Error('Review instructions exceed the inline Codex input budget; no review completed and no instructions were truncated');
+    throw new Error('Review instructions exceed the inline OMP input budget; no review completed and no instructions were truncated');
   }
   const parent = resolve(temp), checkout = resolve(cwd);
   const fromCheckout = relative(checkout, parent);

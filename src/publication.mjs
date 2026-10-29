@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { isApproved, PRESETS } from './commands.mjs';
+import { secretRedactor } from './redaction.mjs';
 
 export function workflowRunUrl(request, env) {
   return env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${request.repo}/actions/runs/${env.GITHUB_RUN_ID}` : null;
@@ -92,5 +93,11 @@ export async function publishReview({ envelope, github, env = process.env, delay
 
 export async function reportPublicationFailure({ request, github, env = process.env, error }) {
   const runUrl = workflowRunUrl(request, env);
-  await github.request(`/repos/${request.repo}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer failed; **no successful publication was confirmed**. ${runUrl ? `[Workflow logs](${runUrl})` : 'See process logs.'}\n\n${error.message.slice(0, 1500)}` } }).catch(() => {});
+  // Publication credentials stay outside the reviewer environment, so redact at
+  // the public sink using the orchestrator's credentials as well as provider ones.
+  const { redact } = secretRedactor([github.token, ...Object.entries(env)
+    .filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY|AUTHORIZATION/i.test(name))
+    .map(([, value]) => value)]);
+  const diagnostic = redact(error.message).slice(0, 1500);
+  await github.request(`/repos/${request.repo}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer failed; **no successful publication was confirmed**. ${runUrl ? `[Workflow logs](${runUrl})` : 'See process logs.'}\n\n${diagnostic}` } }).catch(() => {});
 }

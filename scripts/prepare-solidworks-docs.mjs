@@ -56,7 +56,7 @@ async function bundleVersion(skill) {
 async function resolveTarget(home) {
   const codexHome = path.resolve(process.env.CODEX_HOME || path.join(home, '.codex'));
   const registry = await readJson(async () => {
-    const { stdout } = await execFileAsync(process.env.CODJIFLO_CODEX_BIN || 'codex', ['plugin', 'list', '--json'], {
+    const { stdout } = await execFileAsync(process.env.CODJIFLO_DOCS_CODEX_BIN || 'codex', ['plugin', 'list', '--json'], {
       env: { ...process.env, CODEX_HOME: codexHome },
       timeout: 30000,
       maxBuffer: 4 * 1024 * 1024,

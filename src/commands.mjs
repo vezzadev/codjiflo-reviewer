@@ -1,8 +1,8 @@
 export const PRESETS = {
-  'sol-xhigh': { cli: 'codex', model: 'gpt-6.1-sol', effort: 'high', level: 'xhigh' },
-  'opus-xhigh': { cli: 'claude', model: 'opus', effort: 'high', level: 'xhigh' },
-  'sol-medium': { cli: 'codex', model: 'gpt-6.1-sol', effort: 'medium', level: 'high' },
-  'opus-medium': { cli: 'claude', model: 'opus', effort: 'medium', level: 'high' },
+  'sol-xhigh': { provider: 'openai-codex', model: 'openai-codex/gpt-6.1-sol', effort: 'high', level: 'xhigh' },
+  'opus-xhigh': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'high', level: 'xhigh' },
+  'sol-medium': { provider: 'openai-codex', model: 'openai-codex/gpt-6.1-sol', effort: 'medium', level: 'high' },
+  'opus-medium': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'medium', level: 'high' },
 };
 
 export function normalizePreset(value) {

@@ -14,10 +14,10 @@ on:
         default: self-hosted
       sol-model:
         type: string
-        default: gpt-6.1-sol
+        default: openai-codex/gpt-6.1-sol
       opus-model:
         type: string
-        default: opus
+        default: anthropic/claude-opus-5-5
       prepare-command:
         description: Trusted host-side prerequisite command, run before credentials and review
         type: string
@@ -29,6 +29,7 @@ on:
       app-private-key:
         required: false
 permissions:
+  actions: read
   contents: read
   issues: write
   pull-requests: write
@@ -70,11 +71,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install Claude Agent SDK
-        id: sdk
-        if: needs.gate.outputs.provider == 'claude'
-        timeout-minutes: 5
-        run: npm ci --omit=dev
       - name: Prepare review prerequisites
         id: prepare
         if: inputs.prepare-command != ''
@@ -92,7 +88,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
       - name: Report preparation failure
         id: setup_failure
-        if: failure() && (steps.sdk.outcome == 'failure' || steps.prepare.outcome == 'failure' || steps.app.outcome == 'failure')
+        if: failure() && (steps.prepare.outcome == 'failure' || steps.app.outcome == 'failure')
         uses: actions/github-script@v7
         with:
           github-token: ${{ github.token }}
@@ -101,7 +97,7 @@ jobs:
             await github.rest.issues.createComment({
               ...context.repo,
               issue_number: context.issue.number,
-              body: `Codjiflo Reviewer preparation failed; **no review verdict was submitted**. SDK installation, review prerequisite preparation, or GitHub App token setup failed. [Workflow logs](${runUrl})`,
+              body: `Codjiflo Reviewer preparation failed; **no review verdict was submitted**. Review prerequisite preparation or GitHub App token setup failed. [Workflow logs](${runUrl})`,
             });
       - name: Review pull request
         id: review
@@ -125,3 +121,53 @@ jobs:
         if: always() && steps.artifact.outcome == 'failure'
         shell: bash
         run: echo "::warning::Review result artifact upload failed; this does not change the review publication outcome. Check the retention step logs. actions/upload-artifact@v4 is not supported on GitHub Enterprise Server."
+  report_failure:
+    needs: [gate, review]
+    # This must not depend on the self-hosted runner or its post-job steps.
+    if: always() && needs.gate.outputs.allowed == 'true' && (needs.review.result == 'failure' || needs.review.result == 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Report unsuccessful review job
+        uses: actions/github-script@v7
+        env:
+          REVIEW_JOB_RESULT: ${{ needs.review.result }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            // github-script@v7's toolkit context does not expose runAttempt.
+            const runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT);
+            if (!Number.isSafeInteger(runAttempt) || runAttempt < 1) {
+              throw new Error('GITHUB_RUN_ATTEMPT must be a positive safe integer');
+            }
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const marker = `<!-- codjiflo-job-failure:${context.runId}:${runAttempt} -->`;
+            const workflowMarker = `<!-- codjiflo-workflow:${context.runId}:${runAttempt} -->`;
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              ...context.repo, pull_number: context.issue.number, per_page: 100,
+            });
+            if (reviews.some(review => review.user?.type === 'Bot' &&
+              ['APPROVED', 'CHANGES_REQUESTED'].includes(review.state) &&
+              review.body?.includes(workflowMarker))) return;
+            const attempt = await github.rest.actions.getWorkflowRunAttempt({
+              ...context.repo, run_id: context.runId, attempt_number: runAttempt,
+            });
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: context.issue.number,
+              since: attempt.data.run_started_at, per_page: 100,
+            });
+            // An ordinary CLI/setup failure already has a useful diagnostic. If
+            // the runner disappeared or its POST failed, this hosted job fills in.
+            const reported = comments.some(comment => comment.user?.type === 'Bot' && (
+              comment.body?.includes(marker) ||
+              (comment.body?.includes(`[Workflow logs](${runUrl})`) &&
+                /Codjiflo Reviewer (?:failed;|preparation failed;)/.test(comment.body))
+            ));
+            if (!reported) await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: `Codjiflo Reviewer job ended with status **${process.env.REVIEW_JOB_RESULT}**. The review runner did not confirm a failure report for this attempt. A runner interruption can prevent logs and post-job steps from being uploaded. Check existing PR reviews before retrying: this notification does not establish whether a verdict was submitted. [Workflow logs](${runUrl})\n\n${marker}`,
+            });

@@ -22,12 +22,21 @@ async function readRange(directory, name, start, size = MAX_EVIDENCE_READ_BYTES)
   return { ...JSON.parse(output.slice(0, newline)), text: output.slice(newline + 1) };
 }
 
-test('large full and incremental reviews keep methodology inline and expose complete navigable evidence', async () => {
+function assertNestedGitScenarios(tap) {
+  assert.match(tap, /^ok \d+ - real Git type changes and non-LF content preserve complete consumer-visible ranges$/m, tap);
+  assert.match(tap, /^ok \d+ - real Git colliding rename headers remain separate alongside type changes$/m, tap);
+  for (const scenario of ['separators', 'types', 'submodule', 'collision only', 'collision and type change']) {
+    assert.match(tap, new RegExp(`^    ok \\d+ - ${scenario}$`, 'm'), `Missing successful real-Git scenario: ${scenario}\n${tap}`);
+  }
+  assert.match(tap, /^# fail 0$/m, tap);
+}
+
+test('both OMP families keep full and incremental methodology inline with complete navigable evidence', async () => {
   const f = await fixture({ newLine: 'é🙂漢'.repeat(300000) });
   try {
-    for (const full of [true, false]) {
-      if (!full) f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
-      await f.run({ full });
+    for (const [preset, canonical] of [['codex', 'sol-xhigh'], ['claude', 'opus-xhigh']]) for (const full of [true, false]) {
+      f.state.reviews = full ? [] : [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: canonical })} -->` }];
+      await f.run({ full, preset });
       const input = await readFile(f.capture, 'utf8');
       assert.ok(input.length < 16000, 'initial prompt does not grow with duplicated patch evidence');
       const manifest = manifestOf(input);
@@ -55,27 +64,31 @@ test('large full and incremental reviews keep methodology inline and expose comp
   } finally { await f.close(); }
 });
 
-test('oversized custom methodology fails closed before provider invocation or publication', async () => {
-  const f = await fixture({ headPrompt: 'Inspect café 🙂 cancellation.\n'.repeat(45000) });
-  try {
-    await assert.rejects(f.run({ full: true }));
-    assert.equal(verdicts(f).length, 0);
-    await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
-    assert.match(f.state.posts.at(-1).body.body, /instructions exceed/);
-  } finally { await f.close(); }
+test('oversized custom methodology fails closed for both families before OMP invocation or publication', async t => {
+  for (const preset of ['codex', 'claude']) await t.test(preset, async () => {
+    const f = await fixture({ headPrompt: 'Inspect café 🙂 cancellation.\n'.repeat(45000) });
+    try {
+      await assert.rejects(f.run({ preset, full: true }));
+      assert.equal(verdicts(f).length, 0);
+      await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+      assert.match(f.state.posts.at(-1).body.body, /instructions exceed/);
+    } finally { await f.close(); }
+  });
 });
 
-test('unprocessed large scope returns INCOMPLETE without publishing a defect verdict', async () => {
-  const f = await fixture({ newLine: 'x'.repeat(600000) });
-  try {
-    await assert.rejects(f.run({ mode: 'incomplete-input', full: true }));
-    assert.equal(verdicts(f).length, 0);
-  } finally { await f.close(); }
+test('unprocessed large scope returns INCOMPLETE for both families without publishing a defect verdict', async t => {
+  for (const preset of ['codex', 'claude']) await t.test(preset, async () => {
+    const f = await fixture({ newLine: 'x'.repeat(600000) });
+    try {
+      await assert.rejects(f.run({ preset, mode: 'incomplete-input', full: true }));
+      assert.equal(verdicts(f).length, 0);
+    } finally { await f.close(); }
+  });
 });
 
-test('small Codex prompts are unchanged and require no evidence query', async () => {
+test('small OMP prompts are unchanged and require no evidence query', async () => {
   const options = { level: 'xhigh', mode: 'full', base: 'a', head: 'b', scope: 'a', diff: 'small', currentDiff: '[]' };
-  assert.equal(await reviewInput({ preset: { cli: 'codex' }, options, git: () => { throw new Error('Unexpected git query'); } }), prompt(options));
+  assert.equal(await reviewInput({ options, git: () => { throw new Error('Unexpected git query'); } }), prompt(options));
 });
 
 test('range inventory preserves escaped rename paths, binary files, UTF-8 and late-file evidence', async () => {
@@ -88,7 +101,7 @@ test('range inventory preserves escaped rename paths, binary files, UTF-8 and la
   const last = 'diff --git a/last b/last\nBinary files differ\n';
   const options = { level: 'xhigh', mode: 'incremental', base: 'a', head: 'b', scope: 'c', diff: first + last, currentDiff: JSON.stringify([{ filename, previous_filename: previous, patch: '@@ -1 +1 @@\n-old\n+new' }, { filename: 'last', patch: null }]), customInstructions: 'Inspect complete scope with custom methodology.' };
   try {
-    const input = await reviewInput({ preset: { cli: 'codex' }, options, temp, cwd, git: async args => {
+    const input = await reviewInput({ options, temp, cwd, git: async args => {
       assert.ok(args.includes('-z'));
       assert.deepEqual(args.slice(-3), ['c', 'b', '--']);
       return `1\t1\t\0${previous}\0${filename}\0-\t-\tlast\0`;
@@ -129,7 +142,7 @@ test('incremental consumers retrieve joined scope and API ranges while retaining
   ];
   try {
     const input = await reviewInput({
-      preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+      temp, cwd: join(temp, 'repository'),
       options: { level: 'xhigh', mode: 'incremental', base: 'a', scope: 'c', head: 'b', diff: first + last, currentDiff: JSON.stringify(api) },
       git: async () => '1\t1\tscope-only\0' + '1\t1\t\0old-name\0current-name\0',
     });
@@ -201,7 +214,7 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
       : `1\t1\t${file.filename}\0`).join('');
     try {
       const input = await reviewInput({
-        preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+        temp, cwd: join(temp, 'repository'),
         options: { level: 'xhigh', mode: 'incremental', base: 'base', scope: 'previous', head: 'head', diff, currentDiff: JSON.stringify(variant.api) },
         git: async () => numstat,
       });
@@ -230,7 +243,7 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
   });
 });
 
-test('Git environment sanitization removes only repository and command config selectors without mutating input', () => {
+test('Git environment sanitization removes repository, pathspec and command config selectors without mutating input', () => {
   const selectors = [
     'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
     'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_17',
@@ -238,6 +251,7 @@ test('Git environment sanitization removes only repository and command config se
     'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE',
     'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX', 'GIT_SHALLOW_FILE',
     'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES',
+    'GIT_ICASE_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_LITERAL_PATHSPECS',
   ];
   const preserved = {
     PATH: '/git/bin', HOME: '/runner', GIT_EXEC_PATH: '/git/libexec',
@@ -254,6 +268,48 @@ test('Git environment sanitization removes only repository and command config se
   const inherited = Object.freeze({ ...preserved, ...Object.fromEntries(spellings.map(name => [name, 'caller override'])) });
   assert.deepEqual(sanitizeGitEnv(inherited), preserved);
   for (const name of spellings) assert.equal(inherited[name], 'caller override');
+});
+
+test('hostile Git pathspec modes preserve current-head prompt authority and operator transport through review orchestration', async t => {
+  const modes = ['GIT_ICASE_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_LITERAL_PATHSPECS'];
+  for (const names of [...modes.map(name => [name]), modes]) await t.test(names.join(' + '), async () => {
+    const instructions = 'CURRENT-HEAD-INSTRUCTIONS: review résumé handling.\n';
+    const f = await fixture({ basePrompt: 'OLD-BASE-INSTRUCTIONS\n', headPrompt: instructions });
+    try {
+      await writeFile(join(f.repo, '.codjiflo', 'code-review', 'PROMPT.md'), 'UNCOMMITTED-SOURCE-INSTRUCTIONS\n');
+      await writeFile(f.env.GIT_CONFIG_GLOBAL, '[codjiflo]\npathspecfixture = operator-config-survives\n');
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
+      const transport = {
+        GIT_SSH_COMMAND: 'ssh -oBatchMode=yes',
+        GIT_SSL_CAINFO: f.env.GIT_CONFIG_GLOBAL,
+        GIT_SSL_CAPATH: f.env.HOME,
+        GIT_ASKPASS: process.execPath,
+        GIT_TERMINAL_PROMPT: '0',
+      };
+      // Inject only at the production entry point, after real Git fixture setup.
+      await f.run({ providerEnv: {
+        ...transport,
+        ...Object.fromEntries(names.map(name => [name, '1'])),
+        FIXTURE_INSPECT_GIT: '1',
+      } });
+      const published = verdicts(f);
+      assert.equal(published.length, 1);
+      assert.equal(published[0].body.event, 'APPROVE');
+      assert.equal(published[0].body.commit_id, f.head);
+      assert.match(published[0].body.body, /Scope: \*\*full\*\* \(repository review instructions changed since the previous approval\)/);
+      const captured = await readFile(f.capture, 'utf8');
+      const section = captured.slice(captured.indexOf('Repository review instructions'), captured.indexOf('Review-scope unified diff follows:'));
+      assert.ok(section.includes(`--- BEGIN REPOSITORY REVIEW INSTRUCTIONS ---\n${instructions}\n--- END REPOSITORY REVIEW INSTRUCTIONS ---`));
+      assert.doesNotMatch(section, /OLD-BASE-INSTRUCTIONS|UNCOMMITTED-SOURCE-INSTRUCTIONS|e-code-review/);
+      assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
+      const context = JSON.parse(await readFile(f.capture + '.git-context', 'utf8'));
+      assert.equal(context.head, f.head);
+      for (const name of modes) assert.equal(context.env[name], undefined, name);
+      for (const [name, value] of Object.entries(transport)) assert.equal(context.env[name], value, name);
+      assert.equal(context.env.GIT_CONFIG_GLOBAL, f.env.GIT_CONFIG_GLOBAL);
+      assert.match(context.config, /codjiflo\.pathspecfixture=operator-config-survives/);
+    } finally { await f.close(); }
+  });
 });
 
 test('Git fixtures and production reviews leave an inherited external repository and index untouched', async () => {
@@ -305,8 +361,9 @@ test('Git fixtures and production reviews leave an inherited external repository
       error.message += `\nNested test stdout:\n${error.stdout ?? ''}`;
       throw error;
     }
-    assert.match(tap, /^# tests [1-9]\d*$/m, tap);
-    assert.match(tap, /^# fail 0$/m, tap);
+    assertNestedGitScenarios(tap);
+    const unmatched = await runProcess(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^no matching Git regression scenario$', fileURLToPath(import.meta.url)], { env: childTestEnv, timeoutMs: 120000 });
+    assert.throws(() => assertNestedGitScenarios(unmatched), { code: 'ERR_ASSERTION' }, 'a successful file wrapper cannot stand in for executed scenarios');
     const output = await runProcess(process.execPath, ['--input-type=module', '-e', `
       import assert from 'node:assert/strict';
       import { readFile, writeFile } from 'node:fs/promises';
@@ -375,6 +432,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
       const cwd = join(temp, 'repository');
       await mkdir(cwd);
       const env = await isolatedGitEnv(temp);
+      if (gitlink) env.GIT_ALLOW_PROTOCOL = 'file';
       const git = args => runProcess('git', args, { cwd, env });
       const commit = () => git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'snapshot']);
       const toLink = 'a-to-link\t"é\n.txt', fromLink = 'b-from-link\t"漢\n.txt';
@@ -385,10 +443,29 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
         await git(['config', 'diff.submodule', 'log']);
         await git(['config', '--global', 'diff.submodule', 'log']);
         if (gitlink) await git(['config', '--global', 'color.ui', 'always']);
-        let seed;
+        let seed, submoduleHead;
         if (gitlink) {
-          await git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'submodule seed']);
-          seed = (await git(['rev-parse', 'HEAD'])).trim();
+          const remote = join(temp, 'submodule-remote');
+          await mkdir(remote);
+          const submoduleGit = args => runProcess('git', args, { cwd: remote, env });
+          await submoduleGit(['init', '-q']);
+          await writeFile(join(remote, 'content.txt'), 'submodule seed\n');
+          await submoduleGit(['add', '--all']);
+          await submoduleGit(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'submodule seed']);
+          seed = (await submoduleGit(['rev-parse', 'HEAD'])).trim();
+          await writeFile(join(remote, 'content.txt'), 'submodule head\n');
+          await submoduleGit(['add', '--all']);
+          await submoduleGit(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'submodule head']);
+          submoduleHead = (await submoduleGit(['rev-parse', 'HEAD'])).trim();
+          const url = pathToFileURL(remote).href;
+          for (const path of ['d-submodule', 'f-from-gitlink']) {
+            await git(['submodule', 'add', '-q', url, path]);
+            await git(['-C', path, 'checkout', '-q', seed]);
+          }
+          // Keep mappings unchanged across the regular-file/gitlink swaps so
+          // .gitmodules is not an extra changed evidence file.
+          await git(['config', '-f', '.gitmodules', 'submodule.e-to-gitlink.path', 'e-to-gitlink']);
+          await git(['config', '-f', '.gitmodules', 'submodule.e-to-gitlink.url', url]);
         }
         for (const filename of names) {
           if (filename === 'd-submodule' || filename === 'f-from-gitlink') continue;
@@ -396,10 +473,6 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           else await writeFile(join(cwd, filename === 'd-renamed.txt' ? 'd-original.txt' : filename), `old ${filename}\n`);
         }
         await git(['add', '--all']);
-        if (gitlink) {
-          await git(['update-index', '--add', '--cacheinfo', `160000,${seed},d-submodule`]);
-          await git(['update-index', '--add', '--cacheinfo', `160000,${seed},f-from-gitlink`]);
-        }
         await commit();
         const base = (await git(['rev-parse', 'HEAD'])).trim();
         if (typeChanges) {
@@ -416,6 +489,8 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
         }
         if (gitlink) {
           await rm(join(cwd, 'e-to-gitlink'));
+          await rm(join(cwd, 'f-from-gitlink'), { recursive: true, force: true });
+          await git(['-C', 'd-submodule', 'checkout', '-q', submoduleHead]);
           await writeFile(join(cwd, 'f-from-gitlink'), 'now a regular file\n');
         }
         const content = ['\r', '\u2028', '\u2029'].map(separator => `content${separator}diff --git a/fake b/fake\n`).join('');
@@ -424,8 +499,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
         await writeFile(join(cwd, 'zz-late.txt'), 'late evidence\n');
         await git(['add', '--all']);
         if (gitlink) {
-          await git(['update-index', '--add', '--cacheinfo', `160000,${base},d-submodule`]);
-          await git(['update-index', '--add', '--cacheinfo', `160000,${base},e-to-gitlink`]);
+          await git(['update-index', '--add', '--cacheinfo', `160000,${submoduleHead},e-to-gitlink`]);
         }
         await commit();
         const head = (await git(['rev-parse', 'HEAD'])).trim();
@@ -482,7 +556,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           assert.equal(posts.filter(post => post.path.endsWith('/reviews')).length, 0);
         } else {
           const queries = [];
-          const input = await reviewInput({ preset: { cli: 'codex' }, temp, cwd, git: args => {
+          const input = await reviewInput({ temp, cwd, git: args => {
             queries.push(args);
             return git(args);
           }, options: { level: 'xhigh', mode: 'full', base, head, scope: base, diff, currentDiff: '[]' } });
@@ -528,7 +602,7 @@ test('real Git colliding rename headers remain separate alongside type changes',
       assert.equal(diff.split('\n').filter(line => line === 'diff --git a/x b/y b/z').length, 2, 'distinct renames produce identical headers');
       let queries = 0;
       const input = await reviewInput({
-        preset: { cli: 'codex' }, temp, cwd,
+        temp, cwd,
         options: { level: 'xhigh', mode: 'full', base, scope: base, head, diff, currentDiff: '[]' },
         git: args => { queries++; return git(args); },
       });
@@ -566,7 +640,7 @@ test('an evidence parent inside the checkout is rejected before creating any fil
   try {
     for (const parent of [cwd, join(cwd, 'nested')]) {
       await assert.rejects(reviewInput({
-        preset: { cli: 'codex' }, options, temp: parent, cwd,
+        options, temp: parent, cwd,
         git: () => { throw new Error('Rejected parent must not query Git'); },
       }), /outside the checkout/);
       assert.deepEqual((await readdir(cwd)).sort(), ['nested', 'sentinel']);
@@ -581,7 +655,7 @@ test('empty incremental scope remains navigable when only current PR evidence is
   const api = [{ filename: 'earlier-change', patch: 'x'.repeat(MAX_INLINE_INPUT) }];
   try {
     const input = await reviewInput({
-      preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+      temp, cwd: join(temp, 'repository'),
       options: { level: 'xhigh', mode: 'incremental', base: 'base', head: 'head', scope: 'head', diff: '', currentDiff: JSON.stringify(api) },
       git: async () => '',
     });
@@ -596,7 +670,7 @@ test('empty incremental scope remains navigable when only current PR evidence is
     const range = inventory[0].api;
     assert.deepEqual(JSON.parse(patches.subarray(range.start, range.start + range.bytes)), api[0]);
     await assert.rejects(reviewInput({
-      preset: { cli: 'codex' }, temp, cwd: join(temp, 'repository'),
+      temp, cwd: join(temp, 'repository'),
       options: { level: 'xhigh', mode: 'incremental', base: 'base', head: 'head', scope: 'head', diff: 'unindexed data', currentDiff: JSON.stringify(api) },
       git: async () => '',
     }), /index complete/);
@@ -607,57 +681,35 @@ test('unbounded inventory records and inconsistent scope indices fail closed', a
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-inventory-test-'));
   const options = { level: 'xhigh', mode: 'full', base: 'a', head: 'b', scope: 'a', diff: 'diff --git a/a b/a\n' + 'x'.repeat(600000), currentDiff: '[]' };
   try {
-    await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => `1\t0\t${'name'.repeat(2000)}\0` }), /inventory record/);
-    await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => '' }), /index complete/);
-    await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: temp, git: async () => '' }), /outside the checkout/);
+    await assert.rejects(reviewInput({ options, temp, cwd: join(temp, 'repository'), git: async () => `1\t0\t${'name'.repeat(2000)}\0` }), /inventory record/);
+    await assert.rejects(reviewInput({ options, temp, cwd: join(temp, 'repository'), git: async () => '' }), /index complete/);
+    await assert.rejects(reviewInput({ options, temp, cwd: temp, git: async () => '' }), /outside the checkout/);
     for (const diff of [
       'unindexed prefix\n' + options.diff,
       options.diff + '\ndiff --git a/another b/another\nnew block\n',
       options.diff + '\ndiff --git a/a b/a \nnear-identical header\n',
       options.diff + '\ndiff --git a/other b/other\nmiddle block\ndiff --git a/a b/a\nnonconsecutive repeat\n',
     ]) {
-      await assert.rejects(reviewInput({ preset: { cli: 'codex' }, options: { ...options, diff }, temp, cwd: join(temp, 'repository'), git: async () => '1\t0\ta\0' }), /index complete/);
+      await assert.rejects(reviewInput({ options: { ...options, diff }, temp, cwd: join(temp, 'repository'), git: async () => '1\t0\ta\0' }), /index complete/);
     }
   } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
-test('Codex reconnect errors followed by turn.completed publish the completed review', async () => {
-  const f = await fixture();
-  try {
-    const output = await f.run({ mode: 'reconnect-recovered' });
-    assert.match(output, /Reconnecting/);
-    assert.equal(verdicts(f).length, 1);
-    assert.equal(verdicts(f)[0].body.event, 'APPROVE');
-  } finally { await f.close(); }
-});
-
-test('Codex failed or missing terminal completion cannot publish a valid-looking result file', async t => {
-  for (const mode of ['failed-turn', 'reconnect-failed', 'fatal-error', 'fatal-exit', 'missing-completion', 'input-too-large']) await t.test(mode, async () => {
+test('OMP invalid, missing, failed, aborted or truncated completion cannot publish valid-looking results', async t => {
+  for (const preset of ['codex', 'claude']) for (const mode of [
+    'malformed', 'missing-result', 'duplicate-result', 'missing-tool-end', 'mismatched-tool-end',
+    'error-result', 'fatal-error', 'fatal-exit', 'missing-completion', 'aborted', 'length', 'truncated',
+  ]) await t.test(`${preset}: ${mode}`, async () => {
     const f = await fixture();
     try {
-      await assert.rejects(f.run({ mode }), error => {
-        if (mode === 'fatal-exit') {
-          assert.match(error.stdout, /Fixture fatal transport error/);
-          assert.match(error.message, /Fixture verbose CLI stderr detail/);
-        }
-        return true;
-      });
+      await assert.rejects(f.run({ mode, preset }));
       assert.equal(verdicts(f).length, 0);
-      const failure = f.state.posts.at(-1).body.body;
-      assert.match(failure, /failed/);
-      if (mode === 'reconnect-failed') {
-        assert.match(failure, /Reconnecting/);
-        assert.match(failure, /Fixture provider failed/);
-      }
-      if (mode === 'fatal-error' || mode === 'fatal-exit') assert.match(failure, /Fixture fatal transport error/);
-      if (mode === 'input-too-large') {
-        assert.match(failure, /1048576/);
-      }
+      assert.match(f.state.posts.at(-1).body.body, /failed/);
     } finally { await f.close(); }
   });
 });
 
-test('nonzero Codex CLI posts only redacted protocol diagnostics, never tool/model output or stderr', async () => {
+test('nonzero OMP CLI posts only redacted protocol diagnostics, never tool/model output or stderr', async () => {
   const f = await fixture();
   try {
     await assert.rejects(f.run({ mode: 'fatal-exit', providerEnv: { OPENAI_API_KEY: 'fixture-provider-token-not-real' } }), error => {
@@ -668,25 +720,24 @@ test('nonzero Codex CLI posts only redacted protocol diagnostics, never tool/mod
     });
     assert.equal(verdicts(f).length, 0);
     const body = f.state.posts.at(-1).body.body;
-    assert.match(body, /Codex review failed \(exit 1\)/);
-    assert.match(body, /Fixture fatal transport error/);
+    assert.match(body, /OMP review failed \(exit 1\)/);
     assert.match(body, /Fixture safe terminal diagnostic token=\[REDACTED\]/);
     assert.doesNotMatch(body, /HOST-TOOL-SECRET|PRIVATE-MODEL-TEXT|ERROR-EXTRA-SECRET|STDERR-HOST-SECRET|fixture-provider-token-not-real|verbose CLI stderr/);
   } finally { await f.close(); }
 });
 
-test('nonzero Codex CLI without protocol diagnostics uses a safe fixed fallback', async () => {
+test('nonzero OMP CLI without protocol diagnostics uses a safe fixed fallback', async () => {
   const f = await fixture();
   try {
     await assert.rejects(f.run({ mode: 'raw-exit' }));
     assert.equal(verdicts(f).length, 0);
     const body = f.state.posts.at(-1).body.body;
-    assert.match(body, /Codex review failed \(exit 7\)\. See process logs for details/);
+    assert.match(body, /OMP review failed \(exit 7\)\. See process logs for details/);
     assert.doesNotMatch(body, /RAW-STDOUT-SECRET|STDERR-HOST-SECRET/);
   } finally { await f.close(); }
 });
 
-test('non-JSON Codex stdout fails closed even with completion and a valid result', async () => {
+test('non-JSON OMP stdout fails closed even with completion and a valid result', async () => {
   const f = await fixture();
   try {
     await assert.rejects(f.run({ mode: 'non-json-completed' }));
@@ -706,7 +757,7 @@ test('a 3000-file inventory stays navigable without inflating the initial prompt
     currentDiff: JSON.stringify(names.map(filename => ({ filename, patch: null }))),
   };
   try {
-    const input = await reviewInput({ preset: { cli: 'codex' }, options, temp, cwd: join(temp, 'repository'), git: async () => names.map(name => `0\t0\t${name}\0`).join('') });
+    const input = await reviewInput({ options, temp, cwd: join(temp, 'repository'), git: async () => names.map(name => `0\t0\t${name}\0`).join('') });
     const manifest = manifestOf(input);
     assert.ok(input.length < 16000);
     assert.equal(manifest.scopeFiles, 3000);

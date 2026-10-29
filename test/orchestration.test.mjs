@@ -10,11 +10,10 @@ import { fixture } from './fixture.mjs';
 
 const verdicts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
 
-test('real CLI orchestration streams and publishes pinned native ranged changes request', async () => {
+test('real CLI orchestration publishes pinned native ranged changes request', async () => {
   const f = await fixture();
   try {
-    const log = await f.run({ mode: 'findings' });
-    assert.match(log, /streaming live/);
+    await f.run({ mode: 'findings' });
     assert.equal(verdicts(f).length, 1);
     const result = verdicts(f)[0].body;
     assert.equal(result.event, 'REQUEST_CHANGES');
@@ -27,7 +26,16 @@ test('real CLI orchestration streams and publishes pinned native ranged changes 
   } finally { await f.close(); }
 });
 
-test('Codex failures, malformed JSON, stale heads and Claude error results never approve', async t => {
+test('native publication records the workflow attempt without moving its final identity marker', async () => {
+  const f = await fixture();
+  try {
+    await f.run({ providerEnv: { GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2' } });
+    assert.equal(verdicts(f).length, 1);
+    assert.match(verdicts(f)[0].body.body, /<!-- codjiflo-workflow:123:2 -->\n<!-- codjiflo-publication:[a-f0-9-]+ -->$/);
+  } finally { await f.close(); }
+});
+
+test('OMP failures, malformed results, stale heads and tool errors never approve', async t => {
   for (const scenario of ['failure', 'malformed', 'stale', 'error-result']) await t.test(scenario, async () => {
     const f = await fixture();
     try {
@@ -37,6 +45,33 @@ test('Codex failures, malformed JSON, stale heads and Claude error results never
       assert.match(f.state.posts.at(-1).body.body, /failed/);
     } finally { await f.close(); }
   });
+});
+
+test('real failure publication redacts known publication and provider secrets without passing publication tokens to reviewer', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(f.run({
+      mode: 'publication-secret-failure',
+      providerEnv: {
+        GH_TOKEN: 'fixture-gh-token-not-real',
+        gItHuB_tOkEn: 'fixture-mixed-token-not-real',
+        OPENAI_API_KEY: 'fixture-provider-key-not-real',
+        FIXTURE_INSPECT_GIT: '1',
+      },
+    }));
+    const context = JSON.parse(await readFile(f.capture + '.git-context', 'utf8'));
+    assert.ok(!Object.keys(context.env).some(name => /^(?:GITHUB_TOKEN|GH_TOKEN)$/i.test(name)));
+    assert.equal(context.env.OPENAI_API_KEY, 'fixture-provider-key-not-real');
+    assert.equal(verdicts(f).length, 0);
+    assert.equal(f.state.posts.length, 2);
+    const failure = f.state.posts.at(-1);
+    assert.equal(failure.path, '/repos/org/repo/issues/1/comments');
+    assert.match(failure.body.body, /Codjiflo Reviewer failed/);
+    assert.match(failure.body.body, /Fixture publication diagnostic github=\[REDACTED\] gh=\[REDACTED\] mixed=\[REDACTED\] provider=\[REDACTED\]/);
+    for (const secret of ['fixture-token-not-real', 'fixture-gh-token-not-real', 'fixture-mixed-token-not-real', 'fixture-provider-key-not-real']) {
+      assert.ok(!JSON.stringify(f.state.posts).includes(secret), secret);
+    }
+  } finally { await f.close(); }
 });
 
 test('environment-blocked and legacy defect-free outputs post only a neutral failure comment', async t => {
@@ -96,7 +131,7 @@ test('repository prompt replaces the default methodology with PR-head UTF-8 or e
       assert.ok(section.includes(`--- BEGIN REPOSITORY REVIEW INSTRUCTIONS ---\n${instructions}\n--- END REPOSITORY REVIEW INSTRUCTIONS ---`));
       for (const defaultText of ['e-code-review', 'independent angles', 'Target at least', 'Cap final findings', 'Conventions:', 'Do not run a verifier', 'do NOT spawn subagents', 'ReportFindings']) assert.ok(!captured.includes(defaultText), defaultText);
       assert.match(captured, /Review only; never edit repository files or publish to GitHub/);
-      assert.match(captured, /exactly one final JSON object matching the supplied schema/);
+      assert.match(captured, /final_review/);
       assert.match(captured, /The output must contain no more than 15 findings/);
       assert.match(captured, /All native comment locations must use the authoritative CURRENT PR API patches/);
       assert.ok(captured.includes(`PR head ${f.head}`));
@@ -283,29 +318,6 @@ test('legacy approvals cannot reuse an unchanged preexisting repository prompt',
   });
 });
 
-test('Claude OAuth fallback clears inherited API and cloud-provider environment', async () => {
-  const f = await fixture();
-  try {
-    await f.run({ preset: 'claude', providerEnv: {
-      ANTHROPIC_API_KEY: 'host-key-must-not-be-used', ANTHROPIC_AUTH_TOKEN: 'host-token-must-not-be-used',
-      ANTHROPIC_BASE_URL: 'https://must-not-contact.invalid', CLAUDE_CODE_OAUTH_TOKEN: 'must-use-stored-login',
-      CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDE_CODE_USE_FOUNDRY: '1',
-    } });
-    assert.equal(verdicts(f).length, 1);
-    assert.equal(verdicts(f)[0].body.event, 'APPROVE');
-  } finally { await f.close(); }
-});
-
-test('present invalid Claude key configuration fails closed before CLI launch or publication', async () => {
-  const f = await fixture();
-  try {
-    await writeFile(f.env.CODJIFLO_ANTHROPIC_KEYS_FILE, '{', { mode: 0o600 });
-    await assert.rejects(f.run({ preset: 'claude' }));
-    assert.equal(verdicts(f).length, 0);
-    await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
-    assert.match(f.state.posts.at(-1).body.body, /failed/);
-  } finally { await f.close(); }
-});
 
 test('local aliases and mixed-case canonical names retain canonical publication and baseline scope', async t => {
   for (const [input, preset] of [['CoDeX', 'sol-xhigh'], ['CLAUDE', 'opus-xhigh'], ['SOL-XHIGH', 'sol-xhigh'], ['OpUs-XhIgH', 'opus-xhigh']]) await t.test(input, async () => {

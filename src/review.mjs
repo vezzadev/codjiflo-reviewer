@@ -75,17 +75,32 @@ export async function review({ request, github, env = process.env, reviewer = ru
   try {
     const cwd = join(temp, 'repository');
     const reviewEnv = sanitizeGitEnv(env);
-    const gitEnv = { ...reviewEnv, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${github.token}`).toString('base64')}` };
+    const gitEnv = { ...reviewEnv, GIT_TERMINAL_PROMPT: '0' };
+    const cloneUrl = pr.base.repo.clone_url;
+    // Submodule processes inherit this environment. Only HTTP(S) clones need
+    // the GitHub header, and it must not follow a submodule to another origin.
+    // File and SSH transports have no HTTP origin (SCP-style SSH is not a URL).
+    if (/^https?:\/\//i.test(cloneUrl)) {
+      const { origin } = new URL(cloneUrl);
+      Object.assign(gitEnv, {
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: `http.${origin}/.extraHeader`,
+        GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${github.token}`).toString('base64')}`,
+      });
+    }
     for (const name of Object.keys(reviewEnv)) {
       if (['GITHUB_TOKEN', 'GH_TOKEN'].includes(name.toUpperCase())) delete reviewEnv[name];
     }
     const git = args => runProcess('git', args, { cwd, env: gitEnv, timeoutMs: 5 * 60 * 1000 });
     await runProcess('git', ['init', cwd], { env: gitEnv, timeoutMs: 5 * 60 * 1000 });
-    await git(['remote', 'add', 'origin', pr.base.repo.clone_url]);
+    await git(['remote', 'add', 'origin', cloneUrl]);
     await git(['fetch', '--no-tags', 'origin', base, head]);
     await git(['checkout', '--detach', head]);
     const mergeBase = (await git(['merge-base', base, head])).trim();
     const currentPromptBlob = await repositoryPromptBlob(git, head);
+    // Review the gitlinks recorded by this head, never a submodule's moving
+    // tracking branch or configured merge/rebase update strategy.
+    await git(['submodule', 'update', '--init', '--recursive', '--checkout']);
     let scope = mergeBase;
     let mode = 'full';
     let reason = request.mode === 'full' ? 'explicit full review' : 'no usable successful baseline';
@@ -117,9 +132,11 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const publication = randomUUID();
     const resultPath = output ?? `codjiflo-result-${publication}.json`;
     const marker = `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head, base, preset: request.preset })} -->`;
+    const workflowMarker = /^\d+$/.test(env.GITHUB_RUN_ID ?? '') && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? '') ?
+      `\n<!-- codjiflo-workflow:${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT} -->` : '';
     const envelope = { version: 1, request, head, base, payload: {
       commit_id: head, event: result.verdict,
-      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nScope: **${mode}** (${reason}).\n\n${marker}\n<!-- codjiflo-publication:${publication} -->`,
+      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nScope: **${mode}** (${reason}).\n\n${marker}${workflowMarker}\n<!-- codjiflo-publication:${publication} -->`,
       comments,
     } };
     await writeFile(resultPath, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600, ...(output === undefined ? { flag: 'wx' } : {}) });

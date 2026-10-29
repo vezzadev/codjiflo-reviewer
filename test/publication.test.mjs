@@ -22,6 +22,24 @@ function setup() {
   return { envelope, receipt, state, github };
 }
 
+test('failure sink redacts client-only publication credentials and provider secrets before truncation', async () => {
+  const token = 'fixture-client-token-not-in-env';
+  const provider = 'fixture-provider-secret-not-real';
+  const posts = [];
+  await reportPublicationFailure({
+    request: { repo: 'org/repo', number: 1 },
+    github: { token, async request(path, options) { posts.push({ path, ...options }); } },
+    env: { OPENAI_API_KEY: provider },
+    error: new Error(`client=${token} provider=${provider}\n${'x'.repeat(1450)}${token}`),
+  });
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].path, '/repos/org/repo/issues/1/comments');
+  assert.match(posts[0].body.body, /client=\[REDACTED\] provider=\[REDACTED\]/);
+  assert.ok(!posts[0].body.body.includes(token));
+  assert.ok(!posts[0].body.body.includes(provider));
+  assert.ok(!posts[0].body.body.includes('fixture-client-'));
+});
+
 test('ambiguous committed POST is reconciled without creating duplicate review', async () => {
   const f = setup();
   const get = f.github.request;
@@ -354,7 +372,7 @@ test('real CLI retains validated payload and publication-only recovery does not 
     assert.equal(envelope.payload.comments.length, 2);
     const posts = f.state.posts.length;
     const recovery = await runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], {
-      env: { ...f.env, GITHUB_EVENT_PATH: 'ignored-during-publication', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_CODEX_BIN: '/no-provider-needed' },
+      env: { ...f.env, GITHUB_EVENT_PATH: 'ignored-during-publication', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' },
     });
     assert.match(recovery, /publication confirmed/);
     assert.equal(f.state.posts.length, posts);
@@ -372,7 +390,7 @@ test('publication rejection retains result, reports failure and exits nonzero; l
     const envelope = JSON.parse(await readFile(path, 'utf8'));
     assert.equal(envelope.payload.event, 'REQUEST_CHANGES');
     f.state.publicationStatus = undefined;
-    const recoveryEnv = { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_CODEX_BIN: '/no-provider-needed' };
+    const recoveryEnv = { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' };
     f.state.stale = true;
     await assert.rejects(runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], { env: recoveryEnv }), /refusing stale verdict/);
     assert.equal(f.state.reviews.length, 0);
@@ -394,7 +412,7 @@ test('default CLI result paths preserve a failed review when the next review suc
       env: {
         ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
         CODJIFLO_RESULT_PATH: '', CODJIFLO_APPROVED_USERS: 'alice',
-        CODJIFLO_CODEX_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
+        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
       },
     });
     const results = async () => (await readdir(f.temp)).filter(name => /^codjiflo-result-[a-f0-9-]+\.json$/.test(name));
@@ -432,7 +450,7 @@ test('explicit result path remains caller-selected and may overwrite an earlier 
       env: {
         ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
         CODJIFLO_RESULT_PATH: join(f.temp, 'ignored-result.json'), CODJIFLO_APPROVED_USERS: 'alice',
-        CODJIFLO_CODEX_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
+        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
       },
     });
     assert.notEqual(await readFile(path, 'utf8'), earlier);

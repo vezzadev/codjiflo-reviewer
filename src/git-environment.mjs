@@ -1,11 +1,12 @@
-// Repository and command-level config selectors belong to the caller's checkout,
-// not the disposable review checkout. Keep operator global/system config and
-// installation, TLS, and authentication transport settings.
+// Repository, pathspec, and command-level config selectors belong to the caller's
+// checkout, not the disposable review checkout. Keep operator global/system
+// config and installation, TLS, and authentication transport settings.
 const repositoryVariables = [
   'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_OBJECT_DIRECTORY', 'GIT_DIR',
   'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE',
   'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX',
   'GIT_SHALLOW_FILE', 'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES',
+  'GIT_ICASE_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_LITERAL_PATHSPECS',
 ];
 
 export function sanitizeGitEnv(inherited) {

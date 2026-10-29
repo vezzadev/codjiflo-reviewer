@@ -16,11 +16,11 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const reportFailure = new AsyncFunction('github', 'context', body);
 const shouldReport = new Function('failure', 'steps', `return ${condition};`);
 
-for (const failedStep of ['sdk', 'prepare', 'app']) {
+for (const failedStep of ['prepare', 'app']) {
   test(`workflow reports ${failedStep} setup failure without a verdict or host output`, async () => {
     // Evaluate the workflow's real guard and execute its real GitHub Script payload.
     // No GitHub request or runner setup command is invoked.
-    const steps = Object.fromEntries(['sdk', 'prepare', 'app', 'review'].map(id => [
+    const steps = Object.fromEntries(['prepare', 'app', 'review'].map(id => [
       id, { outcome: id === failedStep ? 'failure' : 'skipped' },
     ]));
     assert.equal(shouldReport(() => true, steps), true);
@@ -37,7 +37,7 @@ for (const failedStep of ['sdk', 'prepare', 'app']) {
     assert.equal(posts[0].issue_number, 1987);
     assert.match(posts[0].body, /preparation failed/);
     assert.match(posts[0].body, /no review verdict was submitted/);
-    assert.match(posts[0].body, /SDK installation/);
+    assert.match(posts[0].body, /Review prerequisite preparation/);
     assert.match(posts[0].body, /GitHub App token setup/);
     assert.ok(posts[0].body.includes('https://github.example/owner/repo/actions/runs/40441453630'));
     assert.equal(posts[0].event, undefined);
@@ -47,13 +47,13 @@ for (const failedStep of ['sdk', 'prepare', 'app']) {
 test('setup reporter does not duplicate CLI failure reporting or report successful setup', () => {
   for (const review of ['success', 'failure', 'skipped']) {
     const steps = {
-      sdk: { outcome: 'success' }, prepare: { outcome: 'skipped' },
+      prepare: { outcome: 'skipped' },
       app: { outcome: 'success' }, review: { outcome: review },
     };
     assert.equal(shouldReport(() => review === 'failure', steps), false);
   }
   const steps = {
-    sdk: { outcome: 'failure' }, prepare: { outcome: 'skipped' },
+    prepare: { outcome: 'failure' },
     app: { outcome: 'skipped' }, review: { outcome: 'skipped' },
   };
   assert.equal(shouldReport(() => false, steps), false, 'failure() remains required');

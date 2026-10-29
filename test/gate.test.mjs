@@ -40,10 +40,10 @@ test('executable workflow gate authorizes only the original approved comment aut
 
 test('gate explains every decision in logs and the Actions summary without starting review work', async t => {
   const cases = [
-    { name: 'embedded command', body: 'Owner authorized option (A). @codjiflo codex', allowed: true, reason: 'approved', provider: 'codex', preset: 'sol-xhigh', mode: 'incremental' },
-    { name: 'Claude full command', body: 'Please @codjiflo claude full', allowed: true, reason: 'approved', provider: 'claude', preset: 'opus-xhigh', mode: 'full' },
-    { name: 'embedded command ends paragraph', body: 'Owner authorized option (A). @codjiflo codex\n\nThanks for taking another look.', allowed: true, reason: 'approved', provider: 'codex', preset: 'sol-xhigh', mode: 'incremental' },
-    { name: 'explicit Claude command ends paragraph', body: 'Please @codjiflo-reviewer review claude full\n\nFurther context below.', allowed: true, reason: 'approved', provider: 'claude', preset: 'opus-xhigh', mode: 'full' },
+    { name: 'embedded command', body: 'Owner authorized option (A). @codjiflo codex', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'Claude full command', body: 'Please @codjiflo claude full', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-xhigh', mode: 'full' },
+    { name: 'embedded command ends paragraph', body: 'Owner authorized option (A). @codjiflo codex\n\nThanks for taking another look.', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'explicit Claude command ends paragraph', body: 'Please @codjiflo-reviewer review claude full\n\nFurther context below.', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-xhigh', mode: 'full' },
     { name: 'ordinary comment', body: 'Thanks @codjiflo for reviewing', reason: 'not-a-command' },
     { name: 'quoted command', body: '> @codjiflo codex', reason: 'not-a-command' },
     { name: 'casual review question', body: 'Could @codjiflo review this?', reason: 'not-a-command' },
@@ -51,11 +51,11 @@ test('gate explains every decision in logs and the Actions summary without start
     { name: 'soft-wrapped review prose', body: 'I think the earlier pass by @codjiflo review\nmissed this', reason: 'not-a-command' },
     { name: 'soft-wrapped profile prose', body: 'Thanks to @codjiflo claude\nfor the review', reason: 'not-a-command' },
     { name: 'inline code prefix before malformed mention', body: '`x` @codjiflo review turbo', reason: 'not-a-command' },
-    { name: 'soft-wrapped prose before standalone command', body: 'Thanks to @codjiflo claude\nfor the review\n\n@codjiflo codex', allowed: true, reason: 'approved', provider: 'codex', preset: 'sol-xhigh', mode: 'incremental' },
-    { name: 'casual mention before valid command', body: 'Could @codjiflo review this?\n@codjiflo codex', allowed: true, reason: 'approved', provider: 'codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'soft-wrapped prose before standalone command', body: 'Thanks to @codjiflo claude\nfor the review\n\n@codjiflo codex', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'casual mention before valid command', body: 'Could @codjiflo review this?\n@codjiflo codex', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
     { name: 'indented code command', body: 'Example:\n\n    @codjiflo codex', reason: 'not-a-command' },
-    { name: 'paragraph continuation command', body: 'Owner authorized:\n    @codjiflo codex', allowed: true, reason: 'approved', provider: 'codex', preset: 'sol-xhigh', mode: 'incremental' },
-    { name: 'unmatched backticks in separate paragraphs', body: '`example\n\n@codjiflo codex\n\n`', allowed: true, reason: 'approved', provider: 'codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'paragraph continuation command', body: 'Owner authorized:\n    @codjiflo codex', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'unmatched backticks in separate paragraphs', body: '`example\n\n@codjiflo codex\n\n`', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
     { name: 'bot kickoff', author: 'codjiflo[bot]', type: 'Bot', body: 'Starting review', reason: 'bot-author' },
     { name: 'allowlisted bot command', author: 'codjiflo[bot]', type: 'Bot', approved: 'codjiflo[bot]', body: '@codjiflo codex', reason: 'bot-author' },
     { name: 'bot login without type', author: 'codjiflo[bot]', body: '@codjiflo codex', reason: 'bot-author' },
@@ -84,7 +84,7 @@ test('gate explains every decision in logs and the Actions summary without start
           ...process.env, GITHUB_EVENT_NAME: 'issue_comment', GITHUB_EVENT_PATH: eventPath,
           GITHUB_OUTPUT: outputPath, GITHUB_STEP_SUMMARY: summaryPath,
           GITHUB_TOKEN: '', GH_TOKEN: '', CODJIFLO_APPROVED_USERS: scenario.approved ?? 'alice',
-          CODJIFLO_CODEX_BIN: '/nonexistent-reviewer', CODJIFLO_CLAUDE_BIN: '/nonexistent-reviewer',
+          CODJIFLO_OMP_BIN: '/nonexistent-reviewer',
         },
       });
       const allowed = Boolean(scenario.allowed);
