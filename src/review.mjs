@@ -86,6 +86,9 @@ export async function review({ request, github, env = process.env, reviewer = ru
     await git(['checkout', '--detach', head]);
     const mergeBase = (await git(['merge-base', base, head])).trim();
     const currentPromptBlob = await repositoryPromptBlob(git, head);
+    // Review the gitlinks recorded by this head, never a submodule's moving
+    // tracking branch or configured merge/rebase update strategy.
+    await git(['submodule', 'update', '--init', '--recursive', '--checkout']);
     let scope = mergeBase;
     let mode = 'full';
     let reason = request.mode === 'full' ? 'explicit full review' : 'no usable successful baseline';
