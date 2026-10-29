@@ -59,6 +59,18 @@ async function repositoryPromptBlob(git, revision) {
   }
 }
 
+function sourceSubmodules(value = '[]') {
+  let paths;
+  try { paths = JSON.parse(value); }
+  catch { throw new Error('CODJIFLO_SOURCE_SUBMODULES must be a JSON array of exact safe relative gitlink paths'); }
+  if (!Array.isArray(paths) || paths.some(path =>
+    typeof path !== 'string' || !path || /[\\:\x00-\x1f\x7f]/.test(path) ||
+    path.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git'))) {
+    throw new Error('CODJIFLO_SOURCE_SUBMODULES must be a JSON array of exact safe relative gitlink paths');
+  }
+  return [...new Set(paths)];
+}
+
 export async function review({ request, github, env = process.env, reviewer = runReviewer, output = env.CODJIFLO_RESULT_PATH || undefined }) {
   if (!isApproved(request.requester, env.CODJIFLO_APPROVED_USERS)) throw new Error('Review requester is not approved');
   const preset = PRESETS[request.preset];
@@ -73,6 +85,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
   await github.request(`${root}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer starting **${request.preset}** (${request.mode}) at \`${head}\`, requested by @${request.requester}.${runUrl ? `\n\n[Live workflow logs](${runUrl})` : ''}` } });
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-'));
   try {
+    const dependencies = sourceSubmodules(env.CODJIFLO_SOURCE_SUBMODULES);
     const cwd = join(temp, 'repository');
     const reviewEnv = sanitizeGitEnv(env);
     const gitEnv = { ...reviewEnv, GIT_TERMINAL_PROMPT: '0' };
@@ -98,9 +111,16 @@ export async function review({ request, github, env = process.env, reviewer = ru
     await git(['checkout', '--detach', head]);
     const mergeBase = (await git(['merge-base', base, head])).trim();
     const currentPromptBlob = await repositoryPromptBlob(git, head);
-    // Review the gitlinks recorded by this head, never a submodule's moving
-    // tracking branch or configured merge/rebase update strategy.
-    await git(['submodule', 'update', '--init', '--recursive', '--checkout']);
+    if (dependencies.length) {
+      const entries = (await git(['ls-tree', '-r', '-z', head])).split('\0');
+      const gitlinks = new Set(entries.filter(entry => entry.startsWith('160000 commit ')).map(entry => entry.slice(entry.indexOf('\t') + 1)));
+      for (const path of dependencies) {
+        if (!gitlinks.has(path)) throw new Error(`Source submodule is not an exact gitlink path at the inspected head: ${JSON.stringify(path)}`);
+      }
+      // Literal pathspecs prevent a valid gitlink named e.g. sdk[1] from
+      // selecting other dependencies. Descendants use their pinned gitlinks.
+      await git(['--literal-pathspecs', 'submodule', 'update', '--init', '--recursive', '--checkout', '--', ...dependencies]);
+    }
     let scope = mergeBase;
     let mode = 'full';
     let reason = request.mode === 'full' ? 'explicit full review' : 'no usable successful baseline';

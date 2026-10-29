@@ -8,7 +8,7 @@ import { fixture } from './fixture.mjs';
 import { runProcess } from '../src/runner.mjs';
 import { review } from '../src/review.mjs';
 
-async function submoduleFixture() {
+async function submoduleFixture({ sdkPath = 'SolidworksMCP-python', unavailableUrl, unavailablePath = 'private-references' } = {}) {
   const f = await fixture();
   const root = dirname(f.repo);
   const git = (cwd, args) => runProcess('git', args, { cwd, env: f.env });
@@ -30,9 +30,14 @@ async function submoduleFixture() {
   await git(sdk, ['config', '-f', '.gitmodules', 'submodule.nested.update', 'rebase']);
   await git(sdk, ['commit', '-am', 'pin nested SDK']);
   const sdkHead = (await git(sdk, ['rev-parse', 'HEAD'])).trim();
-  await git(f.repo, ['submodule', 'add', '../sdk', 'SolidworksMCP-python']);
-  await git(f.repo, ['config', '-f', '.gitmodules', 'submodule.SolidworksMCP-python.branch', 'main']);
-  await git(f.repo, ['config', '-f', '.gitmodules', 'submodule.SolidworksMCP-python.update', 'merge']);
+  await git(f.repo, ['--literal-pathspecs', 'submodule', 'add', '../sdk', sdkPath]);
+  await git(f.repo, ['config', '-f', '.gitmodules', `submodule.${sdkPath}.branch`, 'main']);
+  await git(f.repo, ['config', '-f', '.gitmodules', `submodule.${sdkPath}.update`, 'merge']);
+  if (unavailableUrl) {
+    await git(f.repo, ['config', '-f', '.gitmodules', `submodule.${unavailablePath}.path`, unavailablePath]);
+    await git(f.repo, ['config', '-f', '.gitmodules', `submodule.${unavailablePath}.url`, unavailableUrl]);
+    await git(f.repo, ['update-index', '--add', '--cacheinfo', `160000,${sdkHead},${unavailablePath}`]);
+  }
   await git(f.repo, ['commit', '-am', 'pin SDK']);
   const head = (await git(f.repo, ['rev-parse', 'HEAD'])).trim();
   // The remote tips must not replace the gitlinks captured above.
@@ -57,6 +62,104 @@ async function submoduleFixture() {
 
 const request = { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'full' };
 
+test('source selection rejects malformed values, unsafe paths, and non-gitlinks before review', async t => {
+  const s = await submoduleFixture();
+  try {
+    const values = [
+      '', '[', 'null', '{}', '"SolidworksMCP-python"', 'true', '1',
+      '[null]', '[1]', '[{}]', '[[]]',
+      ...['', '/', '/SolidworksMCP-python', '../sdk', 'a/../SolidworksMCP-python',
+        './SolidworksMCP-python', 'SolidworksMCP-python/', 'a//b', 'a/./b', 'a\\b',
+        'C:/sdk', '.git/modules/sdk', 'a/.GIT/b', 'sdk\0bad', 'sdk\nbad',
+        ':(glob)*', ':SolidworksMCP-python', '*', 'SolidworksMCP-*',
+        'solidworksmcp-python', 'a.js', '.gitmodules', 'missing',
+        'SolidworksMCP-python/nested',
+      ].map(path => JSON.stringify([path])),
+    ];
+    for (const value of values) await t.test(JSON.stringify(value), async () => {
+      let invoked = false;
+      await assert.rejects(review({
+        request, github: s.github,
+        env: { ...s.f.env, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_SOURCE_SUBMODULES: value },
+        reviewer: async () => { invoked = true; throw new Error('must not review invalid selection'); },
+      }), /CODJIFLO_SOURCE_SUBMODULES|not an exact gitlink path/);
+      assert.equal(invoked, false);
+    });
+    assert.equal(s.posts.filter(post => post.path.endsWith('/reviews')).length, 0);
+  } finally { await s.f.close(); }
+});
+
+for (const selection of [undefined, '[]', '["SolidworksMCP-python"]', '["private-references"]']) {
+  test(`unavailable private root dependency is fetched only when selected: ${selection ?? 'unset'}`, async () => {
+    // Real HTTP 404 matches a private repository unavailable to the root-scoped
+    // token. It is a tracked gitlink, not a mocked subprocess failure.
+    const unavailable = await gitHttpServer({});
+    const s = await submoduleFixture({ unavailableUrl: `${unavailable.origin}/private-references` });
+    try {
+      let invoked = false;
+      const pending = review({
+        request, github: s.github, output: join(dirname(s.f.repo), 'result.json'),
+        env: { ...s.f.env, NO_PROXY: '*', no_proxy: '*', CODJIFLO_APPROVED_USERS: 'alice',
+          ...(selection === undefined ? {} : { CODJIFLO_SOURCE_SUBMODULES: selection }) },
+        reviewer: async ({ cwd, env }) => {
+          invoked = true;
+          assert.match(await readFile(join(cwd, '.gitmodules'), 'utf8'), /private-references/);
+          await assert.rejects(readFile(join(cwd, 'private-references', '.git')), { code: 'ENOENT' });
+          const config = await runProcess('git', ['config', '--local', '--list'], { cwd, env });
+          assert.doesNotMatch(config, /submodule\.private-references\./);
+          if (selection === '["SolidworksMCP-python"]') {
+            assert.equal(await readFile(join(cwd, 'SolidworksMCP-python', 'nested', 'source.txt'), 'utf8'), 'leaf pinned\n');
+          } else {
+            await assert.rejects(readFile(join(cwd, 'SolidworksMCP-python', '.git')), { code: 'ENOENT' });
+            assert.doesNotMatch(config, /submodule\./);
+          }
+          return { verdict: 'APPROVE', summary: 'Only configured source dependencies inspected.', findings: [] };
+        },
+      });
+      if (selection === '["private-references"]') {
+        await assert.rejects(pending);
+        assert.equal(invoked, false);
+        assert.ok(unavailable.calls.some(call => call.path.startsWith('/private-references/')));
+        assert.equal(s.posts.filter(post => post.path.endsWith('/reviews')).length, 0);
+      } else {
+        await pending;
+        assert.equal(invoked, true);
+        assert.deepEqual(unavailable.calls, []);
+        assert.equal(s.posts.filter(post => post.path.endsWith('/reviews')).length, 1);
+      }
+    } finally {
+      await unavailable.close();
+      await s.f.close();
+    }
+  });
+}
+
+test('real Git treats wildcard characters in selected gitlink paths literally', async () => {
+  const unavailable = await gitHttpServer({});
+  const s = await submoduleFixture({
+    sdkPath: 'vendor/sdk[1]', unavailablePath: 'vendor/sdk1', unavailableUrl: `${unavailable.origin}/private-references`,
+  });
+  try {
+    let invoked = false;
+    await review({
+      request, github: s.github, output: join(dirname(s.f.repo), 'result.json'),
+      env: { ...s.f.env, NO_PROXY: '*', no_proxy: '*', CODJIFLO_APPROVED_USERS: 'alice',
+        CODJIFLO_SOURCE_SUBMODULES: '["vendor/sdk[1]"]', GIT_GLOB_PATHSPECS: '1', GIT_ICASE_PATHSPECS: '1' },
+      reviewer: async ({ cwd }) => {
+        invoked = true;
+        assert.equal(await readFile(join(cwd, 'vendor/sdk[1]', 'nested', 'source.txt'), 'utf8'), 'leaf pinned\n');
+        await assert.rejects(readFile(join(cwd, 'vendor/sdk1', '.git')), { code: 'ENOENT' });
+        return { verdict: 'APPROVE', summary: 'Literal source path inspected.', findings: [] };
+      },
+    });
+    assert.equal(invoked, true);
+    assert.deepEqual(unavailable.calls, []);
+  } finally {
+    await unavailable.close();
+    await s.f.close();
+  }
+});
+
 test('review checkout recursively materializes exact pinned submodules with sanitized Git auth environment', async () => {
   const s = await submoduleFixture();
   try {
@@ -65,6 +168,7 @@ test('review checkout recursively materializes exact pinned submodules with sani
       request, github: s.github, output: join(dirname(s.f.repo), 'result.json'),
       env: {
         ...s.f.env, CODJIFLO_APPROVED_USERS: 'alice', GITHUB_TOKEN: 'fake-publication-token',
+        CODJIFLO_SOURCE_SUBMODULES: '["SolidworksMCP-python"]',
         GIT_DIR: '/missing-caller-repository', GIT_WORK_TREE: '/missing-caller-worktree',
         GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'protocol.file.allow', GIT_CONFIG_VALUE_0: 'never',
         GIT_CONFIG_PARAMETERS: "'submodule.recurse=false'", GIT_ICASE_PATHSPECS: '1',
@@ -94,7 +198,7 @@ test('unavailable nested pinned submodule fails before reviewer invocation and p
     await rm(s.leaf, { recursive: true, force: true });
     let invoked = false;
     await assert.rejects(review({
-      request, github: s.github, env: { ...s.f.env, CODJIFLO_APPROVED_USERS: 'alice' },
+      request, github: s.github, env: { ...s.f.env, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_SOURCE_SUBMODULES: '["SolidworksMCP-python"]' },
       reviewer: async () => { invoked = true; throw new Error('must not review incomplete checkout'); },
     }));
     assert.equal(invoked, false);
@@ -154,7 +258,7 @@ for (const transport of ['http', 'http-cross-port', 'file', 'ssh-url', 'ssh-scp'
       for (const repo of [s.f.repo, sdk, s.leaf]) await s.git(repo, ['update-server-info']);
 
       let cloneUrl = isHttp ? `${trusted.origin}/repo` : pathToFileURL(s.f.repo).href;
-      const env = { ...s.f.env, CODJIFLO_APPROVED_USERS: 'alice', NO_PROXY: '*', no_proxy: '*', GITHUB_TOKEN: 'fake-publication-token', GH_TOKEN: 'fake-gh-token' };
+      const env = { ...s.f.env, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_SOURCE_SUBMODULES: '["SolidworksMCP-python"]', NO_PROXY: '*', no_proxy: '*', GITHUB_TOKEN: 'fake-publication-token', GH_TOKEN: 'fake-gh-token' };
       const sshCapture = join(root, 'ssh-capture.jsonl');
       if (transport.startsWith('ssh-')) {
         // A real Git SSH transport with a local upload-pack process. No daemon,

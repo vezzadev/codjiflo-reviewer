@@ -21,6 +21,8 @@ jobs:
       runner-label: self-hosted
       # Optional for SolidWorks repositories; provision docs before OMP starts.
       # prepare-command: node scripts/prepare-solidworks-docs.mjs
+      # Optional source-only dependencies; other submodules stay uninitialized.
+      # source-submodules: '["SolidworksMCP-python"]'
       # Optional: register/install an App and set variable + secret as in README.
       app-id: ${{ vars.CODJIFLO_APP_ID }}
     secrets:
