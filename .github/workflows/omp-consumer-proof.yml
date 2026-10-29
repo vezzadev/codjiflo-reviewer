@@ -28,4 +28,4 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app.outputs.token }}
           CODJIFLO_APPROVED_USERS: pedropaulovc
           CODJIFLO_RESULT_PATH: ${{ runner.temp }}/omp-consumer-proof-${{ github.run_id }}.json
-        run: node bin/codjiflo-reviewer.mjs --repo pedropaulovc/harmonic-analyzer --pr 2076 --requester pedropaulovc --preset claude --full
+        run: env -u GITHUB_EVENT_PATH node bin/codjiflo-reviewer.mjs --repo pedropaulovc/harmonic-analyzer --pr 2076 --requester pedropaulovc --preset claude --full
