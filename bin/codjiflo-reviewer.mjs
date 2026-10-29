@@ -8,7 +8,7 @@ import { publishReview, reportPublicationFailure } from '../src/publication.mjs'
 
 async function reportGate(event, decision) {
   const { request, reason } = decision;
-  const provider = request ? PRESETS[request.preset].cli : 'none';
+  const provider = request ? PRESETS[request.preset].provider : 'none';
   const token = value => String(value ?? 'unknown').replace(/\s/g, '_');
   const line = `gate: allowed=${Boolean(request)} reason=${reason}${request ? ` provider=${provider} preset=${request.preset} mode=${request.mode}` : ''} author=${token(event.comment?.user?.login)} comment=${token(event.comment?.id)} pr=${event.issue?.pull_request ? `#${token(event.issue.number)}` : 'none'}`;
   console.log(line);
