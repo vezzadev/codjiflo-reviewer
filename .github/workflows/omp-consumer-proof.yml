@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ad57c1aa1ae776524478e5190628ca1f2bef05b7
+          ref: 4c98f65ab0f6addffd63bd996dd44193603c9ad9
           persist-credentials: false
       - uses: actions/create-github-app-token@v2
         id: app
@@ -27,5 +27,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app.outputs.token }}
           CODJIFLO_APPROVED_USERS: pedropaulovc
+          CODJIFLO_SOURCE_SUBMODULES: '["SolidworksMCP-python"]'
           CODJIFLO_RESULT_PATH: ${{ runner.temp }}/omp-consumer-proof-${{ github.run_id }}.json
         run: env -u GITHUB_EVENT_PATH node bin/codjiflo-reviewer.mjs --repo pedropaulovc/harmonic-analyzer --pr 2076 --requester pedropaulovc --preset claude --full
