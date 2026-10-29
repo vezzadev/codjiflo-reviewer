@@ -38,8 +38,15 @@ async function submoduleFixture({ sdkPath = 'SolidworksMCP-python', unavailableU
     await git(f.repo, ['config', '-f', '.gitmodules', `submodule.${unavailablePath}.url`, unavailableUrl]);
     await git(f.repo, ['update-index', '--add', '--cacheinfo', `160000,${sdkHead},${unavailablePath}`]);
   }
-  await git(f.repo, ['commit', '-am', 'pin SDK']);
+  // Preserve synthetic unavailable gitlinks in the index: commit -a would
+  // treat their intentionally absent worktree directories as deletions.
+  await git(f.repo, ['add', '.gitmodules']);
+  await git(f.repo, ['commit', '-m', 'pin SDK']);
   const head = (await git(f.repo, ['rev-parse', 'HEAD'])).trim();
+  if (unavailableUrl) {
+    assert.equal(await git(f.repo, ['--literal-pathspecs', 'ls-tree', '-r', head, '--', unavailablePath]),
+      `160000 commit ${sdkHead}\t${unavailablePath}\n`);
+  }
   // The remote tips must not replace the gitlinks captured above.
   for (const cwd of [leaf, sdk]) {
     await writeFile(join(cwd, 'source.txt'), 'moving branch is not review evidence\n');
@@ -117,7 +124,11 @@ for (const selection of [undefined, '[]', '["SolidworksMCP-python"]', '["private
         },
       });
       if (selection === '["private-references"]') {
-        await assert.rejects(pending);
+        await assert.rejects(pending, error => {
+          assert.equal(error.termination, 'exit');
+          assert.match(error.message, /private-references.*not found/);
+          return true;
+        });
         assert.equal(invoked, false);
         assert.ok(unavailable.calls.some(call => call.path.startsWith('/private-references/')));
         assert.equal(s.posts.filter(post => post.path.endsWith('/reviews')).length, 0);
