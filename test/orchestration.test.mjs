@@ -35,16 +35,62 @@ test('native publication records the workflow attempt without moving its final i
   } finally { await f.close(); }
 });
 
-test('OMP failures, malformed results, stale heads and tool errors never approve', async t => {
-  for (const scenario of ['failure', 'malformed', 'stale', 'error-result']) await t.test(scenario, async () => {
+test('OMP failures, malformed results and tool errors never approve', async t => {
+  for (const scenario of ['failure', 'malformed', 'error-result']) await t.test(scenario, async () => {
     const f = await fixture();
     try {
-      f.state.stale = scenario === 'stale';
       await assert.rejects(f.run({ mode: scenario, preset: scenario === 'error-result' ? 'opus-xhigh' : 'sol-xhigh' }));
       assert.equal(verdicts(f).length, 0);
       assert.match(f.state.posts.at(-1).body.body, /failed/);
     } finally { await f.close(); }
   });
+});
+
+test('head or base movement while collecting PR files rejects the snapshot before invoking OMP', async t => {
+  for (const scenario of ['head', 'base', 'closed']) await t.test(scenario, async () => {
+    const f = await fixture();
+    try {
+      f.state.stale = scenario === 'head';
+      f.state.movedBase = scenario === 'base';
+      f.state.closed = scenario === 'closed';
+      await assert.rejects(f.run(), /changed while collecting file metadata/);
+      await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+      assert.equal(verdicts(f).length, 0);
+      assert.equal(f.state.reads, 2, 'snapshot mismatch must not start an automatic retry');
+    } finally { await f.close(); }
+  });
+});
+
+test('movement after snapshot validation publishes either verdict on the inspected commits; closure rejects it', async t => {
+  for (const mode of ['approve', 'findings']) {
+    for (const scenario of ['head', 'base', 'both', 'closed']) await t.test(`${mode}, ${scenario}`, async () => {
+      const f = await fixture();
+      try {
+        f.state.moveAtRead = 3;
+        f.state.stale = scenario === 'head' || scenario === 'both';
+        f.state.movedBase = scenario === 'base' || scenario === 'both';
+        f.state.closed = scenario === 'closed';
+        if (scenario === 'closed') {
+          await assert.rejects(f.run({ mode }), /not open; refusing publication/);
+          assert.equal(verdicts(f).length, 0);
+        } else {
+          await f.run({ mode });
+          assert.equal(verdicts(f).length, 1);
+          const result = verdicts(f)[0].body;
+          const retained = JSON.parse(await readFile(join(f.temp, 'publication.json'), 'utf8'));
+          assert.equal(result.event, mode === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES');
+          assert.equal(result.commit_id, f.head);
+          assert.ok(result.body.includes(`Reviewed head: \`${f.head}\`\nReviewed base: \`${f.base}\``));
+          const marker = JSON.parse(/<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/.exec(result.body)[1]);
+          assert.deepEqual(marker, { head: f.head, base: f.base, preset: 'sol-xhigh' });
+          assert.deepEqual(result, retained.payload);
+          assert.equal(retained.head, f.head);
+          assert.equal(retained.base, f.base);
+        }
+        assert.match(await readFile(f.capture, 'utf8'), /final_review/);
+      } finally { await f.close(); }
+    });
+  }
 });
 
 test('real failure publication redacts known publication and provider secrets without passing publication tokens to reviewer', async () => {

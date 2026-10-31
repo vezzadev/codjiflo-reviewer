@@ -189,7 +189,8 @@ if (mode === 'fatal-exit') process.exit(1);
       response.end(JSON.stringify(state.files.slice((page - 1) * 100, page * 100)));
     } else if (request.url === '/repos/org/repo/pulls/1') {
       state.reads++;
-      response.end(JSON.stringify({ state: 'open', changed_files: state.changedFiles, head: { sha: state.stale && state.reads > 1 ? previous : head }, base: { sha: base, repo: { clone_url: pathToFileURL(repo).href } } }));
+      const moved = state.reads >= (state.moveAtRead ?? 2);
+      response.end(JSON.stringify({ state: state.closed && moved ? 'closed' : 'open', changed_files: state.changedFiles, head: { sha: state.stale && moved ? previous : head }, base: { sha: state.movedBase && moved ? previous : base, repo: { clone_url: pathToFileURL(repo).href } } }));
     } else { response.statusCode = 404; response.end('{}'); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

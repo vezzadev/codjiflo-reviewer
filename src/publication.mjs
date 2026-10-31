@@ -38,7 +38,7 @@ function confirmed(receipt, envelope) {
 // can still race a retry; GitHub does not provide an idempotency key for this POST.
 export async function publishReview({ envelope, github, env = process.env, delay = sleep }) {
   validate(envelope, env);
-  const { request, head, base, payload } = envelope;
+  const { request, head, payload } = envelope;
   const pullPath = `/repos/${request.repo}/pulls/${request.number}`;
   const identity = publicationId(payload.body);
   const read = async operation => {
@@ -75,8 +75,10 @@ export async function publishReview({ envelope, github, env = process.env, delay
       const found = await reconcile(postError);
       if (found) return finish(found);
     }
+    // Movement does not retarget this verdict: publish the saved commit and
+    // payload unchanged, while still refusing a new submission on a closed PR.
     const latest = await read(() => github.request(pullPath));
-    if (latest.head.sha !== head || latest.base.sha !== base || latest.state !== 'open') throw new Error('Pull request changed during review; refusing stale verdict');
+    if (latest.state !== 'open') throw new Error('Pull request is not open; refusing publication');
     try {
       const receipt = await github.request(`${pullPath}/reviews`, { method: 'POST', body: payload });
       if (!confirmed(receipt, envelope)) throw new Error('GitHub did not return a confirmed submitted review');

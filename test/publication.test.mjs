@@ -7,16 +7,16 @@ import { fixture } from './fixture.mjs';
 const { publishReview, reportPublicationFailure } = await import(process.env.CODJIFLO_PUBLICATION_MODULE || '../src/publication.mjs');
 
 const env = { CODJIFLO_APPROVED_USERS: 'alice' };
-function setup() {
-  const envelope = { version: 1, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'sol-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event: 'REQUEST_CHANGES', body: 'Review\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->', comments: [] } };
-  const receipt = { id: 42, state: 'CHANGES_REQUESTED', commit_id: envelope.head, body: envelope.payload.body };
+function setup(event = 'REQUEST_CHANGES') {
+  const envelope = { version: 1, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'sol-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event, body: 'Review\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->', comments: [] } };
+  const receipt = { id: 42, state: event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: envelope.head, body: envelope.payload.body };
   const state = { posts: 0, lists: 0, reviews: [], stale: false, events: [] };
   const github = {
     async list() { state.lists++; state.events.push('list'); return state.reviews; },
     async request(path, options) {
       if (options?.method === 'POST') { state.posts++; state.events.push('post'); return receipt; }
       state.events.push('pull');
-      return { state: 'open', head: { sha: state.stale ? 'c'.repeat(40) : envelope.head }, base: { sha: envelope.base } };
+      return { state: state.closed ? 'closed' : 'open', head: { sha: state.stale ? 'c'.repeat(40) : envelope.head }, base: { sha: state.movedBase ? 'd'.repeat(40) : envelope.base } };
     },
   };
   return { envelope, receipt, state, github };
@@ -144,11 +144,11 @@ test('transient reconciliation after an ambiguous POST retries reads, not the PO
   });
 });
 
-test('failed reconciliation, permanent rejection, stale head and unconfirmed receipt fail closed', async t => {
-  for (const scenario of ['reconciliation', 'permanent', 'stale', 'unconfirmed', 'pending']) await t.test(scenario, async () => {
+test('failed reconciliation, permanent rejection, closed PR and unconfirmed receipt fail closed', async t => {
+  for (const scenario of ['reconciliation', 'permanent', 'closed', 'unconfirmed', 'pending']) await t.test(scenario, async () => {
     const f = setup();
     const get = f.github.request;
-    if (scenario === 'stale') f.state.stale = true;
+    if (scenario === 'closed') f.state.closed = true;
     f.github.request = async (path, options) => {
       if (!options) return get(path);
       f.state.posts++;
@@ -158,15 +158,14 @@ test('failed reconciliation, permanent rejection, stale head and unconfirmed rec
     };
     if (scenario === 'reconciliation') f.github.list = async () => { if (f.state.posts) throw new Error('cannot reconcile'); return []; };
     await assert.rejects(publishReview({ ...f, env, delay: async () => {} }));
-    assert.equal(f.state.posts, scenario === 'stale' ? 0 : 1);
+    assert.equal(f.state.posts, scenario === 'closed' ? 0 : 1);
   });
 });
 
-test('recovery refuses unauthorized requesters, changed bases and matching pending reviews', async t => {
-  for (const scenario of ['unauthorized', 'base', 'pending']) await t.test(scenario, async () => {
+test('recovery refuses unauthorized requesters and matching pending reviews', async t => {
+  for (const scenario of ['unauthorized', 'pending']) await t.test(scenario, async () => {
     const f = setup();
     if (scenario === 'unauthorized') f.envelope.request.requester = 'mallory';
-    if (scenario === 'base') f.github.request = async () => ({ state: 'open', head: { sha: f.envelope.head }, base: { sha: 'c'.repeat(40) } });
     if (scenario === 'pending') f.state.reviews.push({ ...f.receipt, state: 'PENDING' });
     await assert.rejects(publishReview({ ...f, env }));
     assert.equal(f.state.posts, 0);
@@ -333,8 +332,8 @@ test('failed reconciliation retains the original POST error and both failure dia
   });
 });
 
-test('post-backoff reconciliation failure or changed PR never permits another POST', async t => {
-  for (const scenario of ['reconciliation', 'head', 'base', 'closed']) await t.test(scenario, async () => {
+test('post-backoff reconciliation failure or closed PR never permits another POST', async t => {
+  for (const scenario of ['reconciliation', 'closed']) await t.test(scenario, async () => {
     const f = setup();
     let delayed = false;
     const get = f.github.request;
@@ -346,8 +345,6 @@ test('post-backoff reconciliation failure or changed PR never permits another PO
     f.github.request = async (path, options) => {
       if (!options) {
         const pull = await get(path);
-        if (delayed && scenario === 'head') pull.head.sha = 'c'.repeat(40);
-        if (delayed && scenario === 'base') pull.base.sha = 'c'.repeat(40);
         if (delayed && scenario === 'closed') pull.state = 'closed';
         return pull;
       }
@@ -355,9 +352,41 @@ test('post-backoff reconciliation failure or changed PR never permits another PO
       throw Object.assign(new Error('transient failure'), { status: 503 });
     };
     await assert.rejects(publishReview({ ...f, env, delay: async () => { delayed = true; } }),
-      scenario === 'reconciliation' ? /post-backoff lookup failed/ : /refusing stale verdict/);
+      scenario === 'reconciliation' ? /post-backoff lookup failed/ : /not open; refusing publication/);
     assert.equal(f.state.posts, 1);
   });
+});
+
+test('head and base movement preserve the exact pinned publication before posting and during retry', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    for (const movement of ['head', 'base', 'both']) {
+      for (const duringRetry of [false, true]) await t.test(`${event}, ${movement}, retry=${duringRetry}`, async () => {
+        const f = setup(event);
+        f.envelope.payload.comments.push({ path: 'a.js', line: 1, side: 'RIGHT', body: 'Pinned finding.' });
+        const saved = structuredClone(f.envelope);
+        const move = () => {
+          f.state.stale = movement !== 'base';
+          f.state.movedBase = movement !== 'head';
+        };
+        if (!duringRetry) move();
+        const original = f.github.request;
+        f.github.request = async (path, options) => {
+          if (options?.method === 'POST') {
+            assert.equal(options.body, f.envelope.payload);
+            assert.deepEqual(options.body, saved.payload);
+            if (duringRetry && f.state.posts === 0) {
+              f.state.posts++;
+              throw new TypeError('response lost before commit');
+            }
+          }
+          return original(path, options);
+        };
+        assert.equal(await publishReview({ ...f, env, delay: async () => move() }), f.receipt);
+        assert.equal(f.state.posts, duringRetry ? 2 : 1);
+        assert.deepEqual(f.envelope, saved);
+      });
+    }
+  }
 });
 
 test('real CLI retains validated payload and publication-only recovery does not run a provider or duplicate review', async () => {
@@ -379,28 +408,38 @@ test('real CLI retains validated payload and publication-only recovery does not 
   } finally { await f.close(); }
 });
 
-test('publication rejection retains result, reports failure and exits nonzero; later recovery publishes exact payload', async () => {
-  const f = await fixture();
-  try {
-    f.state.publicationStatus = 422;
-    await assert.rejects(f.run({ mode: 'findings' }), /Fixture publication rejected/);
-    assert.equal(f.state.reviews.length, 0);
-    assert.match(f.state.posts.at(-1).body.body, /no successful publication was confirmed/);
-    const path = join(f.temp, 'publication.json');
-    const envelope = JSON.parse(await readFile(path, 'utf8'));
-    assert.equal(envelope.payload.event, 'REQUEST_CHANGES');
-    f.state.publicationStatus = undefined;
-    const recoveryEnv = { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' };
-    f.state.stale = true;
-    await assert.rejects(runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], { env: recoveryEnv }), /refusing stale verdict/);
-    assert.equal(f.state.reviews.length, 0);
-    f.state.stale = false;
-    await runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], {
-      env: recoveryEnv,
-    });
-    assert.equal(f.state.reviews.length, 1);
-    assert.deepEqual(f.state.posts.findLast(post => post.path.endsWith('/reviews')).body, envelope.payload);
-  } finally { await f.close(); }
+test('publication rejection retains result; CLI recovery after movement publishes exact payload and rejects closed PRs', async t => {
+  for (const mode of ['approve', 'findings']) await t.test(mode, async () => {
+    const f = await fixture();
+    try {
+      f.state.publicationStatus = 422;
+      await assert.rejects(f.run({ mode }), /Fixture publication rejected/);
+      assert.equal(f.state.reviews.length, 0);
+      assert.match(f.state.posts.at(-1).body.body, /no successful publication was confirmed/);
+      const path = join(f.temp, 'publication.json');
+      const retained = await readFile(path, 'utf8');
+      const envelope = JSON.parse(retained);
+      assert.equal(envelope.payload.event, mode === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES');
+      f.state.publicationStatus = undefined;
+      const recoveryEnv = { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' };
+      const recover = () => runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], { env: recoveryEnv });
+      f.state.stale = true;
+      f.state.movedBase = true;
+      f.state.closed = true;
+      const posts = f.state.posts.filter(post => post.path.endsWith('/reviews')).length;
+      await assert.rejects(recover(), /not open; refusing publication/);
+      assert.equal(f.state.posts.filter(post => post.path.endsWith('/reviews')).length, posts);
+      assert.equal(f.state.reviews.length, 0);
+      f.state.closed = false;
+      await recover();
+      assert.equal(f.state.reviews.length, 1);
+      assert.deepEqual(f.state.posts.findLast(post => post.path.endsWith('/reviews')).body, envelope.payload);
+      assert.equal(await readFile(path, 'utf8'), retained);
+      f.state.closed = true;
+      await recover();
+      assert.equal(f.state.reviews.length, 1, 'confirmed publication is reconciled even after closure');
+    } finally { await f.close(); }
+  });
 });
 
 test('default CLI result paths preserve a failed review when the next review succeeds', async () => {
