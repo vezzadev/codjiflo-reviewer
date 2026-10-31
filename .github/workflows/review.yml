@@ -155,7 +155,7 @@ jobs:
               ...context.repo, pull_number: context.issue.number, per_page: 100,
             });
             if (reviews.some(review => review.user?.type === 'Bot' &&
-              ['APPROVED', 'CHANGES_REQUESTED'].includes(review.state) &&
+              ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'].includes(review.state) &&
               review.body?.includes(workflowMarker))) return;
             const attempt = await github.rest.actions.getWorkflowRunAttempt({
               ...context.repo, run_id: context.runId, attempt_number: runAttempt,

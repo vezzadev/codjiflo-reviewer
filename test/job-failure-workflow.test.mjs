@@ -96,7 +96,7 @@ test('hosted reporter is idempotent for its run/attempt marker', async () => {
   assert.equal(posts.length, 0);
 });
 
-for (const state of ['APPROVED', 'CHANGES_REQUESTED']) {
+for (const state of ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']) {
   test(`hosted reporter does not report failure after confirmed ${state} publication`, async () => {
     const { posts, reads } = await report({ reviews: [{ user: bot, state, body: marker }] });
     assert.equal(posts.length, 0);
@@ -108,8 +108,10 @@ test('old attempts, pending reviews and user-authored lookalikes do not suppress
   const { posts } = await report({
     reviews: [
       { user: bot, state: 'APPROVED', body: '<!-- codjiflo-workflow:40601533783:1 -->' },
+      { user: bot, state: 'COMMENTED', body: '<!-- codjiflo-workflow:40601533783:1 -->' },
       { user: bot, state: 'PENDING', body: marker },
       { user: { type: 'User' }, state: 'APPROVED', body: marker },
+      { user: { type: 'User' }, state: 'COMMENTED', body: marker },
     ],
     comments: [
       { user: bot, body: '<!-- codjiflo-job-failure:40601533783:1 -->' },

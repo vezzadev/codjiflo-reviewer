@@ -29,8 +29,21 @@ function validate(envelope, env) {
   return envelope;
 }
 
-function confirmed(receipt, envelope) {
-  return Number.isSafeInteger(receipt?.id) && receipt.id > 0 && receipt.commit_id === envelope.head && publicationId(receipt.body) === publicationId(envelope.payload.body) && receipt.state === (envelope.payload.event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED');
+function withheldApproval(payload) {
+  return {
+    ...payload,
+    event: 'COMMENT',
+    body: '**Approval withheld:** The pull request head or base changed after this review was prepared. This review covers the original commits shown below and is published as a comment, not an approval.\n\n' + payload.body,
+  };
+}
+
+function confirmed(receipt, envelope, payload = envelope.payload) {
+  const state = { APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED', COMMENT: 'COMMENTED' }[payload.event];
+  return Number.isSafeInteger(receipt?.id) && receipt.id > 0 &&
+    receipt.commit_id === envelope.head &&
+    publicationId(receipt.body) === publicationId(payload.body) &&
+    receipt.state === state &&
+    (payload.event !== 'COMMENT' || receipt.body === payload.body);
 }
 
 // Reconcile ambiguous POSTs immediately and again after backoff before retrying.
@@ -50,13 +63,17 @@ export async function publishReview({ envelope, github, env = process.env, delay
       }
     }
   };
-  const reconcile = async postError => {
+  const reconcile = async (postError, postedPayload) => {
     try {
       const matches = (await read(() => github.list(`${pullPath}/reviews`))).filter(receipt =>
         publicationId(receipt.body) === identity);
       if (matches.length > 1) throw new Error('Multiple GitHub reviews have the publication identity; refusing ambiguous publication');
       const match = matches[0];
-      if (match && !confirmed(match, envelope)) throw new Error('Matching GitHub review has an invalid identity, head, ID or submitted state; refusing duplicate publication');
+      // Recovery has no live freshness dependency: recognize exactly our own
+      // approval downgrade, but validate an in-flight POST against what was sent.
+      const intendedDowngrade = !postedPayload && payload.event === 'APPROVE' &&
+        confirmed(match, envelope, withheldApproval(payload));
+      if (match && !confirmed(match, envelope, postedPayload ?? payload) && !intendedDowngrade) throw new Error('Matching GitHub review has an invalid identity, head, ID or submitted state; refusing duplicate publication');
       return match;
     } catch (error) {
       if (!postError) throw error;
@@ -70,22 +87,26 @@ export async function publishReview({ envelope, github, env = process.env, delay
   const existing = await reconcile();
   if (existing) return finish(existing);
   let postError;
+  let postedPayload;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) {
-      const found = await reconcile(postError);
+      const found = await reconcile(postError, postedPayload);
       if (found) return finish(found);
     }
-    // Movement does not retarget this verdict: publish the saved commit and
-    // payload unchanged, while still refusing a new submission on a closed PR.
+    // Recheck freshness immediately before each POST. Keep completed findings,
+    // but never publish an approval for a head or base that is no longer current.
     const latest = await read(() => github.request(pullPath));
     if (latest.state !== 'open') throw new Error('Pull request is not open; refusing publication');
+    postedPayload = payload.event === 'APPROVE' &&
+      (latest.head.sha !== head || latest.base.sha !== envelope.base)
+      ? withheldApproval(payload) : payload;
     try {
-      const receipt = await github.request(`${pullPath}/reviews`, { method: 'POST', body: payload });
-      if (!confirmed(receipt, envelope)) throw new Error('GitHub did not return a confirmed submitted review');
+      const receipt = await github.request(`${pullPath}/reviews`, { method: 'POST', body: postedPayload });
+      if (!confirmed(receipt, envelope, postedPayload)) throw new Error('GitHub did not return a confirmed submitted review');
       return finish(receipt);
     } catch (error) {
       postError = error;
-      const found = await reconcile(error);
+      const found = await reconcile(error, postedPayload);
       if (found) return finish(found);
       if (attempt === 2 || !transient(error)) throw error;
       await delay(1000 * (attempt + 1));

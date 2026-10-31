@@ -7,6 +7,7 @@ import { fixture } from './fixture.mjs';
 const { publishReview, reportPublicationFailure } = await import(process.env.CODJIFLO_PUBLICATION_MODULE || '../src/publication.mjs');
 
 const env = { CODJIFLO_APPROVED_USERS: 'alice' };
+const approvalWithheld = '**Approval withheld:** The pull request head or base changed after this review was prepared. This review covers the original commits shown below and is published as a comment, not an approval.\n\n';
 function setup(event = 'REQUEST_CHANGES') {
   const envelope = { version: 1, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'sol-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event, body: 'Review\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->', comments: [] } };
   const receipt = { id: 42, state: event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: envelope.head, body: envelope.payload.body };
@@ -14,7 +15,11 @@ function setup(event = 'REQUEST_CHANGES') {
   const github = {
     async list() { state.lists++; state.events.push('list'); return state.reviews; },
     async request(path, options) {
-      if (options?.method === 'POST') { state.posts++; state.events.push('post'); return receipt; }
+      if (options?.method === 'POST') {
+        state.posts++; state.events.push('post');
+        if (options.body.event === 'COMMENT') Object.assign(receipt, { state: 'COMMENTED', body: options.body.body });
+        return receipt;
+      }
       state.events.push('pull');
       return { state: state.closed ? 'closed' : 'open', head: { sha: state.stale ? 'c'.repeat(40) : envelope.head }, base: { sha: state.movedBase ? 'd'.repeat(40) : envelope.base } };
     },
@@ -357,7 +362,7 @@ test('post-backoff reconciliation failure or closed PR never permits another POS
   });
 });
 
-test('head and base movement preserve the exact pinned publication before posting and during retry', async t => {
+test('head and base movement downgrade only approvals, including after a transient POST', async t => {
   for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
     for (const movement of ['head', 'base', 'both']) {
       for (const duringRetry of [false, true]) await t.test(`${event}, ${movement}, retry=${duringRetry}`, async () => {
@@ -370,10 +375,15 @@ test('head and base movement preserve the exact pinned publication before postin
         };
         if (!duringRetry) move();
         const original = f.github.request;
+        const posted = [];
         f.github.request = async (path, options) => {
           if (options?.method === 'POST') {
-            assert.equal(options.body, f.envelope.payload);
-            assert.deepEqual(options.body, saved.payload);
+            posted.push(structuredClone(options.body));
+            const downgraded = event === 'APPROVE' && (!duringRetry || f.state.posts > 0);
+            assert.deepEqual(options.body, {
+              ...saved.payload,
+              ...(downgraded ? { event: 'COMMENT', body: approvalWithheld + saved.payload.body } : {}),
+            });
             if (duringRetry && f.state.posts === 0) {
               f.state.posts++;
               throw new TypeError('response lost before commit');
@@ -381,12 +391,124 @@ test('head and base movement preserve the exact pinned publication before postin
           }
           return original(path, options);
         };
-        assert.equal(await publishReview({ ...f, env, delay: async () => move() }), f.receipt);
+        const receipt = await publishReview({ ...f, env, delay: async () => move() });
+        assert.equal(receipt, f.receipt);
+        assert.equal(receipt.state, event === 'APPROVE' ? 'COMMENTED' : 'CHANGES_REQUESTED');
         assert.equal(f.state.posts, duringRetry ? 2 : 1);
+        assert.equal(posted.length, f.state.posts);
         assert.deepEqual(f.envelope, saved);
       });
     }
   }
+});
+
+test('unchanged approval posts the saved native approval without mutating the envelope', async () => {
+  const f = setup('APPROVE');
+  const saved = structuredClone(f.envelope);
+  const original = f.github.request;
+  f.github.request = async (path, options) => {
+    if (options?.method === 'POST') assert.deepEqual(options.body, saved.payload);
+    return original(path, options);
+  };
+  assert.equal((await publishReview({ ...f, env })).state, 'APPROVED');
+  assert.deepEqual(f.envelope, saved);
+});
+
+test('ambiguous downgraded POST reconciles by publication identity after later movement and closure', async () => {
+  const f = setup('APPROVE');
+  f.state.stale = true;
+  const saved = structuredClone(f.envelope);
+  const original = f.github.request;
+  f.github.request = async (path, options) => {
+    if (options?.method !== 'POST') return original(path, options);
+    const receipt = await original(path, options);
+    assert.equal(receipt.state, 'COMMENTED');
+    assert.equal(receipt.body, approvalWithheld + saved.payload.body);
+    f.state.reviews.push(receipt);
+    f.state.movedBase = true;
+    f.state.closed = true;
+    throw new TypeError('response lost after comment committed');
+  };
+  assert.equal(await publishReview({ ...f, env, delay: async () => {} }), f.receipt);
+  // The current PR can even return to the saved commits; reconciliation must
+  // identify the publication that happened, not recompute today's event.
+  f.state.stale = false;
+  f.state.movedBase = false;
+  assert.equal(await publishReview({ ...f, env }), f.receipt);
+  assert.equal(f.state.posts, 1);
+  assert.deepEqual(f.envelope, saved);
+});
+
+test('approval recovery accepts only the deterministic downgraded comment body', async t => {
+  for (const movement of [false, true]) {
+    for (const body of [
+      setup('APPROVE').envelope.payload.body,
+      `Unrelated comment\n${setup('APPROVE').envelope.payload.body}`,
+      `${approvalWithheld}Altered review\n${setup('APPROVE').envelope.payload.body}`,
+    ]) await t.test(`moved=${movement}, body=${body}`, async () => {
+      const f = setup('APPROVE');
+      f.state.stale = movement;
+      f.state.reviews.push({ ...f.receipt, state: 'COMMENTED', body });
+      await assert.rejects(publishReview({ ...f, env }));
+      assert.equal(f.state.posts, 0);
+    });
+  }
+});
+
+test('direct receipts must confirm the actual posted event, not the saved approval event', async t => {
+  for (const moved of [false, true]) await t.test(`moved=${moved}`, async () => {
+    const f = setup('APPROVE');
+    f.state.stale = moved;
+    const original = f.github.request;
+    f.github.request = async (path, options) => {
+      if (options?.method !== 'POST') return original(path, options);
+      f.state.posts++;
+      assert.equal(options.body.event, moved ? 'COMMENT' : 'APPROVE');
+      return { ...f.receipt, state: moved ? 'APPROVED' : 'COMMENTED', body: options.body.body };
+    };
+    await assert.rejects(publishReview({ ...f, env, delay: async () => {} }));
+    assert.equal(f.state.posts, 1);
+  });
+});
+
+test('reconciliation after a POST rejects receipts for an event other than the attempted payload', async t => {
+  for (const moved of [false, true]) {
+    for (const visibleAfterBackoff of [false, true]) await t.test(`moved=${moved}, afterBackoff=${visibleAfterBackoff}`, async () => {
+      const f = setup('APPROVE');
+      f.state.stale = moved;
+      const original = f.github.request;
+      const wrong = {
+        ...f.receipt,
+        state: moved ? 'APPROVED' : 'COMMENTED',
+        body: moved ? f.envelope.payload.body : approvalWithheld + f.envelope.payload.body,
+      };
+      f.github.request = async (path, options) => {
+        if (options?.method !== 'POST') return original(path, options);
+        f.state.posts++;
+        assert.equal(options.body.event, moved ? 'COMMENT' : 'APPROVE');
+        if (!visibleAfterBackoff) f.state.reviews.push(wrong);
+        throw new TypeError('response lost');
+      };
+      await assert.rejects(publishReview({
+        ...f, env,
+        delay: async () => { f.state.reviews.push(wrong); },
+      }));
+      assert.equal(f.state.posts, 1);
+    });
+  }
+});
+
+test('previously confirmed native verdicts reconcile after later head/base movement and closure', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
+    const f = setup(event);
+    f.state.reviews.push(f.receipt);
+    f.state.stale = true;
+    f.state.movedBase = true;
+    f.state.closed = true;
+    assert.equal(await publishReview({ ...f, env }), f.receipt);
+    assert.equal(f.state.posts, 0);
+    assert.deepEqual(f.state.events, ['list']);
+  });
 });
 
 test('real CLI retains validated payload and publication-only recovery does not run a provider or duplicate review', async () => {
@@ -408,7 +530,7 @@ test('real CLI retains validated payload and publication-only recovery does not 
   } finally { await f.close(); }
 });
 
-test('publication rejection retains result; CLI recovery after movement publishes exact payload and rejects closed PRs', async t => {
+test('publication rejection retains result; CLI recovery downgrades stale approvals and reconciles after closure', async t => {
   for (const mode of ['approve', 'findings']) await t.test(mode, async () => {
     const f = await fixture();
     try {
@@ -433,9 +555,15 @@ test('publication rejection retains result; CLI recovery after movement publishe
       f.state.closed = false;
       await recover();
       assert.equal(f.state.reviews.length, 1);
-      assert.deepEqual(f.state.posts.findLast(post => post.path.endsWith('/reviews')).body, envelope.payload);
+      const expected = mode === 'approve'
+        ? { ...envelope.payload, event: 'COMMENT', body: approvalWithheld + envelope.payload.body }
+        : envelope.payload;
+      assert.deepEqual(f.state.posts.findLast(post => post.path.endsWith('/reviews')).body, expected);
+      assert.equal(f.state.reviews[0].state, mode === 'approve' ? 'COMMENTED' : 'CHANGES_REQUESTED');
       assert.equal(await readFile(path, 'utf8'), retained);
       f.state.closed = true;
+      f.state.stale = false;
+      f.state.movedBase = false;
       await recover();
       assert.equal(f.state.reviews.length, 1, 'confirmed publication is reconciled even after closure');
     } finally { await f.close(); }

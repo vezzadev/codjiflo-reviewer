@@ -178,7 +178,7 @@ if (mode === 'fatal-exit') process.exit(1);
           response.end(JSON.stringify({ message: 'Fixture publication rejected' }));
           return;
         }
-        const receipt = { id: state.posts.length, commit_id: parsed.commit_id, body: parsed.body, state: parsed.event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED' };
+        const receipt = { id: state.posts.length, commit_id: parsed.commit_id, body: parsed.body, state: { APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED', COMMENT: 'COMMENTED' }[parsed.event] };
         state.reviews.push(receipt);
         response.end(JSON.stringify(receipt));
       } else response.end(JSON.stringify({ id: state.posts.length }));
