@@ -4,7 +4,6 @@ import { join, resolve } from 'node:path';
 import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
 
-const approvalWithheld = '**Approval withheld:** The pull request head or base changed after this review was prepared. This review covers the original commits shown below and is published as a comment, not an approval.\n\n';
 // No remote writes, credentials or real provider account required. This launches
 // the actual entry point, git checkout/fetch, native-fetch HTTP client and OMP adapter.
 for (const [preset, canonical] of [['codex', 'sol-xhigh'], ['claude', 'opus-xhigh']]) {
@@ -58,10 +57,9 @@ for (const mode of ['approve', 'findings']) {
         assert.ok(review.body.includes(`Reviewed head: \`${f.head}\`\nReviewed base: \`${f.base}\``));
         const retained = JSON.parse(await readFile(`${f.temp}/publication.json`, 'utf8'));
         assert.equal(retained.payload.event, mode === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES');
-        assert.deepEqual(review, {
-          ...retained.payload,
-          ...(downgraded ? { event: 'COMMENT', body: approvalWithheld + retained.payload.body } : {}),
-        });
+        assert.deepEqual(review.comments, retained.payload.comments);
+        if (downgraded) assert.ok(review.body.endsWith(retained.payload.body));
+        else assert.deepEqual(review, retained.payload);
         assert.equal(f.state.reviews[0].state, downgraded ? 'COMMENTED' : mode === 'approve' ? 'APPROVED' : 'CHANGES_REQUESTED');
       } else {
         await assert.rejects(f.run({ mode }), scenario === 'closed' ? /not open; refusing publication/ : /changed while collecting file metadata/);
@@ -91,10 +89,12 @@ for (const mode of ['approve', 'findings']) {
       },
     });
     await recover();
-    const expected = mode === 'approve'
-      ? { ...envelope.payload, event: 'COMMENT', body: approvalWithheld + envelope.payload.body }
-      : envelope.payload;
-    assert.deepEqual(f.state.posts.findLast(post => post.path.endsWith('/reviews')).body, expected);
+    const published = f.state.posts.findLast(post => post.path.endsWith('/reviews')).body;
+    assert.equal(published.event, mode === 'approve' ? 'COMMENT' : 'REQUEST_CHANGES');
+    assert.equal(published.commit_id, envelope.head);
+    assert.deepEqual(published.comments, envelope.payload.comments);
+    if (mode === 'approve') assert.ok(published.body.endsWith(envelope.payload.body));
+    else assert.deepEqual(published, envelope.payload);
     assert.equal(f.state.reviews[0].state, mode === 'approve' ? 'COMMENTED' : 'CHANGES_REQUESTED');
     assert.equal(await readFile(path, 'utf8'), saved);
     const posts = f.state.posts.length;

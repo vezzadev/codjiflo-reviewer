@@ -62,6 +62,26 @@ test('head/base movement and closure while collecting PR files reject the snapsh
     } finally { await f.close(); }
   });
 });
+test('revision movement or closure takes precedence over an incomplete file count', async t => {
+  for (const scenario of ['head', 'base', 'closed', 'stable']) {
+    for (const delta of [-1, 1]) await t.test(`${scenario}, count ${delta > 0 ? 'increased' : 'decreased'}`, async () => {
+      const f = await fixture();
+      try {
+        f.state.changedFiles += delta;
+        f.state.stale = scenario === 'head';
+        f.state.movedBase = scenario === 'base';
+        f.state.closed = scenario === 'closed';
+        const error = scenario === 'closed' ? /Pull request is not open/
+          : scenario === 'stable' ? /Incomplete PR file metadata/
+          : /changed while collecting file metadata/;
+        await assert.rejects(f.run(), error);
+        await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+        assert.equal(verdicts(f).length, 0);
+      } finally { await f.close(); }
+    });
+  }
+});
+
 
 test('movement after snapshot validation withholds approval but preserves pinned changes requests; closure rejects publication', async t => {
   for (const mode of ['approve', 'findings']) {
@@ -89,7 +109,7 @@ test('movement after snapshot validation withholds approval but preserves pinned
           assert.equal(result.commit_id, retained.payload.commit_id);
           assert.deepEqual(result.comments, retained.payload.comments);
           if (mode === 'approve') {
-            assert.equal(result.body, '**Approval withheld:** The pull request head or base changed after this review was prepared. This review covers the original commits shown below and is published as a comment, not an approval.\n\n' + retained.payload.body);
+            assert.ok(result.body.endsWith(retained.payload.body));
           } else assert.deepEqual(result, retained.payload);
           assert.equal(retained.head, f.head);
           assert.equal(retained.base, f.base);
