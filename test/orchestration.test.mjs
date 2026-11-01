@@ -35,16 +35,82 @@ test('native publication records the workflow attempt without moving its final i
   } finally { await f.close(); }
 });
 
-test('OMP failures, malformed results, stale heads and tool errors never approve', async t => {
-  for (const scenario of ['failure', 'malformed', 'stale', 'error-result']) await t.test(scenario, async () => {
+test('OMP failures, malformed results and tool errors never approve', async t => {
+  for (const scenario of ['failure', 'malformed', 'error-result']) await t.test(scenario, async () => {
     const f = await fixture();
     try {
-      f.state.stale = scenario === 'stale';
       await assert.rejects(f.run({ mode: scenario, preset: scenario === 'error-result' ? 'opus-xhigh' : 'sol-xhigh' }));
       assert.equal(verdicts(f).length, 0);
       assert.match(f.state.posts.at(-1).body.body, /failed/);
     } finally { await f.close(); }
   });
+});
+
+test('head/base movement and closure while collecting PR files reject the snapshot before invoking OMP', async t => {
+  for (const scenario of ['head', 'base', 'both', 'closed']) await t.test(scenario, async () => {
+    const f = await fixture();
+    try {
+      f.state.movement = scenario;
+      await assert.rejects(f.run(), scenario === 'closed' ? /Pull request is not open/ : /changed while collecting file metadata/);
+      await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+      assert.equal(verdicts(f).length, 0);
+      assert.equal(f.state.reads, 2, 'snapshot mismatch must not start an automatic retry');
+      assert.match(f.state.posts.at(-1).body.body, scenario === 'closed' ? /Pull request is not open/ : /request a new review/);
+      if (scenario === 'closed') assert.doesNotMatch(f.state.posts.at(-1).body.body, /request a new review/);
+    } finally { await f.close(); }
+  });
+});
+test('revision movement or closure takes precedence over an incomplete file count', async t => {
+  for (const scenario of ['head', 'base', 'both', 'closed', 'none']) {
+    for (const delta of [-1, 1]) await t.test(`${scenario}, count ${delta > 0 ? 'increased' : 'decreased'}`, async () => {
+      const f = await fixture();
+      try {
+        f.state.changedFiles += delta;
+        f.state.movement = scenario;
+        const error = scenario === 'closed' ? /Pull request is not open/
+          : scenario === 'none' ? /Incomplete PR file metadata/
+          : /changed while collecting file metadata/;
+        await assert.rejects(f.run(), error);
+        await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
+        assert.equal(verdicts(f).length, 0);
+      } finally { await f.close(); }
+    });
+  }
+});
+
+
+test('movement after snapshot validation makes either verdict neutral; closure rejects publication', async t => {
+  for (const mode of ['approve', 'findings']) {
+    for (const scenario of ['head', 'base', 'both', 'closed']) await t.test(`${mode}, ${scenario}`, async () => {
+      const f = await fixture();
+      try {
+        f.state.moveAtRead = 3;
+        f.state.movement = scenario;
+        if (scenario === 'closed') {
+          await assert.rejects(f.run({ mode }), /not open; refusing publication/);
+          assert.equal(verdicts(f).length, 0);
+        } else {
+          await f.run({ mode });
+          assert.equal(verdicts(f).length, 1);
+          const result = verdicts(f)[0].body;
+          const retained = JSON.parse(await readFile(join(f.temp, 'publication.json'), 'utf8'));
+          assert.equal(result.event, 'COMMENT');
+          assert.equal(f.state.reviews[0].state, 'COMMENTED');
+          assert.equal(result.commit_id, f.head);
+          assert.ok(result.body.includes(`Reviewed range: \`${f.base}..${f.head}\`\nPR base snapshot: \`${f.base}\``));
+          const marker = JSON.parse(/<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/.exec(result.body)[1]);
+          assert.deepEqual(marker, { head: f.head, base: f.base, preset: 'sol-xhigh' });
+          assert.equal(retained.payload.event, mode === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES');
+          assert.equal(result.commit_id, retained.payload.commit_id);
+          assert.deepEqual(result.comments, retained.payload.comments);
+          assert.ok(result.body.endsWith(retained.payload.body));
+          assert.equal(retained.head, f.head);
+          assert.equal(retained.base, f.base);
+        }
+        assert.match(await readFile(f.capture, 'utf8'), /final_review/);
+      } finally { await f.close(); }
+    });
+  }
 });
 
 test('real failure publication redacts known publication and provider secrets without passing publication tokens to reviewer', async () => {
@@ -275,6 +341,7 @@ test('repository instruction identity governs successful incremental baselines',
       assert.equal(result.event, 'APPROVE');
       if (changed) {
         assert.match(result.body, /Scope: \*\*full\*\* \(repository review instructions changed since the previous approval\)/);
+        assert.ok(result.body.includes(`Reviewed range: \`${f.base}..${f.head}\`\nPR base snapshot: \`${f.base}\``));
         assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
         assert.ok(scopeDiff.includes('-old\n'));
         assert.ok(scopeDiff.includes('+new\n'));
@@ -282,6 +349,7 @@ test('repository instruction identity governs successful incremental baselines',
         assert.ok(scopeDiff.includes('+changed\n'));
       } else {
         assert.match(result.body, /Scope: \*\*incremental\*\* \(previous approval is an ancestor on the same base\)/);
+        assert.ok(result.body.includes(`Reviewed range: \`${f.previous}..${f.head}\`\nPR base snapshot: \`${f.base}\``));
         assert.ok(captured.includes(`git diff ${f.previous} ${f.head}`));
         assert.ok(!scopeDiff.includes('-old\n'));
         assert.ok(!scopeDiff.includes('+new\n'));
@@ -368,6 +436,24 @@ test('ancestor approval, explicit full, PAT blockers, same head and changed pres
       assert.equal(verdicts(f).length, 1);
     } finally { await f.close(); }
   });
+});
+
+test('a latest marked withheld-approval COMMENTED review prevents reuse of an earlier approval', async () => {
+  const f = await fixture();
+  try {
+    const marked = { commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` };
+    f.state.reviews = [
+      { ...marked, state: 'APPROVED' },
+      { ...marked, state: 'COMMENTED' },
+    ];
+    await f.run();
+    assert.equal(verdicts(f).length, 1);
+    assert.match(verdicts(f)[0].body.body, /Scope: \*\*full\*\* \(no usable successful baseline\)/);
+    const captured = await readFile(f.capture, 'utf8');
+    assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
+    assert.ok(captured.includes('-old\n'));
+    assert.ok(captured.includes('+new\n'));
+  } finally { await f.close(); }
 });
 
 test('full and incremental native coordinates use API patches rather than local diff', async t => {

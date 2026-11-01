@@ -11,7 +11,8 @@ import { sanitizeGitEnv } from './git-environment.mjs';
 
 export const MARKER = /<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/;
 export function baseline(reviews, base, preset) {
-  // The latest marked review governs, including PAT-authored blockers.
+  // The latest marked review governs; blockers and withheld-approval comments
+  // both prevent reuse of an earlier approval.
   const prior = reviews.filter(review => MARKER.test(review.body ?? '')).at(-1);
   if (!prior || prior.state !== 'APPROVED') return null;
   try {
@@ -141,6 +142,13 @@ export async function review({ request, github, env = process.env, reviewer = ru
     }
     if (!Number.isInteger(pr.changed_files) || pr.changed_files > 3000) throw new Error('Cannot obtain complete PR file metadata (GitHub files API limit: 3000)');
     const metadata = await github.list(`${pullPath}/files`);
+    // The files endpoint follows the live PR, unlike our pinned Git objects.
+    // Bracket its paginated snapshot before spending a model invocation.
+    const snapshot = await github.request(pullPath);
+    if (snapshot.state !== 'open') throw new Error('Pull request is not open');
+    if (snapshot.head.sha !== head || snapshot.base.sha !== base) {
+      throw new Error('Pull request changed while collecting file metadata; request a new review');
+    }
     if (metadata.length !== pr.changed_files || new Set(metadata.map(file => file.filename)).size !== metadata.length) throw new Error('Incomplete PR file metadata');
     const files = filesFromApi(metadata);
     const diff = await git(['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', scope, head, '--']);
@@ -156,7 +164,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
       `\n<!-- codjiflo-workflow:${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT} -->` : '';
     const envelope = { version: 1, request, head, base, payload: {
       commit_id: head, event: result.verdict,
-      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nScope: **${mode}** (${reason}).\n\n${marker}${workflowMarker}\n<!-- codjiflo-publication:${publication} -->`,
+      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nReviewed range: \`${scope}..${head}\`\nPR base snapshot: \`${base}\`\n\nScope: **${mode}** (${reason}).\n\n${marker}${workflowMarker}\n<!-- codjiflo-publication:${publication} -->`,
       comments,
     } };
     await writeFile(resultPath, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600, ...(output === undefined ? { flag: 'wx' } : {}) });

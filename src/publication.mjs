@@ -29,8 +29,29 @@ function validate(envelope, env) {
   return envelope;
 }
 
-function confirmed(receipt, envelope) {
-  return Number.isSafeInteger(receipt?.id) && receipt.id > 0 && receipt.commit_id === envelope.head && publicationId(receipt.body) === publicationId(envelope.payload.body) && receipt.state === (envelope.payload.event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED');
+const withholdingNotices = {
+  APPROVE: '**Approval withheld:** The pull request head or base changed after this review was prepared. This review covers the original commits shown below and is published as a comment, not an approval.',
+  REQUEST_CHANGES: '**Change request withheld:** The pull request head or base changed after this review was prepared. This review covers the original commits shown below and is published as a comment, not a change request.',
+};
+
+function withheldReview(payload) {
+  return {
+    ...payload,
+    event: 'COMMENT',
+    body: withholdingNotices[payload.event] + '\n\n' + payload.body,
+  };
+}
+
+function confirmed(receipt, envelope, payload = envelope.payload) {
+  const notice = withholdingNotices[envelope.payload.event];
+  const state = { APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED', COMMENT: 'COMMENTED' }[payload.event];
+  return Number.isSafeInteger(receipt?.id) && receipt.id > 0 &&
+    receipt.commit_id === envelope.head &&
+    publicationId(receipt.body) === publicationId(payload.body) &&
+    receipt.state === state &&
+    (payload.event !== 'COMMENT' ||
+      (receipt.body.startsWith(notice) &&
+        /^\r?\n\r?\n/.test(receipt.body.slice(notice.length, notice.length + 4))));
 }
 
 // Reconcile ambiguous POSTs immediately and again after backoff before retrying.
@@ -39,6 +60,8 @@ function confirmed(receipt, envelope) {
 export async function publishReview({ envelope, github, env = process.env, delay = sleep }) {
   validate(envelope, env);
   const { request, head, base, payload } = envelope;
+  let withheld;
+  const downgradedPayload = () => withheld ??= withheldReview(payload);
   const pullPath = `/repos/${request.repo}/pulls/${request.number}`;
   const identity = publicationId(payload.body);
   const read = async operation => {
@@ -56,7 +79,9 @@ export async function publishReview({ envelope, github, env = process.env, delay
         publicationId(receipt.body) === identity);
       if (matches.length > 1) throw new Error('Multiple GitHub reviews have the publication identity; refusing ambiguous publication');
       const match = matches[0];
-      if (match && !confirmed(match, envelope)) throw new Error('Matching GitHub review has an invalid identity, head, ID or submitted state; refusing duplicate publication');
+      // Both outcomes remain valid across recovery and ambiguous POST retries:
+      // an earlier attempt may become visible after freshness changes the event.
+      if (match && !confirmed(match, envelope) && !confirmed(match, envelope, downgradedPayload())) throw new Error('Matching GitHub review has an invalid identity, head, ID or submitted state; refusing duplicate publication');
       return match;
     } catch (error) {
       if (!postError) throw error;
@@ -75,11 +100,16 @@ export async function publishReview({ envelope, github, env = process.env, delay
       const found = await reconcile(postError);
       if (found) return finish(found);
     }
+    // Recheck freshness immediately before each POST. Keep completed findings,
+    // but never change native approval or blocking state for outdated commits.
     const latest = await read(() => github.request(pullPath));
-    if (latest.head.sha !== head || latest.base.sha !== base || latest.state !== 'open') throw new Error('Pull request changed during review; refusing stale verdict');
+    if (latest.state !== 'open') throw new Error('Pull request is not open; refusing publication');
+    const postedPayload = latest.head.sha !== head || latest.base.sha !== base
+      ? downgradedPayload() : payload;
     try {
-      const receipt = await github.request(`${pullPath}/reviews`, { method: 'POST', body: payload });
-      if (!confirmed(receipt, envelope)) throw new Error('GitHub did not return a confirmed submitted review');
+      // A direct receipt must confirm the exact event sent by this attempt.
+      const receipt = await github.request(`${pullPath}/reviews`, { method: 'POST', body: postedPayload });
+      if (!confirmed(receipt, envelope, postedPayload)) throw new Error('GitHub did not return a confirmed submitted review');
       return finish(receipt);
     } catch (error) {
       postError = error;
