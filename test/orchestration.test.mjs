@@ -47,12 +47,10 @@ test('OMP failures, malformed results and tool errors never approve', async t =>
 });
 
 test('head/base movement and closure while collecting PR files reject the snapshot before invoking OMP', async t => {
-  for (const scenario of ['head', 'base', 'closed']) await t.test(scenario, async () => {
+  for (const scenario of ['head', 'base', 'both', 'closed']) await t.test(scenario, async () => {
     const f = await fixture();
     try {
-      f.state.stale = scenario === 'head';
-      f.state.movedBase = scenario === 'base';
-      f.state.closed = scenario === 'closed';
+      f.state.movement = scenario;
       await assert.rejects(f.run(), scenario === 'closed' ? /Pull request is not open/ : /changed while collecting file metadata/);
       await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
       assert.equal(verdicts(f).length, 0);
@@ -63,16 +61,14 @@ test('head/base movement and closure while collecting PR files reject the snapsh
   });
 });
 test('revision movement or closure takes precedence over an incomplete file count', async t => {
-  for (const scenario of ['head', 'base', 'closed', 'stable']) {
+  for (const scenario of ['head', 'base', 'both', 'closed', 'none']) {
     for (const delta of [-1, 1]) await t.test(`${scenario}, count ${delta > 0 ? 'increased' : 'decreased'}`, async () => {
       const f = await fixture();
       try {
         f.state.changedFiles += delta;
-        f.state.stale = scenario === 'head';
-        f.state.movedBase = scenario === 'base';
-        f.state.closed = scenario === 'closed';
+        f.state.movement = scenario;
         const error = scenario === 'closed' ? /Pull request is not open/
-          : scenario === 'stable' ? /Incomplete PR file metadata/
+          : scenario === 'none' ? /Incomplete PR file metadata/
           : /changed while collecting file metadata/;
         await assert.rejects(f.run(), error);
         await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
@@ -83,15 +79,13 @@ test('revision movement or closure takes precedence over an incomplete file coun
 });
 
 
-test('movement after snapshot validation withholds approval but preserves pinned changes requests; closure rejects publication', async t => {
+test('movement after snapshot validation makes either verdict neutral; closure rejects publication', async t => {
   for (const mode of ['approve', 'findings']) {
     for (const scenario of ['head', 'base', 'both', 'closed']) await t.test(`${mode}, ${scenario}`, async () => {
       const f = await fixture();
       try {
         f.state.moveAtRead = 3;
-        f.state.stale = scenario === 'head' || scenario === 'both';
-        f.state.movedBase = scenario === 'base' || scenario === 'both';
-        f.state.closed = scenario === 'closed';
+        f.state.movement = scenario;
         if (scenario === 'closed') {
           await assert.rejects(f.run({ mode }), /not open; refusing publication/);
           assert.equal(verdicts(f).length, 0);
@@ -100,17 +94,16 @@ test('movement after snapshot validation withholds approval but preserves pinned
           assert.equal(verdicts(f).length, 1);
           const result = verdicts(f)[0].body;
           const retained = JSON.parse(await readFile(join(f.temp, 'publication.json'), 'utf8'));
-          assert.equal(result.event, mode === 'approve' ? 'COMMENT' : 'REQUEST_CHANGES');
+          assert.equal(result.event, 'COMMENT');
+          assert.equal(f.state.reviews[0].state, 'COMMENTED');
           assert.equal(result.commit_id, f.head);
-          assert.ok(result.body.includes(`Reviewed head: \`${f.head}\`\nReviewed base: \`${f.base}\``));
+          assert.ok(result.body.includes(`Reviewed range: \`${f.base}..${f.head}\`\nPR base snapshot: \`${f.base}\``));
           const marker = JSON.parse(/<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/.exec(result.body)[1]);
           assert.deepEqual(marker, { head: f.head, base: f.base, preset: 'sol-xhigh' });
           assert.equal(retained.payload.event, mode === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES');
           assert.equal(result.commit_id, retained.payload.commit_id);
           assert.deepEqual(result.comments, retained.payload.comments);
-          if (mode === 'approve') {
-            assert.ok(result.body.endsWith(retained.payload.body));
-          } else assert.deepEqual(result, retained.payload);
+          assert.ok(result.body.endsWith(retained.payload.body));
           assert.equal(retained.head, f.head);
           assert.equal(retained.base, f.base);
         }
@@ -348,6 +341,7 @@ test('repository instruction identity governs successful incremental baselines',
       assert.equal(result.event, 'APPROVE');
       if (changed) {
         assert.match(result.body, /Scope: \*\*full\*\* \(repository review instructions changed since the previous approval\)/);
+        assert.ok(result.body.includes(`Reviewed range: \`${f.base}..${f.head}\`\nPR base snapshot: \`${f.base}\``));
         assert.ok(captured.includes(`git diff ${f.base} ${f.head}`));
         assert.ok(scopeDiff.includes('-old\n'));
         assert.ok(scopeDiff.includes('+new\n'));
@@ -355,6 +349,7 @@ test('repository instruction identity governs successful incremental baselines',
         assert.ok(scopeDiff.includes('+changed\n'));
       } else {
         assert.match(result.body, /Scope: \*\*incremental\*\* \(previous approval is an ancestor on the same base\)/);
+        assert.ok(result.body.includes(`Reviewed range: \`${f.previous}..${f.head}\`\nPR base snapshot: \`${f.base}\``));
         assert.ok(captured.includes(`git diff ${f.previous} ${f.head}`));
         assert.ok(!scopeDiff.includes('-old\n'));
         assert.ok(!scopeDiff.includes('+new\n'));

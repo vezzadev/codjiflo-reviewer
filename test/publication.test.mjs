@@ -10,7 +10,7 @@ const env = { CODJIFLO_APPROVED_USERS: 'alice' };
 function setup(event = 'REQUEST_CHANGES') {
   const envelope = { version: 1, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'sol-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event, body: 'Review\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->', comments: [] } };
   const receipt = { id: 42, state: event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: envelope.head, body: envelope.payload.body };
-  const state = { posts: 0, lists: 0, reviews: [], stale: false, events: [] };
+  const state = { posts: 0, lists: 0, reviews: [], movement: 'none', events: [] };
   const github = {
     async list() { state.lists++; state.events.push('list'); return state.reviews; },
     async request(path, options) {
@@ -20,7 +20,7 @@ function setup(event = 'REQUEST_CHANGES') {
         return receipt;
       }
       state.events.push('pull');
-      return { state: state.closed ? 'closed' : 'open', head: { sha: state.stale ? 'c'.repeat(40) : envelope.head }, base: { sha: state.movedBase ? 'd'.repeat(40) : envelope.base } };
+      return { state: state.movement === 'closed' ? 'closed' : 'open', head: { sha: ['head', 'both'].includes(state.movement) ? 'c'.repeat(40) : envelope.head }, base: { sha: ['base', 'both'].includes(state.movement) ? 'd'.repeat(40) : envelope.base } };
     },
   };
   return { envelope, receipt, state, github };
@@ -30,13 +30,14 @@ function assertPublishedPayload(actual, saved, downgraded) {
   if (!downgraded) return assert.deepEqual(actual, saved);
   assert.deepEqual({ ...actual, event: saved.event, body: saved.body }, saved);
   assert.equal(actual.event, 'COMMENT');
-  assert.match(actual.body, /^\*\*Approval withheld:\*\* [^\r\n]+\n\n/);
+  const verdict = saved.event === 'APPROVE' ? 'Approval' : 'Change request';
+  assert.match(actual.body, new RegExp(`^\\*\\*${verdict} withheld:\\*\\* [^\\r\\n]+\\n\\n`));
   assert.ok(actual.body.endsWith('\n\n' + saved.body), 'original review and publication identity are retained');
 }
 
-async function downgradedReceipt() {
-  const f = setup('APPROVE');
-  f.state.stale = true;
+async function downgradedReceipt(event) {
+  const f = setup(event);
+  f.state.movement = 'head';
   return publishReview({ ...f, env });
 }
 
@@ -166,7 +167,7 @@ test('failed reconciliation, permanent rejection, closed PR and unconfirmed rece
   for (const scenario of ['reconciliation', 'permanent', 'closed', 'unconfirmed', 'pending']) await t.test(scenario, async () => {
     const f = setup();
     const get = f.github.request;
-    if (scenario === 'closed') f.state.closed = true;
+    if (scenario === 'closed') f.state.movement = 'closed';
     f.github.request = async (path, options) => {
       if (!options) return get(path);
       f.state.posts++;
@@ -375,24 +376,21 @@ test('post-backoff reconciliation failure or closed PR never permits another POS
   });
 });
 
-test('head and base movement downgrade only approvals, including after a transient POST', async t => {
+test('head and base movement downgrade both native verdicts, including after a transient POST', async t => {
   for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
     for (const movement of ['head', 'base', 'both']) {
       for (const duringRetry of [false, true]) await t.test(`${event}, ${movement}, retry=${duringRetry}`, async () => {
         const f = setup(event);
         f.envelope.payload.comments.push({ path: 'a.js', line: 1, side: 'RIGHT', body: 'Pinned finding.' });
         const saved = structuredClone(f.envelope);
-        const move = () => {
-          f.state.stale = movement !== 'base';
-          f.state.movedBase = movement !== 'head';
-        };
+        const move = () => { f.state.movement = movement; };
         if (!duringRetry) move();
         const original = f.github.request;
         const posted = [];
         f.github.request = async (path, options) => {
           if (options?.method === 'POST') {
             posted.push(structuredClone(options.body));
-            const downgraded = event === 'APPROVE' && (!duringRetry || f.state.posts > 0);
+            const downgraded = !duringRetry || f.state.posts > 0;
             assertPublishedPayload(options.body, saved.payload, downgraded);
             if (duringRetry && f.state.posts === 0) {
               f.state.posts++;
@@ -403,7 +401,7 @@ test('head and base movement downgrade only approvals, including after a transie
         };
         const receipt = await publishReview({ ...f, env, delay: async () => move() });
         assert.equal(receipt, f.receipt);
-        assert.equal(receipt.state, event === 'APPROVE' ? 'COMMENTED' : 'CHANGES_REQUESTED');
+        assert.equal(receipt.state, 'COMMENTED');
         assert.equal(f.state.posts, duringRetry ? 2 : 1);
         assert.equal(posted.length, f.state.posts);
         assert.deepEqual(f.envelope, saved);
@@ -412,166 +410,210 @@ test('head and base movement downgrade only approvals, including after a transie
   }
 });
 
-test('unchanged approval posts the saved native approval without mutating the envelope', async () => {
-  const f = setup('APPROVE');
-  const saved = structuredClone(f.envelope);
-  const original = f.github.request;
-  f.github.request = async (path, options) => {
-    if (options?.method === 'POST') assert.deepEqual(options.body, saved.payload);
-    return original(path, options);
-  };
-  assert.equal((await publishReview({ ...f, env })).state, 'APPROVED');
-  assert.deepEqual(f.envelope, saved);
+test('unchanged verdicts post the saved native event without mutating the envelope', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
+    const f = setup(event);
+    const saved = structuredClone(f.envelope);
+    const original = f.github.request;
+    f.github.request = async (path, options) => {
+      if (options?.method === 'POST') assert.equal(options.body, f.envelope.payload);
+      return original(path, options);
+    };
+    assert.equal((await publishReview({ ...f, env })).state, event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED');
+    assert.deepEqual(f.envelope, saved);
+  });
 });
 
-test('ambiguous downgraded POST reconciles by publication identity after later movement and closure', async () => {
-  const f = setup('APPROVE');
-  f.state.stale = true;
-  const saved = structuredClone(f.envelope);
-  const original = f.github.request;
-  f.github.request = async (path, options) => {
-    if (options?.method !== 'POST') return original(path, options);
-    const receipt = await original(path, options);
-    assert.equal(receipt.state, 'COMMENTED');
-    assertPublishedPayload(options.body, saved.payload, true);
-    f.state.reviews.push(receipt);
-    f.state.movedBase = true;
-    f.state.closed = true;
-    throw new TypeError('response lost after comment committed');
-  };
-  assert.equal(await publishReview({ ...f, env, delay: async () => {} }), f.receipt);
-  // The current PR can even return to the saved commits; reconciliation must
-  // identify the publication that happened, not recompute today's event.
-  f.state.stale = false;
-  f.state.movedBase = false;
-  assert.equal(await publishReview({ ...f, env }), f.receipt);
-  assert.equal(f.state.posts, 1);
-  assert.deepEqual(f.envelope, saved);
+test('ambiguous downgraded POST reconciles both verdicts after later movement and closure', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
+    const f = setup(event);
+    f.state.movement = 'head';
+    const saved = structuredClone(f.envelope);
+    const original = f.github.request;
+    f.github.request = async (path, options) => {
+      if (options?.method !== 'POST') return original(path, options);
+      const receipt = await original(path, options);
+      assert.equal(receipt.state, 'COMMENTED');
+      assertPublishedPayload(options.body, saved.payload, true);
+      f.state.reviews.push(receipt);
+      f.state.movement = 'closed';
+      throw new TypeError('response lost after comment committed');
+    };
+    assert.equal(await publishReview({ ...f, env, delay: async () => {} }), f.receipt);
+    // Reconciliation identifies the publication, not today's freshness.
+    f.state.movement = 'none';
+    assert.equal(await publishReview({ ...f, env }), f.receipt);
+    assert.equal(f.state.posts, 1);
+    assert.deepEqual(f.envelope, saved);
+  });
 });
 
-test('approval recovery rejects comments without the withholding prefix and paragraph structure', async t => {
-  const valid = await downgradedReceipt();
-  for (const movement of [false, true]) {
-    for (const body of [
-      setup('APPROVE').envelope.payload.body,
-      `Unrelated comment\n${setup('APPROVE').envelope.payload.body}`,
-      valid.body.replace('**Approval withheld:**', '**Not withheld:**'),
-      `Quoted notice\n${valid.body}`,
-      valid.body.replace('\n\n', '\n'),
-    ]) await t.test(`moved=${movement}, body=${body}`, async () => {
-      const f = setup('APPROVE');
-      f.state.stale = movement;
-      f.state.reviews.push({ ...f.receipt, state: 'COMMENTED', body });
-      await assert.rejects(publishReview({ ...f, env }));
-      assert.equal(f.state.posts, 0);
-    });
+test('both verdicts reject COMMENT receipts without the matching withholding prefix and paragraph structure', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    const valid = await downgradedReceipt(event);
+    const other = await downgradedReceipt(event === 'APPROVE' ? 'REQUEST_CHANGES' : 'APPROVE');
+    for (const recovery of [false, true]) {
+      for (const body of [
+        setup(event).envelope.payload.body,
+        `Unrelated comment\n${setup(event).envelope.payload.body}`,
+        valid.body.replace('withheld:', 'not withheld:'),
+        other.body,
+        `Quoted notice\n${valid.body}`,
+        valid.body.replace('\n\n', '\n'),
+      ]) await t.test(`${event}, recovery=${recovery}, body=${body}`, async () => {
+        const f = setup(event);
+        f.state.movement = 'head';
+        const invalid = { ...valid, body };
+        if (recovery) f.state.reviews.push(invalid);
+        const original = f.github.request;
+        f.github.request = async (path, options) => {
+          if (options?.method !== 'POST') return original(path, options);
+          f.state.posts++;
+          return invalid;
+        };
+        await assert.rejects(publishReview({ ...f, env }));
+        assert.equal(f.state.posts, recovery ? 0 : 1);
+      });
+    }
   }
 });
 
 test('withheld comment confirmation tolerates CRLF and trailing normalization across publication paths', async t => {
-  const valid = await downgradedReceipt();
-  for (const scenario of ['direct', 'recovery', 'ambiguous']) await t.test(scenario, async () => {
-    const f = setup('APPROVE');
-    f.state.stale = true;
-    f.envelope.payload.body = f.envelope.payload.body.replaceAll('\n', '\r\n') + '\r\n';
-    const saved = structuredClone(f.envelope);
-    const normalized = { ...valid, body: valid.body.replaceAll('\n', '\r\n') + '\r\n \t\r\n' };
-    if (scenario === 'recovery') f.state.reviews.push(normalized);
-    const original = f.github.request;
-    f.github.request = async (path, options) => {
-      if (options?.method !== 'POST') return original(path, options);
-      f.state.posts++;
-      assertPublishedPayload(options.body, saved.payload, true);
-      if (scenario === 'ambiguous') {
-        f.state.reviews.push(normalized);
-        throw new TypeError('response lost after normalized comment committed');
-      }
-      return normalized;
-    };
-    assert.equal(await publishReview({ ...f, env, delay: async () => {} }), normalized);
-    assert.equal(f.state.posts, scenario === 'recovery' ? 0 : 1);
-    assert.deepEqual(f.envelope, saved);
-  });
-});
-
-test('withheld comment confirmation rejects wrong identity, head, ID and state', async t => {
-  const valid = await downgradedReceipt();
-  for (const scenario of ['uuid', 'head', 'missing-id', 'zero-id', 'string-id', 'unsafe-id', 'pending', 'approved', 'changes-requested']) {
-    // APPROVED is a valid original outcome in recovery, not a direct COMMENT receipt.
-    for (const recovery of scenario === 'approved' ? [false] : [false, true]) await t.test(`${scenario}, recovery=${recovery}`, async () => {
-      const f = setup('APPROVE');
-      f.state.stale = true;
-      const invalid = { ...valid };
-      if (scenario === 'uuid') invalid.body = invalid.body.replace('123456789abc', '123456789abd');
-      if (scenario === 'head') invalid.commit_id = 'c'.repeat(40);
-      if (scenario === 'missing-id') delete invalid.id;
-      if (scenario === 'zero-id') invalid.id = 0;
-      if (scenario === 'string-id') invalid.id = '42';
-      if (scenario === 'unsafe-id') invalid.id = Number.MAX_SAFE_INTEGER + 1;
-      if (scenario === 'pending') invalid.state = 'PENDING';
-      if (scenario === 'approved') invalid.state = 'APPROVED';
-      if (scenario === 'changes-requested') invalid.state = 'CHANGES_REQUESTED';
-      if (recovery) f.state.reviews.push(invalid);
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    const valid = await downgradedReceipt(event);
+    for (const scenario of ['direct', 'recovery', 'ambiguous']) await t.test(`${event}, ${scenario}`, async () => {
+      const f = setup(event);
+      f.state.movement = 'head';
+      f.envelope.payload.body = f.envelope.payload.body.replaceAll('\n', '\r\n') + '\r\n';
+      const saved = structuredClone(f.envelope);
+      const normalized = { ...valid, body: valid.body.replaceAll('\n', '\r\n') + '\r\n \t\r\n' };
+      if (scenario === 'recovery') f.state.reviews.push(normalized);
       const original = f.github.request;
       f.github.request = async (path, options) => {
         if (options?.method !== 'POST') return original(path, options);
         f.state.posts++;
-        return invalid;
+        assertPublishedPayload(options.body, saved.payload, true);
+        if (scenario === 'ambiguous') {
+          f.state.reviews.push(normalized);
+          throw new TypeError('response lost after normalized comment committed');
+        }
+        return normalized;
       };
-      await assert.rejects(publishReview({ ...f, env, delay: async () => {} }));
-      assert.equal(f.state.posts, recovery && scenario !== 'uuid' ? 0 : 1);
+      assert.equal(await publishReview({ ...f, env, delay: async () => {} }), normalized);
+      assert.equal(f.state.posts, scenario === 'recovery' ? 0 : 1);
+      assert.deepEqual(f.envelope, saved);
     });
   }
 });
 
-test('direct receipts must confirm the actual posted event, not the saved approval event', async t => {
-  for (const moved of [false, true]) await t.test(`moved=${moved}`, async () => {
-    const f = setup('APPROVE');
-    f.state.stale = moved;
-    const original = f.github.request;
-    f.github.request = async (path, options) => {
-      if (options?.method !== 'POST') return original(path, options);
-      f.state.posts++;
-      assert.equal(options.body.event, moved ? 'COMMENT' : 'APPROVE');
-      return { ...f.receipt, state: moved ? 'APPROVED' : 'COMMENTED', body: options.body.body };
-    };
-    await assert.rejects(publishReview({ ...f, env, delay: async () => {} }));
-    assert.equal(f.state.posts, 1);
-  });
+test('withheld comment confirmation rejects wrong identity, head, ID and state', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    const valid = await downgradedReceipt(event);
+    for (const scenario of ['uuid', 'head', 'missing-id', 'zero-id', 'string-id', 'unsafe-id', 'pending', 'approved', 'changes-requested']) {
+      // The saved native outcome is valid in recovery, not a direct COMMENT receipt.
+      const nativeScenario = event === 'APPROVE' ? 'approved' : 'changes-requested';
+      for (const recovery of scenario === nativeScenario ? [false] : [false, true]) await t.test(`${event}, ${scenario}, recovery=${recovery}`, async () => {
+        const f = setup(event);
+        f.state.movement = 'head';
+        const invalid = { ...valid };
+        if (scenario === 'uuid') invalid.body = invalid.body.replace('123456789abc', '123456789abd');
+        if (scenario === 'head') invalid.commit_id = 'c'.repeat(40);
+        if (scenario === 'missing-id') delete invalid.id;
+        if (scenario === 'zero-id') invalid.id = 0;
+        if (scenario === 'string-id') invalid.id = '42';
+        if (scenario === 'unsafe-id') invalid.id = Number.MAX_SAFE_INTEGER + 1;
+        if (scenario === 'pending') invalid.state = 'PENDING';
+        if (scenario === 'approved') invalid.state = 'APPROVED';
+        if (scenario === 'changes-requested') invalid.state = 'CHANGES_REQUESTED';
+        if (recovery) f.state.reviews.push(invalid);
+        const original = f.github.request;
+        f.github.request = async (path, options) => {
+          if (options?.method !== 'POST') return original(path, options);
+          f.state.posts++;
+          return invalid;
+        };
+        await assert.rejects(publishReview({ ...f, env, delay: async () => {} }));
+        assert.equal(f.state.posts, recovery && scenario !== 'uuid' ? 0 : 1);
+      });
+    }
+  }
+});
+
+test('direct receipts must confirm the actual posted event for both saved verdicts', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    for (const movement of ['none', 'head']) await t.test(`${event}, ${movement}`, async () => {
+      const f = setup(event);
+      f.state.movement = movement;
+      const original = f.github.request;
+      f.github.request = async (path, options) => {
+        if (options?.method !== 'POST') return original(path, options);
+        f.state.posts++;
+        assert.equal(options.body.event, movement === 'head' ? 'COMMENT' : event);
+        return { ...f.receipt, state: movement === 'head' ? f.receipt.state : 'COMMENTED', body: options.body.body };
+      };
+      await assert.rejects(publishReview({ ...f, env, delay: async () => {} }));
+      assert.equal(f.state.posts, 1);
+    });
+  }
 });
 
 test('delayed original publication reconciles after a later attempt changes the posted event', async t => {
-  for (const firstEvent of ['APPROVE', 'COMMENT']) await t.test(`${firstEvent} then ${firstEvent === 'APPROVE' ? 'COMMENT' : 'APPROVE'}`, async () => {
-    const f = setup('APPROVE');
-    f.state.stale = firstEvent === 'COMMENT';
-    const saved = structuredClone(f.envelope);
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    for (const firstEvent of [event, 'COMMENT']) await t.test(`${event}: ${firstEvent} then ${firstEvent === event ? 'COMMENT' : event}`, async () => {
+      const f = setup(event);
+      f.state.movement = firstEvent === 'COMMENT' ? 'head' : 'none';
+      const saved = structuredClone(f.envelope);
+      const original = f.github.request;
+      const posted = [];
+      let committed;
+      f.github.request = async (path, options) => {
+        if (options?.method !== 'POST') return original(path, options);
+        posted.push(structuredClone(options.body));
+        f.state.posts++;
+        if (f.state.posts === 1) {
+          committed = {
+            ...f.receipt,
+            state: options.body.event === 'COMMENT' ? 'COMMENTED' : f.receipt.state,
+            body: options.body.body,
+          };
+        } else {
+          // Attempt one committed, but only becomes visible after attempt two
+          // fails before committing its now-different payload.
+          f.state.reviews.push(committed);
+        }
+        throw new TypeError('response lost');
+      };
+      assert.equal(await publishReview({
+        ...f, env, delay: async () => { f.state.movement = f.state.movement === 'none' ? 'head' : 'none'; },
+      }), committed);
+      assert.deepEqual(posted.map(payload => payload.event), [firstEvent, firstEvent === event ? 'COMMENT' : event]);
+      for (const payload of posted) assertPublishedPayload(payload, saved.payload, payload.event === 'COMMENT');
+      assert.equal(f.state.posts, 2);
+      assert.deepEqual(f.envelope, saved);
+    });
+  }
+});
+
+test('both withheld verdicts visible only after backoff reconcile before a second POST', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
+    const f = setup(event);
+    f.state.movement = 'base';
     const original = f.github.request;
-    const posted = [];
-    let committed;
     f.github.request = async (path, options) => {
       if (options?.method !== 'POST') return original(path, options);
-      posted.push(structuredClone(options.body));
-      f.state.posts++;
-      if (f.state.posts === 1) {
-        committed = {
-          ...f.receipt,
-          state: options.body.event === 'APPROVE' ? 'APPROVED' : 'COMMENTED',
-          body: options.body.body,
-        };
-      } else {
-        // Attempt one committed, but only becomes visible after attempt two
-        // fails before committing its now-different payload.
-        f.state.reviews.push(committed);
-      }
-      throw new TypeError('response lost');
+      await original(path, options);
+      throw new TypeError('response lost after comment committed');
     };
+    const delays = [];
     assert.equal(await publishReview({
-      ...f, env, delay: async () => { f.state.stale = !f.state.stale; },
-    }), committed);
-    assert.deepEqual(posted.map(payload => payload.event), [firstEvent, firstEvent === 'APPROVE' ? 'COMMENT' : 'APPROVE']);
-    for (const payload of posted) assertPublishedPayload(payload, saved.payload, payload.event === 'COMMENT');
-    assert.equal(f.state.posts, 2);
-    assert.deepEqual(f.envelope, saved);
+      ...f, env, delay: async ms => {
+        delays.push(ms);
+        f.state.reviews.push(f.receipt);
+      },
+    }), f.receipt);
+    assert.equal(f.receipt.state, 'COMMENTED');
+    assert.equal(f.state.posts, 1);
+    assert.deepEqual(delays, [1000]);
   });
 });
 
@@ -579,9 +621,7 @@ test('previously confirmed native verdicts reconcile after later head/base movem
   for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
     const f = setup(event);
     f.state.reviews.push(f.receipt);
-    f.state.stale = true;
-    f.state.movedBase = true;
-    f.state.closed = true;
+    f.state.movement = 'closed';
     assert.equal(await publishReview({ ...f, env }), f.receipt);
     assert.equal(f.state.posts, 0);
     assert.deepEqual(f.state.events, ['list']);
@@ -607,7 +647,7 @@ test('real CLI retains validated payload and publication-only recovery does not 
   } finally { await f.close(); }
 });
 
-test('publication rejection retains result; CLI recovery downgrades stale approvals and reconciles after closure', async t => {
+test('publication rejection retains result; CLI recovery downgrades both stale verdicts and reconciles after closure', async t => {
   for (const mode of ['approve', 'findings']) await t.test(mode, async () => {
     const f = await fixture();
     try {
@@ -622,48 +662,44 @@ test('publication rejection retains result; CLI recovery downgrades stale approv
       f.state.publicationStatus = undefined;
       const recoveryEnv = { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' };
       const recover = () => runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], { env: recoveryEnv });
-      f.state.stale = true;
-      f.state.movedBase = true;
-      f.state.closed = true;
+      f.state.movement = 'closed';
       const posts = f.state.posts.filter(post => post.path.endsWith('/reviews')).length;
       await assert.rejects(recover(), /not open; refusing publication/);
       assert.equal(f.state.posts.filter(post => post.path.endsWith('/reviews')).length, posts);
       assert.equal(f.state.reviews.length, 0);
-      f.state.closed = false;
+      f.state.movement = 'both';
       await recover();
       assert.equal(f.state.reviews.length, 1);
-      assertPublishedPayload(f.state.posts.findLast(post => post.path.endsWith('/reviews')).body, envelope.payload, mode === 'approve');
-      assert.equal(f.state.reviews[0].state, mode === 'approve' ? 'COMMENTED' : 'CHANGES_REQUESTED');
+      assertPublishedPayload(f.state.posts.findLast(post => post.path.endsWith('/reviews')).body, envelope.payload, true);
+      assert.equal(f.state.reviews[0].state, 'COMMENTED');
       assert.equal(await readFile(path, 'utf8'), retained);
-      f.state.closed = true;
-      f.state.stale = false;
-      f.state.movedBase = false;
+      f.state.movement = 'closed';
       await recover();
       assert.equal(f.state.reviews.length, 1, 'confirmed publication is reconciled even after closure');
     } finally { await f.close(); }
   });
 });
 
-test('default CLI result paths preserve a failed review when the next review succeeds', async () => {
+test('default CLI results preserve failed changes request and recover as COMMENT without replacing a newer approval', async () => {
   const f = await fixture();
   try {
     const cli = resolve('bin/codjiflo-reviewer.mjs');
-    const run = () => runProcess(process.execPath, [cli, '--repo', 'org/repo', '--pr', '1', '--requester', 'alice', '--full'], {
+    const run = mode => runProcess(process.execPath, [cli, '--repo', 'org/repo', '--pr', '1', '--requester', 'alice', '--full'], {
       cwd: f.temp,
       env: {
         ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
         CODJIFLO_RESULT_PATH: '', CODJIFLO_APPROVED_USERS: 'alice',
-        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
+        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: mode, FIXTURE_CAPTURE: f.capture,
       },
     });
     const results = async () => (await readdir(f.temp)).filter(name => /^codjiflo-result-[a-f0-9-]+\.json$/.test(name));
     f.state.publicationStatus = 422;
-    await assert.rejects(run(), /Fixture publication rejected/);
+    await assert.rejects(run('findings'), /Fixture publication rejected/);
     const [first] = await results();
     assert.ok(first, 'failed publication must retain a uniquely named result');
     const retained = await readFile(join(f.temp, first), 'utf8');
     f.state.publicationStatus = undefined;
-    const log = await run();
+    const log = await run('approve');
     const paths = await results();
     assert.equal(paths.length, 2);
     const second = paths.find(name => name !== first);
@@ -676,6 +712,22 @@ test('default CLI result paths preserve a failed review when the next review suc
       const identity = /<!-- codjiflo-publication:([^ ]+) -->$/.exec(envelope.payload.body)[1];
       assert.equal(name, `codjiflo-result-${identity}.json`);
     }
+    assert.equal(earlier.payload.event, 'REQUEST_CHANGES');
+    assert.equal(later.payload.event, 'APPROVE');
+    const approval = structuredClone(f.state.reviews[0]);
+    assert.equal(approval.state, 'APPROVED');
+    f.state.movement = 'head';
+    const recover = () => runProcess(process.execPath, [cli, '--publish', join(f.temp, first)], {
+      env: { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' },
+    });
+    await recover();
+    assert.equal(f.state.reviews.length, 2);
+    assert.deepEqual(f.state.reviews[0], approval, 'the newer native approval remains untouched');
+    assert.equal(f.state.reviews[1].state, 'COMMENTED');
+    assertPublishedPayload(f.state.posts.findLast(post => post.path.endsWith('/reviews')).body, earlier.payload, true);
+    assert.equal(await readFile(join(f.temp, first), 'utf8'), retained);
+    await recover();
+    assert.equal(f.state.reviews.length, 2, 'recovery of the withheld changes request is idempotent');
   } finally { await f.close(); }
 });
 

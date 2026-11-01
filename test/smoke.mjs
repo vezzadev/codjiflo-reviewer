@@ -45,16 +45,14 @@ for (const mode of ['approve', 'findings']) {
     const f = await fixture();
     try {
       f.state.moveAtRead = scenario === 'snapshot' ? 2 : 3;
-      f.state.stale = ['head', 'both', 'snapshot'].includes(scenario);
-      f.state.movedBase = ['base', 'both'].includes(scenario);
-      f.state.closed = scenario === 'closed';
+      f.state.movement = scenario === 'unchanged' ? 'none' : scenario === 'snapshot' ? 'head' : scenario;
       if (!['closed', 'snapshot'].includes(scenario)) {
         await f.run({ mode });
         const review = f.state.posts.find(post => post.path.endsWith('/reviews'))?.body;
-        const downgraded = mode === 'approve' && scenario !== 'unchanged';
+        const downgraded = scenario !== 'unchanged';
         assert.equal(review.event, downgraded ? 'COMMENT' : mode === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES');
         assert.equal(review.commit_id, f.head);
-        assert.ok(review.body.includes(`Reviewed head: \`${f.head}\`\nReviewed base: \`${f.base}\``));
+        assert.ok(review.body.includes(`Reviewed range: \`${f.base}..${f.head}\`\nPR base snapshot: \`${f.base}\``));
         const retained = JSON.parse(await readFile(`${f.temp}/publication.json`, 'utf8'));
         assert.equal(retained.payload.event, mode === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES');
         assert.deepEqual(review.comments, retained.payload.comments);
@@ -80,8 +78,7 @@ for (const mode of ['approve', 'findings']) {
     const saved = await readFile(path, 'utf8');
     const envelope = JSON.parse(saved);
     f.state.publicationStatus = undefined;
-    f.state.stale = true;
-    f.state.movedBase = true;
+    f.state.movement = 'both';
     const recover = () => runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], {
       env: {
         ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
@@ -90,16 +87,14 @@ for (const mode of ['approve', 'findings']) {
     });
     await recover();
     const published = f.state.posts.findLast(post => post.path.endsWith('/reviews')).body;
-    assert.equal(published.event, mode === 'approve' ? 'COMMENT' : 'REQUEST_CHANGES');
+    assert.equal(published.event, 'COMMENT');
     assert.equal(published.commit_id, envelope.head);
     assert.deepEqual(published.comments, envelope.payload.comments);
-    if (mode === 'approve') assert.ok(published.body.endsWith(envelope.payload.body));
-    else assert.deepEqual(published, envelope.payload);
-    assert.equal(f.state.reviews[0].state, mode === 'approve' ? 'COMMENTED' : 'CHANGES_REQUESTED');
+    assert.ok(published.body.endsWith(envelope.payload.body));
+    assert.equal(f.state.reviews[0].state, 'COMMENTED');
     assert.equal(await readFile(path, 'utf8'), saved);
     const posts = f.state.posts.length;
-    f.state.stale = false;
-    f.state.closed = true;
+    f.state.movement = 'closed';
     await recover();
     assert.equal(f.state.posts.length, posts);
     assert.equal(f.state.reviews.length, 1);

@@ -164,7 +164,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
       `\n<!-- codjiflo-workflow:${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT} -->` : '';
     const envelope = { version: 1, request, head, base, payload: {
       commit_id: head, event: result.verdict,
-      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nReviewed head: \`${head}\`\nReviewed base: \`${base}\`\n\nScope: **${mode}** (${reason}).\n\n${marker}${workflowMarker}\n<!-- codjiflo-publication:${publication} -->`,
+      body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nReviewed range: \`${scope}..${head}\`\nPR base snapshot: \`${base}\`\n\nScope: **${mode}** (${reason}).\n\n${marker}${workflowMarker}\n<!-- codjiflo-publication:${publication} -->`,
       comments,
     } };
     await writeFile(resultPath, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600, ...(output === undefined ? { flag: 'wx' } : {}) });

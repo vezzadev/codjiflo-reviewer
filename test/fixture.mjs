@@ -163,7 +163,7 @@ if (mode !== 'missing-completion') emit({type:'agent_end',messages:[{role:'assis
 if (mode === 'fatal-exit') process.exit(1);
 `);
   await chmod(fake, 0o755);
-  const state = { requests: [], posts: [], reviews: [], files, changedFiles: files.length, stale: false, reads: 0 };
+  const state = { requests: [], posts: [], reviews: [], files, changedFiles: files.length, movement: 'none', reads: 0 };
   const server = createServer(async (request, response) => {
     request.setEncoding('utf8');
     let body = ''; for await (const chunk of request) body += chunk;
@@ -190,7 +190,7 @@ if (mode === 'fatal-exit') process.exit(1);
     } else if (request.url === '/repos/org/repo/pulls/1') {
       state.reads++;
       const moved = state.reads >= (state.moveAtRead ?? 2);
-      response.end(JSON.stringify({ state: state.closed && moved ? 'closed' : 'open', changed_files: state.changedFiles, head: { sha: state.stale && moved ? previous : head }, base: { sha: state.movedBase && moved ? previous : base, repo: { clone_url: pathToFileURL(repo).href } } }));
+      response.end(JSON.stringify({ state: moved && state.movement === 'closed' ? 'closed' : 'open', changed_files: state.changedFiles, head: { sha: moved && ['head', 'both'].includes(state.movement) ? previous : head }, base: { sha: moved && ['base', 'both'].includes(state.movement) ? previous : base, repo: { clone_url: pathToFileURL(repo).href } } }));
     } else { response.statusCode = 404; response.end('{}'); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
