@@ -32,6 +32,14 @@ function matchesSchema(value, definition) {
   }
   if (definition.type === 'array') return Array.isArray(value) && value.every(item => matchesSchema(item, definition.items));
   if (definition.type === 'integer') return Number.isInteger(value) && value >= definition.minimum;
+  if (definition.type === 'string') {
+    if (typeof value !== 'string') return false;
+    if (definition.minLength === undefined) return true;
+    // JSON Schema counts Unicode code points, not UTF-16 code units.
+    let length = 0;
+    for (const character of value) length++;
+    return length >= definition.minLength;
+  }
   return typeof value === definition.type;
 }
 

@@ -10,7 +10,7 @@ import reviewExtension, { REVIEW_TOOLS } from '../src/omp-review-extension.mjs';
 import { secretRedactor } from '../src/redaction.mjs';
 
 const runtimeNames = ['TMPDIR', 'TMP', 'TEMP', 'XDG_CACHE_HOME', 'UV_CACHE_DIR', 'UV_PROJECT_ENVIRONMENT', 'PYTHONPYCACHEPREFIX'];
-const result = { verdict: 'INCOMPLETE', summary: 'Required source unavailable.', findings: [] };
+const result = { verdict: 'INCOMPLETE', summary: 'Required source unavailable.', findings: [], resolutions: [] };
 const events = () => [
   { type: 'tool_execution_start', toolName: 'final_review', toolCallId: 'review-1', args: structuredClone(result) },
   { type: 'tool_execution_end', toolName: 'final_review', toolCallId: 'review-1', isError: false, result: { details: { accepted: true } } },
@@ -107,6 +107,9 @@ for (const [name, mutate] of [
   ['end before start', value => { [value[0], value[1]] = [value[1], value[0]]; }],
   ['extra output fields', value => { value[0].args.extra = true; }],
   ['invalid finding', value => { value[0].args.findings = [{ path: 'a' }]; }],
+  ['missing resolutions', value => { delete value[0].args.resolutions; }],
+  ['invalid resolution status', value => { value[0].args.resolutions = [{ id: 'prior', status: 'ignored', reason: 'Not supported.' }]; }],
+  ['empty resolution reason', value => { value[0].args.resolutions = [{ id: 'prior', status: 'resolved', reason: '' }]; }],
   ['missing terminal', value => value.pop()],
   ['nonterminal', value => { value[2].isTerminal = false; }],
   ['error assistant', value => { value[2].messages[0].stopReason = 'error'; }],
