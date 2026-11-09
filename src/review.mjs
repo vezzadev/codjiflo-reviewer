@@ -10,7 +10,7 @@ import { runProcess, runReviewer } from './runner.mjs';
 import { publishReview, reportPublicationFailure, workflowRunUrl, validateReviewBody } from './publication.mjs';
 import { sanitizeGitEnv } from './git-environment.mjs';
 
-export const MARKER = /^<!-- codjiflo-reviewer:v4 (\{[^\n]+\}) -->$/;
+export const MARKER = /^<!-- codjiflo-reviewer:v4 (\{[^\n]+\}) -->\r?$/;
 const SHA = /^[a-f0-9]{40}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const FINDING_FIELDS = ['path', 'side', 'start_line', 'line', 'priority', 'disposition', 'title', 'body'];
@@ -27,7 +27,7 @@ function validFinding(finding) {
 }
 
 function checkpointRecord(body) {
-  // Published metadata occupies its own LF-delimited line after the summary.
+  // Published metadata occupies its own LF- or CRLF-delimited line after the summary.
   // Select the last such record: prose/JSON may quote marker prefixes, and
   // earlier standalone examples must not shadow the actual final metadata.
   return typeof body === 'string' ? body.split('\n').findLast(line => line.startsWith('<!-- codjiflo-reviewer:')) : undefined;
@@ -84,11 +84,23 @@ export function outstandingFindings(reviews) {
   return latestCheckpoint(reviews)?.value.findings ?? [];
 }
 
+function checkpointFallbackReason(checkpoint, base, preset) {
+  const unavailable = 'no usable v4 review checkpoint';
+  if (!checkpoint || !['APPROVED', 'CHANGES_REQUESTED'].includes(checkpoint.prior.state)) return unavailable;
+  const { value } = checkpoint;
+  const cap = PRESETS[value.preset].level === 'xhigh' ? 15 : 10;
+  let count = 0;
+  for (const finding of value.findings) {
+    // Same-head carried findings conservatively count too: capped analyses
+    // cannot establish that the unchanged scope has no further findings.
+    if (finding.originHead === value.head && ++count >= cap) return 'previous review reached the new-findings cap';
+  }
+  return value.base === base && value.preset === preset ? null : unavailable;
+}
+
 export function baseline(reviews, base, preset) {
   const checkpoint = latestCheckpoint(reviews);
-  if (!checkpoint || !['APPROVED', 'CHANGES_REQUESTED'].includes(checkpoint.prior.state)) return null;
-  const { value } = checkpoint;
-  return value.base === base && value.preset === preset ? value : null;
+  return checkpointFallbackReason(checkpoint, base, preset) === null ? checkpoint.value : null;
 }
 
 export function validateResult(result, files, cap, priorFindings = []) {
@@ -210,12 +222,15 @@ export async function review({ request, github, env = process.env, reviewer = ru
       await git(['--literal-pathspecs', 'submodule', 'update', '--init', '--recursive', '--checkout', '--', ...dependencies]);
     }
     const reviews = await github.list(`${pullPath}/reviews`);
-    const priorFindings = outstandingFindings(reviews);
+    const checkpoint = latestCheckpoint(reviews);
+    const priorFindings = checkpoint?.value.findings ?? [];
     let scope = mergeBase;
     let mode = 'full';
     let reason = request.mode === 'full' ? 'explicit full review' : 'no usable v4 review checkpoint';
     if (request.mode === 'incremental') {
-      const previous = baseline(reviews, base, request.preset);
+      const fallbackReason = checkpointFallbackReason(checkpoint, base, request.preset);
+      const previous = fallbackReason === null ? checkpoint.value : null;
+      if (fallbackReason) reason = fallbackReason;
       if (previous && previous.head !== head) {
         try {
           await git(['fetch', '--no-tags', 'origin', previous.head]);
