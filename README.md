@@ -108,14 +108,14 @@ Each self-hosted runner process executes one job at a time. To allow more simult
 Incremental is the default. Completed reviews publish a v4 checkpoint with their outstanding findings:
 
 ```html
-<!-- codjiflo-reviewer:v4 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-xhigh","findings":[]} -->
+<!-- codjiflo-reviewer:v4 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-xhigh","kickoffId":123456,"findings":[]} -->
 ```
 
-Both approvals and changes-requested reviews can establish a checkpoint. The latest marked review must have valid v4 metadata matching its GitHub `commit_id`, current base, and requested preset. Its head must be an available ancestor of the new head, with unchanged repository review instructions. Both App/bot and PAT-authored reviews participate. Codjiflo then reviews the new diff and reassesses every outstanding finding against the current source, including findings outside that diff.
+Both approvals and changes-requested reviews can establish a checkpoint. Checkpoints are ordered by their GitHub-issued kickoff comment ID, so delayed publication-only recovery cannot replace a newer analysis or resurrect its resolved findings. The selected checkpoint must have valid v4 metadata matching its GitHub `commit_id`, current base, and requested preset. Its head must be an available ancestor of the new head, with unchanged repository review instructions. Both App/bot and PAT-authored reviews participate. Codjiflo then reviews the new diff and reassesses every outstanding finding against the current source, including findings outside that diff.
 
 Each outstanding finding has a stable UUID, original commit and location, severity, disposition, and description. The model must return exactly one `resolved` or `unresolved` assessment with a reason for every ID. Missing, duplicate, or unknown IDs fail the review without publication. Unresolved findings keep their identity and original disposition across rounds; any remaining blocker prevents approval. Carried findings appear in the summary with their provenance, without reposting stale inline coordinates. Resolving a GitHub thread does not clear the ledger, and Codjiflo does not automatically resolve GitHub threads.
 
-Explicit `full`, changed base or preset, rewritten/unavailable history, changed instructions, a superseded `COMMENTED` or dismissed review, and a same-head rerun use the merge-base-to-head diff. These full scans still reconcile the latest valid v4 ledger. A newer incompatible or malformed marker prevents reuse of an older checkpoint.
+Explicit `full`, changed base or preset, rewritten/unavailable history, changed instructions, a superseded `COMMENTED` or dismissed checkpoint, and a same-head rerun use the merge-base-to-head diff. These full scans still reconcile the selected valid v4 ledger. Legacy or malformed marked publications form a barrier: checkpoints published before that barrier cannot be revived. Conflicting metadata for the same kickoff ID also forces a full transition scan; a later kickoff can establish a new checkpoint.
 
 Legacy v1/v2/v3 markers lack the required ledger and force a full review. They are not migrated into empty checkpoints. The first completed v4 review establishes the new ledger, even when it requests changes. Consumers pinned to a SHA must update both the reusable workflow reference and `bot-ref` to receive this behavior. Full Git history is fetched as needed.
 

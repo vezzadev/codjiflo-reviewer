@@ -7,7 +7,7 @@ import { fixture } from './fixture.mjs';
 
 const metadata = [{ filename: 'a.js', additions: 2, deletions: 2, patch: '@@ -1,3 +1,3 @@\n-old\n+new\n same\n last\n@@ -20 +20 @@\n-before\n+after\n' }];
 const finding = { path: 'a.js', side: 'RIGHT', start_line: 1, line: 2, priority: 'P1', disposition: 'blocking', title: 'Broken result', body: 'Fails for zero. Category: correctness.' };
-const marker = (head, base, preset = 'sol-xhigh', findings = []) => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings })} -->`;
+const marker = (head, base, preset = 'sol-xhigh', findings = [], kickoffId = 1) => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings, kickoffId })} -->`;
 const sha = 'a'.repeat(40);
 const baseSha = 'b'.repeat(40);
 
@@ -158,7 +158,7 @@ test('baseline accepts completed approvals and changes requests with valid ledge
     assert.equal(baseline([{ ...approved, body: marker(sha, baseSha, preset) }], baseSha, 'sol-xhigh'), null);
   }
   const prior = { ...finding, id: '10000000-0000-4000-8000-000000000001', originHead: sha };
-  const changes = { ...approved, state: 'CHANGES_REQUESTED', user: { type: 'User' }, body: marker(sha, baseSha, 'sol-xhigh', [prior]) };
+  const changes = { ...approved, state: 'CHANGES_REQUESTED', user: { type: 'User' }, body: marker(sha, baseSha, 'sol-xhigh', [prior], 2) };
   assert.equal(baseline([approved, changes], baseSha, 'sol-xhigh').head, sha);
   for (const state of ['DISMISSED', 'COMMENTED']) {
     assert.equal(baseline([approved, { ...changes, state }], baseSha, 'sol-xhigh'), null);

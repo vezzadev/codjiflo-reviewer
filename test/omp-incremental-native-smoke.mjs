@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,7 +27,32 @@ let failed = false;
 let log = '';
 const rounds = [];
 async function runRound(expectedVerdict, expectedMode) {
-  log = await f.run({ preset, providerEnv, timeoutMs: 46 * 60 * 1000 });
+  const round = rounds.length + 1;
+  const transcript = join(proof, `round-${round}.log`);
+  await writeFile(transcript, '', { mode: 0o600 });
+  console.log(JSON.stringify({ preset, round, phase: 'review-start', transcript }));
+  let pending = '';
+  const streamOutput = {
+    stdout(text) {
+      appendFileSync(transcript, text);
+      pending += text;
+      const lines = pending.split('\n');
+      pending = lines.pop();
+      for (const line of lines) {
+        let event;
+        try { event = JSON.parse(line); } catch { continue; }
+        if (event.type === 'tool_execution_start') console.log(JSON.stringify({ preset, round, tool: event.toolName }));
+        if (event.message?.stopReason === 'error' || /retry|error/.test(event.type)) {
+          console.log(JSON.stringify({ preset, round, phase: 'provider-diagnostic', event: event.type, transcript }));
+        }
+      }
+    },
+    stderr(text) {
+      appendFileSync(transcript, text);
+      console.log(JSON.stringify({ preset, round, phase: 'stderr', transcript }));
+    },
+  };
+  log = await f.run({ preset, providerEnv, streamOutput, timeoutMs: 46 * 60 * 1000 });
   const records = log.split('\n').flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
   const calls = records.filter(event => event.type === 'tool_execution_start');
   const completions = records.filter(event => event.type === 'tool_execution_end');

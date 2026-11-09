@@ -35,7 +35,7 @@ test('both OMP families keep full and incremental methodology inline with comple
   const f = await fixture({ newLine: 'é🙂漢'.repeat(300000) });
   try {
     for (const [preset, canonical] of [['codex', 'sol-xhigh'], ['claude', 'opus-xhigh']]) for (const full of [true, false]) {
-      f.state.reviews = full ? [] : [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: canonical, findings: [] })} -->` }];
+      f.state.reviews = full ? [] : [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: canonical, findings: [], kickoffId: 1 })} -->` }];
       await f.run({ full, preset });
       const input = await readFile(f.capture, 'utf8');
       assert.ok(input.length < 16000, 'initial prompt does not grow with duplicated patch evidence');
@@ -278,7 +278,7 @@ test('hostile Git pathspec modes preserve current-head prompt authority and oper
     try {
       await writeFile(join(f.repo, '.codjiflo', 'code-review', 'PROMPT.md'), 'UNCOMMITTED-SOURCE-INSTRUCTIONS\n');
       await writeFile(f.env.GIT_CONFIG_GLOBAL, '[codjiflo]\npathspecfixture = operator-config-survives\n');
-      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh', findings: [] })} -->` }];
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh', findings: [], kickoffId: 1 })} -->` }];
       const transport = {
         GIT_SSH_COMMAND: 'ssh -oBatchMode=yes',
         GIT_SSL_CAINFO: f.env.GIT_CONFIG_GLOBAL,

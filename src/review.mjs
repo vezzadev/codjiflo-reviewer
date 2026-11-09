@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { PRESETS, isApproved } from './commands.mjs';
 import { filesFromApi, inlineComment } from './diff.mjs';
 import { reviewInput } from './evidence.mjs';
@@ -18,7 +19,8 @@ function validFinding(finding) {
   return finding && typeof finding === 'object' && !Array.isArray(finding)
     && ['blocking', 'advisory'].includes(finding.disposition)
     && ['P0', 'P1', 'P2', 'P3'].includes(finding.priority)
-    && ['path', 'title', 'body'].every(key => typeof finding[key] === 'string' && finding[key].trim())
+    && typeof finding.path === 'string' && finding.path.length > 0
+    && ['title', 'body'].every(key => typeof finding[key] === 'string' && finding[key].trim())
     && ['LEFT', 'RIGHT'].includes(finding.side)
     && Number.isSafeInteger(finding.start_line) && finding.start_line > 0
     && Number.isSafeInteger(finding.line) && finding.line >= finding.start_line;
@@ -31,16 +33,14 @@ function checkpointRecord(body) {
   return typeof body === 'string' ? body.split('\n').findLast(line => line.startsWith('<!-- codjiflo-reviewer:')) : undefined;
 }
 
-function latestCheckpoint(reviews) {
-  // Any newer marker, even legacy or malformed, prevents falling back to an
-  // older ledger. Thread resolution is deliberately not an input.
-  const prior = reviews.filter(review => checkpointRecord(review.body) !== undefined).at(-1);
-  if (!prior || !['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'].includes(prior.state)) return null;
+function parseCheckpoint(prior) {
+  if (!['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'].includes(prior.state)) return null;
   try {
     const match = MARKER.exec(checkpointRecord(prior.body));
     if (!match) return null;
     const value = JSON.parse(match[1]);
-    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join() !== 'base,findings,head,preset'
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join() !== 'base,findings,head,kickoffId,preset'
+        || !Number.isSafeInteger(value.kickoffId) || value.kickoffId <= 0
         || typeof value.head !== 'string' || !SHA.test(value.head) || typeof value.base !== 'string' || !SHA.test(value.base) || value.head !== prior.commit_id
         || typeof value.preset !== 'string' || !Object.hasOwn(PRESETS, value.preset) || !Array.isArray(value.findings)) return null;
     const ids = new Set();
@@ -53,6 +53,31 @@ function latestCheckpoint(reviews) {
     if ((prior.state === 'APPROVED' && blockers) || (prior.state === 'CHANGES_REQUESTED' && !blockers)) return null;
     return { prior, value };
   } catch { return null; }
+}
+
+function latestCheckpoint(reviews) {
+  let checkpoint = null;
+  let conflicted = false;
+  for (const prior of reviews) {
+    if (checkpointRecord(prior.body) === undefined) continue;
+    const candidate = parseCheckpoint(prior);
+    // A malformed or legacy marker starts a new valid-metadata segment:
+    // checkpoints from before this barrier must never be resurrected.
+    if (!candidate) {
+      checkpoint = null;
+      conflicted = false;
+    } else if (!checkpoint || candidate.value.kickoffId > checkpoint.value.kickoffId) {
+      checkpoint = candidate;
+      conflicted = false;
+    } else if (candidate.value.kickoffId === checkpoint.value.kickoffId) {
+      // A generation identifies one analysis. Conflicting ledgers cannot be
+      // resolved by publication order; identical retries use the latest state.
+      conflicted ||= !isDeepStrictEqual(candidate.value, checkpoint.value);
+      checkpoint = candidate;
+    }
+    // Lower generations can be delayed recoveries, not newer analyses.
+  }
+  return conflicted ? null : checkpoint;
 }
 
 export function outstandingFindings(reviews) {
@@ -143,7 +168,9 @@ export async function review({ request, github, env = process.env, reviewer = ru
   const head = pr.head.sha;
   const base = pr.base.sha;
   const runUrl = workflowRunUrl(request, env);
-  await github.request(`${root}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer starting **${request.preset}** (${request.mode}) at \`${head}\`, requested by @${request.requester}.${runUrl ? `\n\n[Live workflow logs](${runUrl})` : ''}` } });
+  const kickoff = await github.request(`${root}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer starting **${request.preset}** (${request.mode}) at \`${head}\`, requested by @${request.requester}.${runUrl ? `\n\n[Live workflow logs](${runUrl})` : ''}` } });
+  const kickoffId = kickoff?.id;
+  if (!Number.isSafeInteger(kickoffId) || kickoffId <= 0) throw new Error('Kickoff comment response must include a positive safe-integer id');
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-'));
   try {
     const dependencies = sourceSubmodules(env.CODJIFLO_SOURCE_SUBMODULES);
@@ -226,7 +253,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
       ...priorFindings.filter(finding => unresolved.has(finding.id)),
       ...result.findings.map(finding => ({ id: randomUUID(), originHead: head, ...finding })),
     ];
-    const marker = `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset: request.preset, findings }).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e')} -->`;
+    const marker = `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, kickoffId, preset: request.preset, findings }).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e')} -->`;
     const workflowMarker = /^\d+$/.test(env.GITHUB_RUN_ID ?? '') && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? '') ?
       `\n<!-- codjiflo-workflow:${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT} -->` : '';
     const envelope = { version: 1, request, head, base, payload: {

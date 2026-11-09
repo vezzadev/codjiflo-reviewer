@@ -164,6 +164,8 @@ if (mode !== 'missing-completion') emit({type:'agent_end',messages:[{role:'assis
 if (mode === 'fatal-exit') process.exit(1);
 `);
   await chmod(fake, 0o755);
+  // Seeded checkpoint fixtures use generations below 100; real POST identities
+  // must increase beyond those generations across every review/recovery round.
   const state = { requests: [], posts: [], reviews: [], files, changedFiles: files.length, movement: 'none', reads: 0 };
   const server = createServer(async (request, response) => {
     request.setEncoding('utf8');
@@ -179,10 +181,10 @@ if (mode === 'fatal-exit') process.exit(1);
           response.end(JSON.stringify({ message: 'Fixture publication rejected' }));
           return;
         }
-        const receipt = { id: state.posts.length, commit_id: parsed.commit_id, body: parsed.body, state: { APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED', COMMENT: 'COMMENTED' }[parsed.event] };
+        const receipt = { id: 100 + state.posts.length, commit_id: parsed.commit_id, body: parsed.body, state: { APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED', COMMENT: 'COMMENTED' }[parsed.event] };
         state.reviews.push(receipt);
         response.end(JSON.stringify(receipt));
-      } else response.end(JSON.stringify({ id: state.posts.length }));
+      } else response.end(JSON.stringify({ id: 100 + state.posts.length }));
     } else if (request.url.startsWith('/repos/org/repo/pulls/1/reviews')) {
       response.end(JSON.stringify(state.reviews));
     } else if (request.url.startsWith('/repos/org/repo/pulls/1/files?')) {
@@ -212,9 +214,11 @@ if (mode === 'fatal-exit') process.exit(1);
       state.changedFiles = state.files.length;
       return state.head;
     },
-    async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs } = {}) {
+    async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs, streamOutput } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
         timeoutMs,
+        stream: streamOutput !== undefined,
+        streamOutput,
         env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: fake, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
       });
     },

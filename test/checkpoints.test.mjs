@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { baseline, outstandingFindings, validateResult } from '../src/review.mjs';
 import { filesFromApi } from '../src/diff.mjs';
 import { MAX_INLINE_INPUT, MAX_EVIDENCE_READ_BYTES } from '../src/input-budget.mjs';
@@ -11,7 +11,7 @@ import { fixture } from './fixture.mjs';
 
 const finding = { path: 'old-deleted.js', side: 'LEFT', start_line: 400, line: 402, priority: 'P1', disposition: 'blocking', title: 'Original blocker', body: 'The original failure remains reproducible.' };
 const entry = (head, overrides = {}) => ({ ...finding, id: randomUUID(), originHead: head, ...overrides });
-const marker = (head, base, findings, preset = 'sol-xhigh') => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings })} -->`;
+const marker = (head, base, findings, preset = 'sol-xhigh', kickoffId = 1) => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings, kickoffId })} -->`;
 const priorReview = (f, findings, overrides = {}) => ({ state: 'CHANGES_REQUESTED', commit_id: f.previous, body: marker(f.previous, f.base, findings), ...overrides });
 const posts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
 const ledger = body => JSON.parse(/^<!-- codjiflo-reviewer:v4 (\{[^\n]+\}) -->$/.exec(body.split('\n').filter(line => line.startsWith('<!-- codjiflo-reviewer:v4 ')).at(-1))[1]);
@@ -161,8 +161,9 @@ test('malformed ledger fields cannot coerce metadata or revive an earlier valid 
   const base = 'b'.repeat(40);
   const old = entry(head);
   const valid = { state: 'CHANGES_REQUESTED', commit_id: head, body: marker(head, base, [old]) };
-  const payload = { head, base, preset: 'sol-xhigh', findings: [old] };
+  const payload = { head, base, preset: 'sol-xhigh', findings: [old], kickoffId: 1 };
   const invalid = [
+    ...[undefined, null, 0, -1, 1.5, '1', [1], Number.MAX_SAFE_INTEGER + 1].map(kickoffId => ({ ...payload, kickoffId })),
     { ...payload, head: [head] },
     { ...payload, base: [base] },
     { ...payload, preset: ['sol-xhigh'] },
@@ -254,5 +255,140 @@ test('large prior ledgers are staged losslessly and accessible through bounded U
     }
     assert.deepEqual(JSON.parse(reconstructed), [old]);
     assert.ok(reconstructed.includes('END-OF-PRIOR-EVIDENCE'));
+  } finally { await f.close(); }
+});
+
+test('delayed recovery cannot replace a newer review generation or erase its blocker', async t => {
+  for (const olderHasBlocker of [false, true]) await t.test(`older blocker=${olderHasBlocker}`, async () => {
+    const f = await fixture();
+    try {
+      f.state.publicationStatus = 422;
+      const added = { ...finding, path: 'a.js', side: 'RIGHT', start_line: 1, line: 1 };
+      await assert.rejects(run(f, result([], olderHasBlocker ? 'REQUEST_CHANGES' : 'APPROVE', olderHasBlocker ? [added] : [])), /Fixture publication rejected/);
+      const savedPath = join(f.temp, 'older-publication.json');
+      const saved = await readFile(join(f.temp, 'publication.json'), 'utf8');
+      await writeFile(savedPath, saved);
+      const older = ledger(JSON.parse(saved).payload.body);
+      f.state.publicationStatus = undefined;
+      const newerHead = await f.advance({ 'a.js': 'new\nnewer generation\n' });
+      // A failed POST is not a published checkpoint: B independently reviews H2.
+      await run(f, result([], 'REQUEST_CHANGES', [{ ...added, title: 'Newer blocker X' }]));
+      const newerReview = f.state.reviews.at(-1);
+      const newer = ledger(newerReview.body);
+      const blocker = newer.findings[0];
+      assert.ok(newer.kickoffId > older.kickoffId);
+      assert.notEqual(blocker.id, older.findings[0]?.id);
+      await runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', savedPath], {
+        env: { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' },
+      });
+      assert.equal(f.state.reviews.at(-1).state, 'COMMENTED');
+      assert.equal(f.state.reviews.at(-1).commit_id, older.head);
+      assert.equal(await readFile(savedPath, 'utf8'), saved);
+      assert.deepEqual(outstandingFindings(f.state.reviews), [blocker]);
+      assert.equal(baseline(f.state.reviews, f.base, 'sol-xhigh').head, newerHead);
+      await f.advance({ 'a.js': 'new\nthird generation\n' });
+      const before = posts(f).length;
+      await assert.rejects(run(f, result([], 'APPROVE')));
+      assert.equal(posts(f).length, before, 'omitting X must fail before publication');
+      await run(f, result([resolution(blocker)]));
+      const retained = posts(f).at(-1).body;
+      assert.match(retained.body, /Scope: \*\*incremental\*\*/);
+      assert.ok((await readFile(f.capture, 'utf8')).includes(`git diff ${newerHead} `));
+      assert.deepEqual(ledger(retained.body).findings, [blocker]);
+      assert.deepEqual(outstandingFindings(f.state.reviews), [blocker]);
+    } finally { await f.close(); }
+  });
+});
+
+test('a recovered older blocker cannot resurrect findings resolved by a newer approval', async () => {
+  const f = await fixture();
+  try {
+    await run(f, result([], 'REQUEST_CHANGES', [{ ...finding, path: 'a.js', side: 'RIGHT', start_line: 1, line: 1 }]));
+    const olderReview = f.state.reviews.at(-1);
+    const older = ledger(olderReview.body);
+    const savedPath = join(f.temp, 'older-publication.json');
+    await writeFile(savedPath, await readFile(join(f.temp, 'publication.json'), 'utf8'));
+    const newerHead = await f.advance({ 'a.js': 'new\nfixed blocker\n' });
+    await run(f, result([resolution(older.findings[0], 'resolved', 'The guard now handles the original failure.')], 'APPROVE'));
+    const newer = ledger(f.state.reviews.at(-1).body);
+    assert.ok(newer.kickoffId > older.kickoffId);
+    // Simulate the lost historical receipt: recovery must really POST after B.
+    f.state.reviews = f.state.reviews.filter(review => review !== olderReview);
+    await runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', savedPath], {
+      env: { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' },
+    });
+    assert.equal(f.state.reviews.at(-1).state, 'COMMENTED');
+    assert.deepEqual(outstandingFindings(f.state.reviews), []);
+    assert.equal(baseline(f.state.reviews, f.base, 'sol-xhigh').head, newerHead);
+    await f.advance({ 'a.js': 'new\nstill fixed\n' });
+    await run(f, result([], 'APPROVE'));
+    assert.match(posts(f).at(-1).body.body, /Scope: \*\*incremental\*\*/);
+    assert.deepEqual(ledger(posts(f).at(-1).body.body).findings, []);
+  } finally { await f.close(); }
+});
+
+test('generation ordering respects malformed barriers, unmarked reviews, and ambiguous ties', () => {
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const newerHead = 'c'.repeat(40);
+  const blocker = entry(newerHead);
+  const review = (generation, findings = [], checkpointHead = head) => ({
+    state: findings.length ? 'CHANGES_REQUESTED' : 'APPROVED', commit_id: checkpointHead,
+    body: marker(checkpointHead, base, findings, 'sol-xhigh', generation),
+  });
+  const older = { ...review(1), state: 'COMMENTED' };
+  const newer = review(2, [blocker], newerHead);
+  for (const reviews of [[newer, older], [newer, { state: 'COMMENTED', body: 'Human follow-up' }, older]]) {
+    assert.deepEqual(outstandingFindings(reviews), [blocker]);
+    assert.equal(baseline(reviews, base, 'sol-xhigh').head, newerHead);
+  }
+  for (const barrier of [
+    { ...older, body: '<!-- codjiflo-reviewer:v4 {bad JSON} -->' },
+    { ...older, body: older.body.replace(':v4 ', ':v3 ') },
+    { ...older, body: older.body.replace(',"kickoffId":1', '') },
+  ]) {
+    assert.deepEqual(outstandingFindings([newer, barrier]), []);
+    assert.equal(baseline([newer, barrier], base, 'sol-xhigh'), null);
+    assert.deepEqual(outstandingFindings([newer, barrier, older]), []);
+    assert.equal(baseline([newer, barrier, older], base, 'sol-xhigh'), null);
+    assert.equal(baseline([newer, barrier, review(1)], base, 'sol-xhigh').head, head);
+  }
+  const conflict = review(2);
+  for (const tied of [[newer, conflict], [conflict, newer], [newer, conflict, older]]) {
+    assert.deepEqual(outstandingFindings(tied), []);
+    assert.equal(baseline(tied, base, 'sol-xhigh'), null);
+    assert.equal(baseline([...tied, review(3)], base, 'sol-xhigh').head, head);
+  }
+  assert.deepEqual(outstandingFindings([newer, { ...newer }]), [blocker]);
+  assert.equal(baseline([newer, { ...newer }], base, 'sol-xhigh').head, newerHead);
+  assert.equal(baseline([newer, { ...newer, state: 'COMMENTED' }], base, 'sol-xhigh'), null);
+  assert.deepEqual(outstandingFindings([newer, { ...newer, state: 'COMMENTED' }]), [blocker]);
+  assert.equal(baseline([newer, { ...newer, state: 'DISMISSED' }], base, 'sol-xhigh'), null);
+  const reordered = { kickoffId: 2, findings: [blocker], preset: 'sol-xhigh', base, head: newerHead };
+  assert.equal(baseline([newer, { ...newer, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify(reordered)} -->` }], base, 'sol-xhigh').head, newerHead);
+});
+
+test('whitespace-only Git filenames publish inline and survive checkpoint reconciliation unchanged', async () => {
+  const filename = '   ';
+  const f = await fixture({ filename });
+  try {
+    const added = { ...finding, path: filename, side: 'RIGHT', start_line: 1, line: 1 };
+    await run(f, result([], 'REQUEST_CHANGES', [added]));
+    const first = posts(f).at(-1).body;
+    assert.equal(first.comments.length, 1);
+    assert.equal(first.comments[0].path, filename);
+    assert.equal(f.state.files[0].filename, filename);
+    const checkpoint = ledger(first.body);
+    assert.equal(checkpoint.findings[0].path, filename);
+    assert.deepEqual(outstandingFindings(f.state.reviews), checkpoint.findings);
+    assert.equal(baseline(f.state.reviews, f.base, 'sol-xhigh').head, f.head);
+    await f.advance({ [filename]: 'new\nwhitespace filename next round\n' });
+    await run(f, result(checkpoint.findings.map(item => resolution(item))));
+    assert.match(posts(f).at(-1).body.body, /Scope: \*\*incremental\*\*/);
+    assert.deepEqual(ledger(posts(f).at(-1).body.body).findings, checkpoint.findings);
+    assert.deepEqual(outstandingFindings(f.state.reviews), checkpoint.findings);
+    await f.advance({ [filename]: 'new\nwhitespace filename fixed\n' });
+    await run(f, result(checkpoint.findings.map(item => resolution(item, 'resolved', 'The whitespace-named file now handles the failure.')), 'APPROVE'));
+    assert.deepEqual(outstandingFindings(f.state.reviews), []);
   } finally { await f.close(); }
 });
