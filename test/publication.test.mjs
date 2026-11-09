@@ -4,11 +4,12 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
+import { getCheckpointSnapshot } from '../src/checkpoints.mjs';
 const { publishReview, reportPublicationFailure } = await import(process.env.CODJIFLO_PUBLICATION_MODULE || '../src/publication.mjs');
 
 const env = { CODJIFLO_APPROVED_USERS: 'alice' };
 function setup(event = 'REQUEST_CHANGES') {
-  const envelope = { version: 1, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'sol-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event, body: 'Review\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->', comments: [] } };
+  const envelope = { version: 2, analyzedCheckpoint: { fingerprint: null, highestKickoffId: 0 }, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'sol-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event, body: 'Review\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->', comments: [] } };
   const receipt = { id: 42, state: event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: envelope.head, body: envelope.payload.body };
   const state = { posts: 0, lists: 0, reviews: [], movement: 'none', events: [] };
   const github = {
@@ -25,6 +26,88 @@ function setup(event = 'REQUEST_CHANGES') {
   };
   return { envelope, receipt, state, github };
 }
+
+test('legacy envelopes and missing or malformed analyzed checkpoints fail before GitHub calls', async t => {
+  for (const change of [
+    envelope => { envelope.version = 1; },
+    envelope => { delete envelope.analyzedCheckpoint; },
+    envelope => { envelope.analyzedCheckpoint = null; },
+    envelope => { envelope.analyzedCheckpoint = { fingerprint: null }; },
+    envelope => { envelope.analyzedCheckpoint.highestKickoffId = -1; },
+    envelope => { envelope.analyzedCheckpoint.highestKickoffId = 1.5; },
+    envelope => { envelope.analyzedCheckpoint.highestKickoffId = Number.MAX_SAFE_INTEGER + 1; },
+    envelope => { envelope.analyzedCheckpoint.fingerprint = 42; },
+  ]) await t.test(String(change), async () => {
+    const f = setup();
+    change(f.envelope);
+    await assert.rejects(publishReview({ ...f, env }), /Invalid saved publication/);
+    assert.deepEqual(f.state.events, []);
+  });
+});
+
+test('changed checkpoint identity rejects initial publication and retry without posting a replacement ledger', async t => {
+  for (const duringRetry of [false, true]) {
+    for (const change of ['new-checkpoint', 'ledger', 'state', 'removed']) await t.test(`${change}, retry=${duringRetry}`, async () => {
+      const f = generationSetup('APPROVE', 300);
+      const prior = newerGeneration('REQUEST_CHANGES', 100).receipt;
+      if (change !== 'new-checkpoint') f.state.reviews.push(prior);
+      f.envelope.analyzedCheckpoint = getCheckpointSnapshot(f.state.reviews);
+      const saved = structuredClone(f.envelope);
+      const mutate = () => {
+        if (change === 'new-checkpoint') f.state.reviews.push(prior);
+        if (change === 'ledger') prior.body = prior.body.replace('The original failure remains.', 'The failure now affects cancellation.');
+        if (change === 'state') prior.state = 'COMMENTED';
+        if (change === 'removed') f.state.reviews = [];
+      };
+      const original = f.github.request;
+      f.github.request = async (path, options) => {
+        if (!options) return original(path);
+        f.state.posts++;
+        throw Object.assign(new Error('transient publication failure'), { status: 503 });
+      };
+      if (!duringRetry) mutate();
+      await assert.rejects(publishReview({ ...f, env, delay: async () => mutate() }), /checkpoint changed.*rerun/i);
+      assert.equal(f.state.posts, duringRetry ? 1 : 0);
+      assert.deepEqual(f.envelope, saved);
+    });
+  }
+});
+
+test('a confirmed same-identity receipt recovers even after the selected checkpoint changes', async () => {
+  const f = generationSetup('APPROVE', 100);
+  f.state.reviews.push(f.receipt, newerGeneration('REQUEST_CHANGES', 200).receipt);
+  assert.equal(await publishReview({ ...f, env }), f.receipt);
+  assert.equal(f.state.posts, 0);
+});
+
+test('persisted pre-analysis high-water generation with a null checkpoint withholds after history disappears', async () => {
+  const f = generationSetup('APPROVE', 100);
+  const barrier = { state: 'COMMENTED', commit_id: f.envelope.head, body: '<!-- codjiflo-reviewer:v4 {bad JSON} -->' };
+  f.envelope.analyzedCheckpoint = getCheckpointSnapshot([newerGeneration('REQUEST_CHANGES', 200).receipt, barrier]);
+  assert.deepEqual(f.envelope.analyzedCheckpoint, { fingerprint: null, highestKickoffId: 200 });
+  // Serialize the artifact exactly as recovery does; the observed review is no
+  // longer present in the publication API response.
+  f.envelope = JSON.parse(JSON.stringify(f.envelope));
+  const saved = structuredClone(f.envelope);
+  const receipt = await publishReview({ ...f, env });
+  assert.equal(receipt.state, 'COMMENTED');
+  assert.match(receipt.body, /A newer review generation superseded this review/);
+  assert.equal(f.state.posts, 1);
+  f.state.reviews.push(receipt);
+  assert.equal(await publishReview({ ...f, env }), receipt);
+  assert.equal(f.state.posts, 1);
+  assert.deepEqual(f.envelope, saved);
+});
+
+test('retained higher generation does not authorize a mismatched checkpoint after current higher history disappears', async t => {
+  for (const current of ['lower', 'omitted']) await t.test(current, async () => {
+    const f = generationSetup('APPROVE', 150);
+    f.envelope.analyzedCheckpoint = getCheckpointSnapshot([newerGeneration('REQUEST_CHANGES', 200).receipt]);
+    if (current === 'lower') f.state.reviews.push(newerGeneration('REQUEST_CHANGES', 100).receipt);
+    await assert.rejects(publishReview({ ...f, env }), /checkpoint changed.*rerun/i);
+    assert.equal(f.state.posts, 0, 'a stale COMMENT could become authoritative without the higher current generation');
+  });
+});
 
 function generationSetup(event = 'REQUEST_CHANGES', kickoffId = 100) {
   const f = setup(event);
@@ -50,6 +133,7 @@ function newerGeneration(event = 'REQUEST_CHANGES', kickoffId = 200) {
 async function generationReceipt(event) {
   const f = generationSetup(event);
   f.state.reviews.push(newerGeneration(event === 'APPROVE' ? 'REQUEST_CHANGES' : 'APPROVE').receipt);
+  f.envelope.analyzedCheckpoint = getCheckpointSnapshot(f.state.reviews);
   return publishReview({ ...f, env });
 }
 
@@ -97,7 +181,8 @@ test('each publication retry refreshes generation observations without forgettin
     const saved = structuredClone(f.envelope);
     const posted = [];
     let delayed = false;
-    f.github.list = async () => delayed && posted.length < 2 ? [newerGeneration().receipt] : [];
+    const barrier = { state: 'COMMENTED', commit_id: f.envelope.head, body: '<!-- codjiflo-reviewer:v4 {bad JSON} -->' };
+    f.github.list = async () => delayed && posted.length < 2 ? [newerGeneration().receipt, barrier] : [];
     const original = f.github.request;
     f.github.request = async (path, options) => {
       if (!options) return original(path);
@@ -118,6 +203,7 @@ test('generation withholding notice overflow fails closed without changing the r
   for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
     const f = generationSetup(event);
     f.state.reviews.push(newerGeneration().receipt);
+    f.envelope.analyzedCheckpoint = getCheckpointSnapshot(f.state.reviews);
     f.envelope.payload.body = 'x'.repeat(65536 - f.envelope.payload.body.length) + f.envelope.payload.body;
     const saved = structuredClone(f.envelope);
     await assert.rejects(publishReview({ ...f, env }), /Review body exceeds GitHub limit/);
@@ -132,6 +218,7 @@ test('generation withholding receipts reconcile across CRLF normalization and am
     for (const scenario of ['direct', 'recovery', 'ambiguous']) await t.test(`${event}, ${scenario}`, async () => {
       const f = generationSetup(event);
       f.state.reviews.push(newerGeneration().receipt);
+      f.envelope.analyzedCheckpoint = getCheckpointSnapshot(f.state.reviews);
       f.envelope.payload.body = f.envelope.payload.body.replaceAll('\n', '\r\n') + '\r\n';
       const saved = structuredClone(f.envelope);
       const normalized = { ...valid, body: valid.body.replaceAll('\n', '\r\n') + '\r\n \t\r\n' };
@@ -170,7 +257,10 @@ test('both withholding notices require exact text and paragraph structure in dir
         ]) await t.test(`${event}, ${reason}, recovery=${recovery}, ${change(valid.body).split('\n')[0]}`, async () => {
           const f = reason === 'revision' ? setup(event) : generationSetup(event);
           if (reason === 'revision') f.state.movement = 'head';
-          else f.state.reviews.push(newerGeneration().receipt);
+          else {
+            f.state.reviews.push(newerGeneration().receipt);
+            f.envelope.analyzedCheckpoint = getCheckpointSnapshot(f.state.reviews);
+          }
           const invalid = { ...valid, body: change(valid.body) };
           if (recovery) f.state.reviews.push(invalid);
           const original = f.github.request;
@@ -199,6 +289,8 @@ test('direct comments confirm the actual withholding reason while recovery accep
         f.state.reviews.push(newerGeneration().receipt);
         opposite.state.movement = 'head';
       }
+      f.envelope.analyzedCheckpoint = getCheckpointSnapshot(f.state.reviews);
+      opposite.envelope.analyzedCheckpoint = getCheckpointSnapshot(opposite.state.reviews);
       const receipt = await publishReview({ ...opposite, env });
       const original = f.github.request;
       f.github.request = async (path, options) => {

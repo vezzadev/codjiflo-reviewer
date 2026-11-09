@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { isApproved, PRESETS } from './commands.mjs';
 import { secretRedactor } from './redaction.mjs';
-import { observeCheckpoints, parseCheckpoint } from './checkpoints.mjs';
+import { getCheckpointSnapshot, parseCheckpoint } from './checkpoints.mjs';
 
 export function workflowRunUrl(request, env) {
   return env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${request.repo}/actions/runs/${env.GITHUB_RUN_ID}` : null;
@@ -18,12 +18,15 @@ function publicationId(body) {
 }
 
 function validate(envelope, env) {
-  const { request, head, base, payload } = envelope ?? {};
-  if (envelope?.version !== 1 || !request ||
+  const { request, head, base, payload, analyzedCheckpoint } = envelope ?? {};
+  if (envelope?.version !== 2 || !request ||
       !/^[\w.-]+\/[\w.-]+$/.test(request.repo) || !Number.isSafeInteger(request.number) || request.number < 1 ||
       !Object.hasOwn(PRESETS, request.preset) || !['full', 'incremental'].includes(request.mode) ||
       !isApproved(request.requester, env.CODJIFLO_APPROVED_USERS) ||
       !/^[a-f0-9]{40}$/.test(head) || !/^[a-f0-9]{40}$/.test(base) ||
+      !analyzedCheckpoint || typeof analyzedCheckpoint !== 'object' || Array.isArray(analyzedCheckpoint) ||
+      !(analyzedCheckpoint.fingerprint === null || typeof analyzedCheckpoint.fingerprint === 'string') ||
+      !Number.isSafeInteger(analyzedCheckpoint.highestKickoffId) || analyzedCheckpoint.highestKickoffId < 0 ||
       payload?.commit_id !== head || !['APPROVE', 'REQUEST_CHANGES'].includes(payload.event) ||
       !publicationId(payload.body) ||
       !Array.isArray(payload.comments)) throw new Error('Invalid saved publication or unapproved requester');
@@ -74,7 +77,7 @@ function confirmed(receipt, envelope, payload = envelope.payload) {
 // can still race a retry; GitHub does not provide an idempotency key for this POST.
 export async function publishReview({ envelope, github, env = process.env, delay = sleep }) {
   validate(envelope, env);
-  const { request, head, base, payload } = envelope;
+  const { request, head, base, payload, analyzedCheckpoint } = envelope;
   const withheld = new Map();
   const downgradedPayload = reason => {
     if (!withheld.has(reason)) withheld.set(reason, withheldReview(payload,
@@ -85,7 +88,9 @@ export async function publishReview({ envelope, github, env = process.env, delay
     state: payload.event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED',
     commit_id: head, body: payload.body,
   })?.value.kickoffId ?? 0;
-  let highestObservedGeneration = 0;
+  let highestObservedGeneration = analyzedCheckpoint.highestKickoffId;
+  let currentCheckpointFingerprint;
+  let currentHighestGeneration = 0;
   const pullPath = `/repos/${request.repo}/pulls/${request.number}`;
   const identity = publicationId(payload.body);
   const read = async operation => {
@@ -100,8 +105,10 @@ export async function publishReview({ envelope, github, env = process.env, delay
   const reconcile = async postError => {
     try {
       const reviews = await read(() => github.list(`${pullPath}/reviews`));
-      highestObservedGeneration = Math.max(highestObservedGeneration,
-        observeCheckpoints(reviews).highestKickoffId);
+      const checkpointSnapshot = getCheckpointSnapshot(reviews);
+      highestObservedGeneration = Math.max(highestObservedGeneration, checkpointSnapshot.highestKickoffId);
+      currentCheckpointFingerprint = checkpointSnapshot.fingerprint;
+      currentHighestGeneration = checkpointSnapshot.highestKickoffId;
       const matches = reviews.filter(receipt => publicationId(receipt.body) === identity);
       if (matches.length > 1) throw new Error('Multiple GitHub reviews have the publication identity; refusing ambiguous publication');
       const match = matches[0];
@@ -128,8 +135,14 @@ export async function publishReview({ envelope, github, env = process.env, delay
       const found = await reconcile(postError);
       if (found) return finish(found);
     }
+    // A stale ledger is safe only as superseded feedback when the current
+    // history already contains a strictly higher generation. A retained high
+    // water mark alone cannot prevent it becoming the selected checkpoint.
+    if (currentCheckpointFingerprint !== analyzedCheckpoint.fingerprint && currentHighestGeneration <= ownGeneration) {
+      throw new Error('Review checkpoint changed after analysis was prepared; rerun the review before publishing');
+    }
     // Recheck revisions immediately before each POST. Generation observations
-    // come from reconciliation and remain monotonic even if later lists lag.
+    // remain monotonic even if later lists lag. These GETs and POST are not atomic.
     const latest = await read(() => github.request(pullPath));
     if (latest.state !== 'open') throw new Error('Pull request is not open; refusing publication');
     const postedPayload = latest.head.sha !== head || latest.base.sha !== base

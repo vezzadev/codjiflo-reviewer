@@ -8,7 +8,7 @@ import { reviewInput } from './evidence.mjs';
 import { runProcess, runReviewer } from './runner.mjs';
 import { publishReview, reportPublicationFailure, workflowRunUrl, validateReviewBody } from './publication.mjs';
 import { sanitizeGitEnv } from './git-environment.mjs';
-import { FINDING_FIELDS, validFinding, latestCheckpoint } from './checkpoints.mjs';
+import { FINDING_FIELDS, validFinding, latestCheckpoint, getCheckpointSnapshot } from './checkpoints.mjs';
 
 export function outstandingFindings(reviews) {
   return latestCheckpoint(reviews)?.value.findings ?? [];
@@ -153,6 +153,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     }
     const reviews = await github.list(`${pullPath}/reviews`);
     const checkpoint = latestCheckpoint(reviews);
+    const analyzedCheckpoint = getCheckpointSnapshot(reviews);
     const priorFindings = checkpoint?.value.findings ?? [];
     let scope = mergeBase;
     let mode = 'full';
@@ -201,7 +202,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const marker = `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, kickoffId, preset: request.preset, findings }).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e')} -->`;
     const workflowMarker = /^\d+$/.test(env.GITHUB_RUN_ID ?? '') && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? '') ?
       `\n<!-- codjiflo-workflow:${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT} -->` : '';
-    const envelope = { version: 1, request, head, base, payload: {
+    const envelope = { version: 2, request, head, base, analyzedCheckpoint, payload: {
       commit_id: head, event: result.verdict,
       body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nReviewed range: \`${scope}..${head}\`\nPR base snapshot: \`${base}\`\n\nScope: **${mode}** (${reason}).\n\n${marker}${workflowMarker}\n<!-- codjiflo-publication:${publication} -->`,
       comments,

@@ -54,6 +54,12 @@ async function runRound(expectedVerdict, expectedMode) {
   };
   log = await f.run({ preset, providerEnv, streamOutput, timeoutMs: 46 * 60 * 1000 });
   const records = log.split('\n').flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+  const input = records.filter(event => event.type === 'message_end' && event.message?.role === 'user')
+    .flatMap(event => event.message.content)
+    .find(part => part?.type === 'text' && part.text.includes('Review-scope unified diff follows:\n'))?.text;
+  const scopePatch = input?.split('Review-scope unified diff follows:\n')[1]
+    ?.split('\nAuthoritative current PR file metadata and patches for location mapping ONLY')[0];
+  assert.equal(typeof scopePatch, 'string', 'Observe the scope patch actually delivered to the model');
   const calls = records.filter(event => event.type === 'tool_execution_start');
   const completions = records.filter(event => event.type === 'tool_execution_end');
   assert.ok(calls.some(call => ['read', 'bash'].includes(call.toolName)
@@ -76,26 +82,29 @@ async function runRound(expectedVerdict, expectedMode) {
   const retained = JSON.parse(await readFile(join(f.temp, 'publication.json'), 'utf8'));
   assert.equal(retained.payload.body, payload.body);
   rounds.push({ head: payload.commit_id, verdict: expectedVerdict, mode: expectedMode, findings: checkpoint.findings.length });
-  return { result, checkpoint };
+  return { result, checkpoint, scopePatch };
 }
 try {
   const first = await runRound('REQUEST_CHANGES', 'full');
   assert.ok(first.checkpoint.findings.some(finding => finding.disposition === 'blocking'));
   assert.deepEqual(first.result.resolutions, []);
   const priorIds = first.checkpoint.findings.map(finding => finding.id).sort();
-  await f.advance({ 'settings.txt': 'minimum=-1\nOnly this note changed.\n' + 'context\n'.repeat(8) });
+  const notes = 'changed\n' + 'context\n'.repeat(7) + 'Unrelated note updated.\n';
+  await f.advance({ 'settings.txt': 'minimum=-1\n' + notes });
   const second = await runRound('REQUEST_CHANGES', 'incremental');
+  assert.doesNotMatch(second.scopePatch, /minimum=/, 'The old defect must be absent even from incremental hunk context');
+  assert.ok(second.scopePatch.includes('+Unrelated note updated.'));
   assert.deepEqual(second.result.findings, [], 'An unchanged prior blocker must not be reported as a new finding');
   assert.deepEqual(second.checkpoint.findings.map(finding => finding.id).sort(), priorIds);
   assert.deepEqual(second.result.resolutions.map(resolution => resolution.id).sort(), priorIds);
   assert.ok(second.result.resolutions.some(resolution => resolution.status === 'unresolved'));
   assert.ok(second.checkpoint.findings.some(finding => priorIds.includes(finding.id) && finding.disposition === 'blocking'));
-  await f.advance({ 'settings.txt': 'minimum=0\nOnly this note changed.\n' + 'context\n'.repeat(8) });
+  await f.advance({ 'settings.txt': 'minimum=0\n' + notes });
   const third = await runRound('APPROVE', 'incremental');
   assert.deepEqual(third.result.resolutions.map(resolution => resolution.id).sort(), second.checkpoint.findings.map(finding => finding.id).sort());
   assert.ok(third.result.resolutions.every(resolution => resolution.status === 'resolved'));
   assert.deepEqual(third.checkpoint.findings, []);
-  console.log(JSON.stringify({ preset, sourceConsumedEveryRound: true, nativePublicationEveryRound: true, rounds }));
+  console.log(JSON.stringify({ preset, sourceConsumedEveryRound: true, defectOutsideIncrementalPatch: true, nativePublicationEveryRound: true, rounds }));
 } catch (error) {
   failed = true;
   const transcript = join(proof, 'failed-stdout.log');

@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { baseline, outstandingFindings, validateResult } from '../src/review.mjs';
+import { baseline, outstandingFindings, review, validateResult } from '../src/review.mjs';
 import { filesFromApi } from '../src/diff.mjs';
 import { MAX_INLINE_INPUT, MAX_EVIDENCE_READ_BYTES } from '../src/input-budget.mjs';
 import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
+import { GitHub } from '../src/github.mjs';
+import { publishReview } from '../src/publication.mjs';
 
 const finding = { path: 'old-deleted.js', side: 'LEFT', start_line: 400, line: 402, priority: 'P1', disposition: 'blocking', title: 'Original blocker', body: 'The original failure remains reproducible.' };
 const entry = (head, overrides = {}) => ({ ...finding, id: randomUUID(), originHead: head, ...overrides });
@@ -255,6 +257,92 @@ test('large prior ledgers are staged losslessly and accessible through bounded U
     }
     assert.deepEqual(JSON.parse(reconstructed), [old]);
     assert.ok(reconstructed.includes('END-OF-PRIOR-EVIDENCE'));
+  } finally { await f.close(); }
+});
+
+test('recovering A during newer B analysis rejects B instead of erasing an unseen blocker', async () => {
+  const f = await fixture();
+  try {
+    const github = new GitHub({ token: 'fixture-token-not-real', url: f.api });
+    const env = { ...f.env, CODJIFLO_APPROVED_USERS: 'alice' };
+    const request = { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'incremental' };
+    const added = { ...finding, path: 'a.js', side: 'RIGHT', start_line: 1, line: 1 };
+    f.state.publicationStatus = 422;
+    await assert.rejects(run(f, result([], 'REQUEST_CHANGES', [added])), /Fixture publication rejected/);
+    const savedA = JSON.parse(await readFile(join(f.temp, 'publication.json'), 'utf8'));
+    const blocker = ledger(savedA.payload.body).findings[0];
+    assert.deepEqual(savedA.analyzedCheckpoint, { fingerprint: null, highestKickoffId: 0 });
+    assert.equal(f.state.reviews.length, 0);
+    f.state.publicationStatus = undefined;
+    const beforeB = posts(f).length;
+    let analyzed = false;
+    const output = join(f.temp, 'newer-publication.json');
+    await assert.rejects(review({
+      request, github, env, output,
+      reviewer: async ({ prompt: input }) => {
+        analyzed = true;
+        assert.ok(!input.includes(blocker.id), 'B began before A became a checkpoint');
+        await publishReview({ envelope: savedA, github, env });
+        assert.deepEqual(outstandingFindings(f.state.reviews), [blocker]);
+        return result([], 'APPROVE');
+      },
+    }), /checkpoint changed.*rerun/i);
+    assert.equal(analyzed, true);
+    const savedB = JSON.parse(await readFile(output, 'utf8'));
+    assert.ok(ledger(savedB.payload.body).kickoffId > ledger(savedA.payload.body).kickoffId);
+    assert.deepEqual(savedB.analyzedCheckpoint, { fingerprint: null, highestKickoffId: 0 });
+    assert.equal(posts(f).length, beforeB + 1, 'only A recovery posted a review; B posts neither native nor COMMENT');
+    assert.equal(f.state.reviews.length, 1, 'B did not publish its empty ledger');
+    assert.equal(f.state.reviews[0].state, 'CHANGES_REQUESTED');
+    assert.deepEqual(outstandingFindings(f.state.reviews), [blocker]);
+    let resolved = false;
+    await review({
+      request, github, env, output: join(f.temp, 'retry-publication.json'),
+      reviewer: async ({ prompt: input }) => {
+        assert.ok(input.includes(blocker.id), 'the rerun must consume A’s exact blocker ID');
+        resolved = true;
+        return result([resolution(blocker, 'resolved', 'The new guard fixes the original failure.')], 'APPROVE');
+      },
+    });
+    assert.equal(resolved, true);
+    assert.equal(f.state.reviews.at(-1).state, 'APPROVED');
+    assert.deepEqual(outstandingFindings(f.state.reviews), []);
+    const retry = JSON.parse(await readFile(join(f.temp, 'retry-publication.json'), 'utf8'));
+    assert.equal(typeof retry.analyzedCheckpoint.fingerprint, 'string');
+    assert.equal(retry.analyzedCheckpoint.highestKickoffId, ledger(savedA.payload.body).kickoffId);
+  } finally { await f.close(); }
+});
+
+test('pre-model generation observations survive vanished history and artifact recovery', async () => {
+  const f = await fixture();
+  try {
+    const github = new GitHub({ token: 'fixture-token-not-real', url: f.api });
+    const env = { ...f.env, CODJIFLO_APPROVED_USERS: 'alice' };
+    f.state.reviews = [
+      { state: 'CHANGES_REQUESTED', commit_id: f.previous, body: marker(f.previous, f.base, [entry(f.previous)], 'sol-xhigh', 2000) },
+      { state: 'COMMENTED', commit_id: f.previous, body: '<!-- codjiflo-reviewer:v4 {bad JSON} -->' },
+    ];
+    const output = join(f.temp, 'observed-publication.json');
+    await assert.rejects(review({
+      request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'incremental' },
+      github, env, output,
+      reviewer: async () => {
+        f.state.reviews = [];
+        f.state.publicationStatus = 422;
+        return result([], 'APPROVE');
+      },
+    }), /Fixture publication rejected/);
+    const saved = JSON.parse(await readFile(output, 'utf8'));
+    assert.equal(saved.version, 2);
+    assert.deepEqual(saved.analyzedCheckpoint, { fingerprint: null, highestKickoffId: 2000 });
+    assert.ok(ledger(saved.payload.body).kickoffId < 2000);
+    assert.equal(posts(f).at(-1).body.event, 'COMMENT');
+    f.state.publicationStatus = undefined;
+    const recovered = await publishReview({ envelope: saved, github, env });
+    assert.equal(recovered.state, 'COMMENTED');
+    assert.equal(posts(f).at(-1).body.event, 'COMMENT');
+    assert.match(recovered.body, /A newer review generation superseded this review/);
+    assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), saved);
   } finally { await f.close(); }
 });
 

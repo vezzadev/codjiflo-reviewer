@@ -80,3 +80,13 @@ export function observeCheckpoints(reviews) {
 export function latestCheckpoint(reviews) {
   return observeCheckpoints(reviews).checkpoint;
 }
+
+export function getCheckpointSnapshot(reviews) {
+  // Use persisted ledger metadata and submitted state, not receipt identity:
+  // equivalent retry receipts represent the same analyzed checkpoint.
+  const { checkpoint, highestKickoffId } = observeCheckpoints(reviews);
+  return {
+    fingerprint: checkpoint ? JSON.stringify({ value: checkpoint.value, state: checkpoint.prior.state }) : null,
+    highestKickoffId,
+  };
+}
