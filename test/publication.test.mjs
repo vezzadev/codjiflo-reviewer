@@ -4,7 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
-import { getCheckpointSnapshot } from '../src/checkpoints.mjs';
+import { getCheckpointSnapshot, latestCheckpoint, parseCheckpoint } from '../src/checkpoints.mjs';
 const { publishReview, reportPublicationFailure } = await import(process.env.CODJIFLO_PUBLICATION_MODULE || '../src/publication.mjs');
 
 const env = { CODJIFLO_APPROVED_USERS: 'alice' };
@@ -47,8 +47,8 @@ test('legacy envelopes and missing or malformed analyzed checkpoints fail before
 
 test('changed checkpoint identity rejects initial publication and retry without posting a replacement ledger', async t => {
   for (const duringRetry of [false, true]) {
-    for (const change of ['new-checkpoint', 'ledger', 'state', 'removed']) await t.test(`${change}, retry=${duringRetry}`, async () => {
-      const f = generationSetup('APPROVE', 300);
+    for (const event of ['APPROVE', 'REQUEST_CHANGES']) for (const change of ['new-checkpoint', 'ledger', 'state', 'removed']) await t.test(`${event}, ${change}, retry=${duringRetry}`, async () => {
+      const f = generationSetup(event, 300);
       const prior = newerGeneration('REQUEST_CHANGES', 100).receipt;
       if (change !== 'new-checkpoint') f.state.reviews.push(prior);
       f.envelope.analyzedCheckpoint = getCheckpointSnapshot(f.state.reviews);
@@ -80,23 +80,82 @@ test('a confirmed same-identity receipt recovers even after the selected checkpo
   assert.equal(f.state.posts, 0);
 });
 
-test('persisted pre-analysis high-water generation with a null checkpoint withholds after history disappears', async () => {
-  const f = generationSetup('APPROVE', 100);
-  const barrier = { state: 'COMMENTED', commit_id: f.envelope.head, body: '<!-- codjiflo-reviewer:v4 {bad JSON} -->' };
-  f.envelope.analyzedCheckpoint = getCheckpointSnapshot([newerGeneration('REQUEST_CHANGES', 200).receipt, barrier]);
-  assert.deepEqual(f.envelope.analyzedCheckpoint, { fingerprint: null, highestKickoffId: 200 });
-  // Serialize the artifact exactly as recovery does; the observed review is no
-  // longer present in the publication API response.
-  f.envelope = JSON.parse(JSON.stringify(f.envelope));
-  const saved = structuredClone(f.envelope);
-  const receipt = await publishReview({ ...f, env });
-  assert.equal(receipt.state, 'COMMENTED');
-  assert.match(receipt.body, /A newer review generation superseded this review/);
-  assert.equal(f.state.posts, 1);
-  f.state.reviews.push(receipt);
-  assert.equal(await publishReview({ ...f, env }), receipt);
-  assert.equal(f.state.posts, 1);
-  assert.deepEqual(f.envelope, saved);
+function reverseObjectKeys(value) {
+  if (Array.isArray(value)) return value.map(reverseObjectKeys);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reverseObjectKeys(item)]));
+  }
+  return value;
+}
+
+function withCheckpointValue(receipt, value) {
+  return { ...receipt, body: receipt.body.replace(/<!-- codjiflo-reviewer:v4 \{[^\n]+\} -->/, `<!-- codjiflo-reviewer:v4 ${JSON.stringify(value)} -->`) };
+}
+
+test('checkpoint fingerprints canonicalize nested metadata keys without hiding ledger or state changes', () => {
+  const prior = newerGeneration().receipt;
+  const value = parseCheckpoint(prior).value;
+  value.findings.push({ ...value.findings[0], id: '12345678-1234-4234-8234-123456789abc', title: 'Second blocker' });
+  const original = withCheckpointValue(prior, value);
+  const reordered = withCheckpointValue(prior, reverseObjectKeys(value));
+  const snapshot = getCheckpointSnapshot([original]);
+  assert.match(snapshot.fingerprint, /^[a-f0-9]{64}$/, 'artifacts store a SHA-256 digest, not the old ledger');
+  assert.deepEqual(getCheckpointSnapshot([reordered]), snapshot);
+  assert.notEqual(getCheckpointSnapshot([{ ...original, state: 'COMMENTED' }]).fingerprint, snapshot.fingerprint);
+  const changed = structuredClone(value);
+  changed.findings[0].body += ' New evidence.';
+  assert.notEqual(getCheckpointSnapshot([withCheckpointValue(prior, changed)]).fingerprint, snapshot.fingerprint);
+  const arrayReordered = { ...value, findings: [...value.findings].reverse() };
+  assert.notEqual(getCheckpointSnapshot([withCheckpointValue(prior, arrayReordered)]).fingerprint, snapshot.fingerprint, 'finding array order remains significant');
+});
+
+test('equivalent checkpoint key reordering permits publication for both verdicts', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
+    const f = generationSetup(event, 300);
+    const prior = newerGeneration('REQUEST_CHANGES', 100).receipt;
+    f.envelope.analyzedCheckpoint = getCheckpointSnapshot([prior]);
+    const saved = structuredClone(f.envelope);
+    f.state.reviews = [withCheckpointValue(prior, reverseObjectKeys(parseCheckpoint(prior).value))];
+    const receipt = await publishReview({ ...f, env });
+    assert.equal(receipt.state, event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED');
+    assert.equal(f.state.posts, 1);
+    assert.deepEqual(f.envelope, saved);
+  });
+});
+
+test('null checkpoint high-water marks reject stale artifacts when current higher history disappears', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    for (const duringRetry of [false, true]) {
+      for (const movement of ['none', 'head', 'base', 'both']) await t.test(`${event}, retry=${duringRetry}, movement=${movement}`, async () => {
+        const f = generationSetup(event, 100);
+        const barrier = { state: 'COMMENTED', commit_id: f.envelope.head, body: '<!-- codjiflo-reviewer:v4 {bad JSON} -->' };
+        const higherHistory = [newerGeneration('REQUEST_CHANGES', 200).receipt, barrier];
+        f.envelope.analyzedCheckpoint = getCheckpointSnapshot(higherHistory);
+        assert.deepEqual(f.envelope.analyzedCheckpoint, { fingerprint: null, highestKickoffId: 200 });
+        // Recovery preserves causal history even when the selected checkpoint is
+        // null. Equal null fingerprints do not make the old ledger safe to post.
+        f.envelope = JSON.parse(JSON.stringify(f.envelope));
+        const saved = structuredClone(f.envelope);
+        f.state.movement = movement;
+        if (duringRetry) {
+          f.state.reviews = higherHistory;
+          const original = f.github.request;
+          f.github.request = async (path, options) => {
+            if (!options) return original(path);
+            f.state.posts++;
+            assert.equal(options.body.event, 'COMMENT');
+            throw Object.assign(new Error('transient publication failure'), { status: 503 });
+          };
+        }
+        await assert.rejects(publishReview({
+          ...f, env, delay: async () => { f.state.reviews = []; },
+        }), /checkpoint changed.*rerun/i);
+        assert.equal(f.state.posts, duringRetry ? 1 : 0, 'no stale ledger POST after higher history disappears');
+        assert.equal(latestCheckpoint(f.state.reviews), null, 'rejection must not create a selected stale ledger');
+        assert.deepEqual(f.envelope, saved);
+      });
+    }
+  }
 });
 
 test('retained higher generation does not authorize a mismatched checkpoint after current higher history disappears', async t => {
@@ -175,7 +234,7 @@ test('failed older native verdict recovers as a comment after a newer same-head 
   });
 });
 
-test('each publication retry refreshes generation observations without forgetting the greatest seen', async t => {
+test('publication retries retain high-water observations but reject when current higher history disappears', async t => {
   for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
     const f = generationSetup(event);
     const saved = structuredClone(f.envelope);
@@ -187,14 +246,44 @@ test('each publication retry refreshes generation observations without forgettin
     f.github.request = async (path, options) => {
       if (!options) return original(path);
       posted.push(structuredClone(options.body));
-      if (posted.length < 3) throw Object.assign(new Error('transient publication failure'), { status: 503 });
-      f.receipt.state = 'COMMENTED';
-      f.receipt.body = options.body.body;
-      return f.receipt;
+      throw Object.assign(new Error('transient publication failure'), { status: 503 });
     };
-    await publishReview({ ...f, env, delay: async () => { delayed = true; } });
-    assert.deepEqual(posted.map(payload => payload.event), [event, 'COMMENT', 'COMMENT']);
-    for (const payload of posted.slice(1)) assert.match(payload.body, /A newer review generation superseded this review/);
+    // A third COMMENT used to be accepted from the retained high-water mark
+    // alone, which could install the old generation as the selected ledger.
+    await assert.rejects(publishReview({ ...f, env, delay: async () => { delayed = true; } }), /checkpoint changed.*rerun/i);
+    assert.deepEqual(posted.map(payload => payload.event), [event, 'COMMENT']);
+    assert.match(posted[1].body, /A newer review generation superseded this review/);
+    assert.equal(latestCheckpoint(f.state.reviews), null);
+    assert.deepEqual(f.envelope, saved);
+  });
+});
+
+test('older comments remain safe when a strictly higher current generation remains through retries', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
+    const f = generationSetup(event);
+    const higher = newerGeneration().receipt;
+    const barrier = { state: 'COMMENTED', commit_id: f.envelope.head, body: '<!-- codjiflo-reviewer:v4 {bad JSON} -->' };
+    f.state.reviews = [higher, barrier];
+    f.envelope.analyzedCheckpoint = getCheckpointSnapshot(f.state.reviews);
+    assert.deepEqual(f.envelope.analyzedCheckpoint, { fingerprint: null, highestKickoffId: 200 });
+    const saved = structuredClone(f.envelope);
+    const original = f.github.request;
+    f.github.request = async (path, options) => {
+      if (!options) return original(path);
+      assert.equal(options.body.event, 'COMMENT');
+      if (f.state.posts < 2) {
+        f.state.posts++;
+        throw Object.assign(new Error('transient publication failure'), { status: 503 });
+      }
+      return original(path, options);
+    };
+    const receipt = await publishReview({ ...f, env, delay: async () => {} });
+    assert.equal(receipt.state, 'COMMENTED');
+    assert.equal(f.state.posts, 3);
+    f.state.reviews.push(receipt);
+    assert.equal(latestCheckpoint(f.state.reviews), null, 'older feedback must not clear the newer barrier');
+    assert.equal(await publishReview({ ...f, env }), receipt, 'confirmed identity still recovers without a POST');
+    assert.equal(f.state.posts, 3);
     assert.deepEqual(f.envelope, saved);
   });
 });

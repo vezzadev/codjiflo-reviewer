@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { PRESETS } from './commands.mjs';
 
@@ -81,12 +82,20 @@ export function latestCheckpoint(reviews) {
   return observeCheckpoints(reviews).checkpoint;
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 export function getCheckpointSnapshot(reviews) {
   // Use persisted ledger metadata and submitted state, not receipt identity:
   // equivalent retry receipts represent the same analyzed checkpoint.
   const { checkpoint, highestKickoffId } = observeCheckpoints(reviews);
   return {
-    fingerprint: checkpoint ? JSON.stringify({ value: checkpoint.value, state: checkpoint.prior.state }) : null,
+    fingerprint: checkpoint ? createHash('sha256').update(canonicalJson({ value: checkpoint.value, state: checkpoint.prior.state })).digest('hex') : null,
     highestKickoffId,
   };
 }

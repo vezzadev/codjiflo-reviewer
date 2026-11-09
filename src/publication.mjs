@@ -135,10 +135,12 @@ export async function publishReview({ envelope, github, env = process.env, delay
       const found = await reconcile(postError);
       if (found) return finish(found);
     }
-    // A stale ledger is safe only as superseded feedback when the current
-    // history already contains a strictly higher generation. A retained high
-    // water mark alone cannot prevent it becoming the selected checkpoint.
-    if (currentCheckpointFingerprint !== analyzedCheckpoint.fingerprint && currentHighestGeneration <= ownGeneration) {
+    // A changed checkpoint or known supersession is safe only as feedback when
+    // current history contains a strictly higher generation. A retained high
+    // water mark (even with equal null fingerprints) cannot prevent this old
+    // ledger becoming the selected checkpoint after history disappears.
+    if ((currentCheckpointFingerprint !== analyzedCheckpoint.fingerprint || highestObservedGeneration > ownGeneration)
+        && currentHighestGeneration <= ownGeneration) {
       throw new Error('Review checkpoint changed after analysis was prepared; rerun the review before publishing');
     }
     // Recheck revisions immediately before each POST. Generation observations

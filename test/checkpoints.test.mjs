@@ -10,6 +10,7 @@ import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
 import { GitHub } from '../src/github.mjs';
 import { publishReview } from '../src/publication.mjs';
+import { latestCheckpoint } from '../src/checkpoints.mjs';
 
 const finding = { path: 'old-deleted.js', side: 'LEFT', start_line: 400, line: 402, priority: 'P1', disposition: 'blocking', title: 'Original blocker', body: 'The original failure remains reproducible.' };
 const entry = (head, overrides = {}) => ({ ...finding, id: randomUUID(), originHead: head, ...overrides });
@@ -313,7 +314,7 @@ test('recovering A during newer B analysis rejects B instead of erasing an unsee
   } finally { await f.close(); }
 });
 
-test('pre-model generation observations survive vanished history and artifact recovery', async () => {
+test('pre-model high-water observations persist but vanished history rejects publication and recovery', async () => {
   const f = await fixture();
   try {
     const github = new GitHub({ token: 'fixture-token-not-real', url: f.api });
@@ -328,20 +329,19 @@ test('pre-model generation observations survive vanished history and artifact re
       github, env, output,
       reviewer: async () => {
         f.state.reviews = [];
-        f.state.publicationStatus = 422;
         return result([], 'APPROVE');
       },
-    }), /Fixture publication rejected/);
+    }), /checkpoint changed.*rerun/i);
     const saved = JSON.parse(await readFile(output, 'utf8'));
     assert.equal(saved.version, 2);
     assert.deepEqual(saved.analyzedCheckpoint, { fingerprint: null, highestKickoffId: 2000 });
     assert.ok(ledger(saved.payload.body).kickoffId < 2000);
-    assert.equal(posts(f).at(-1).body.event, 'COMMENT');
-    f.state.publicationStatus = undefined;
-    const recovered = await publishReview({ envelope: saved, github, env });
-    assert.equal(recovered.state, 'COMMENTED');
-    assert.equal(posts(f).at(-1).body.event, 'COMMENT');
-    assert.match(recovered.body, /A newer review generation superseded this review/);
+    // The persisted observation must not authorize COMMENT: without the higher
+    // current generation, that feedback would become the selected stale ledger.
+    assert.equal(posts(f).length, 0);
+    await assert.rejects(publishReview({ envelope: saved, github, env }), /checkpoint changed.*rerun/i);
+    assert.equal(posts(f).length, 0);
+    assert.equal(latestCheckpoint(f.state.reviews), null);
     assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), saved);
   } finally { await f.close(); }
 });
