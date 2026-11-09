@@ -19,7 +19,7 @@ export default function reviewExtension(pi) {
       verdict: z.enum(['APPROVE', 'REQUEST_CHANGES', 'INCOMPLETE']),
       summary: z.string(),
       resolutions: z.array(z.object({
-        id: z.string(), status: z.enum(['resolved', 'unresolved']), reason: z.string(),
+        id: z.string(), status: z.enum(['resolved', 'unresolved']), reason: z.string().min(1),
       }).strict()),
       findings: z.array(z.object({
         path: z.string(), side: z.enum(['LEFT', 'RIGHT']),

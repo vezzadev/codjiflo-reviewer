@@ -11,7 +11,7 @@ export const schema = {
     summary: { type: 'string' },
     resolutions: { type: 'array', items: {
       type: 'object', additionalProperties: false, required: ['id', 'status', 'reason'],
-      properties: { id: { type: 'string' }, status: { type: 'string', enum: ['resolved', 'unresolved'] }, reason: { type: 'string' } },
+      properties: { id: { type: 'string' }, status: { type: 'string', enum: ['resolved', 'unresolved'] }, reason: { type: 'string', minLength: 1 } },
     } },
     findings: { type: 'array', items: {
       type: 'object', additionalProperties: false,
