@@ -26,6 +26,196 @@ function setup(event = 'REQUEST_CHANGES') {
   return { envelope, receipt, state, github };
 }
 
+function generationSetup(event = 'REQUEST_CHANGES', kickoffId = 100) {
+  const f = setup(event);
+  const findings = event === 'APPROVE' ? [] : [{
+    id: '87654321-4321-4321-8321-cba987654321', originHead: f.envelope.head,
+    path: 'a.js', side: 'RIGHT', start_line: 1, line: 1, priority: 'P1',
+    disposition: 'blocking', title: 'Unresolved blocker', body: 'The original failure remains.',
+  }];
+  const metadata = { head: f.envelope.head, base: f.envelope.base, preset: 'sol-xhigh', findings, kickoffId };
+  f.envelope.payload.body = `Review\n<!-- codjiflo-reviewer:v4 ${JSON.stringify(metadata)} -->\n${f.envelope.payload.body.split('\n').at(-1)}`;
+  f.receipt.body = f.envelope.payload.body;
+  return f;
+}
+
+function newerGeneration(event = 'REQUEST_CHANGES', kickoffId = 200) {
+  const newer = generationSetup(event, kickoffId);
+  newer.envelope.payload.body = newer.envelope.payload.body.replace('123456789abc', '123456789abd');
+  newer.receipt.body = newer.envelope.payload.body;
+  newer.receipt.id = 43;
+  return newer;
+}
+
+async function generationReceipt(event) {
+  const f = generationSetup(event);
+  f.state.reviews.push(newerGeneration(event === 'APPROVE' ? 'REQUEST_CHANGES' : 'APPROVE').receipt);
+  return publishReview({ ...f, env });
+}
+
+test('failed older native verdict recovers as a comment after a newer same-head opposite verdict', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
+    const older = generationSetup(event);
+    const newer = newerGeneration(event === 'APPROVE' ? 'REQUEST_CHANGES' : 'APPROVE');
+    const saved = structuredClone(older.envelope);
+    const posted = [];
+    let failOlder = true;
+    const github = {
+      async list() { return older.state.reviews; },
+      async request(path, options) {
+        if (!options) return { state: 'open', head: { sha: saved.head }, base: { sha: saved.base } };
+        posted.push(structuredClone(options.body));
+        if (failOlder) throw Object.assign(new Error('old native publication failed'), { status: 422 });
+        const receipt = {
+          id: older.state.reviews.length + 50, commit_id: options.body.commit_id,
+          state: { APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED', COMMENT: 'COMMENTED' }[options.body.event],
+          body: options.body.body,
+        };
+        older.state.reviews.push(receipt);
+        return receipt;
+      },
+    };
+    await assert.rejects(publishReview({ envelope: older.envelope, github, env }), /old native publication failed/);
+    assert.equal(posted[0].event, event);
+    failOlder = false;
+    const current = await publishReview({ envelope: newer.envelope, github, env });
+    assert.equal(current.state, event === 'APPROVE' ? 'CHANGES_REQUESTED' : 'APPROVED');
+    const recovered = await publishReview({ envelope: older.envelope, github, env });
+    assert.equal(recovered.state, 'COMMENTED');
+    assertPublishedPayload(posted.at(-1), saved.payload, true);
+    assert.match(recovered.body, /A newer review generation superseded this review/);
+    assert.deepEqual(older.envelope, saved);
+    assert.equal(await publishReview({ envelope: older.envelope, github, env }), recovered);
+    assert.equal(posted.length, 3, 'recovery retries reuse the same receipt');
+    assert.equal(current.state, event === 'APPROVE' ? 'CHANGES_REQUESTED' : 'APPROVED');
+  });
+});
+
+test('each publication retry refreshes generation observations without forgetting the greatest seen', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
+    const f = generationSetup(event);
+    const saved = structuredClone(f.envelope);
+    const posted = [];
+    let delayed = false;
+    f.github.list = async () => delayed && posted.length < 2 ? [newerGeneration().receipt] : [];
+    const original = f.github.request;
+    f.github.request = async (path, options) => {
+      if (!options) return original(path);
+      posted.push(structuredClone(options.body));
+      if (posted.length < 3) throw Object.assign(new Error('transient publication failure'), { status: 503 });
+      f.receipt.state = 'COMMENTED';
+      f.receipt.body = options.body.body;
+      return f.receipt;
+    };
+    await publishReview({ ...f, env, delay: async () => { delayed = true; } });
+    assert.deepEqual(posted.map(payload => payload.event), [event, 'COMMENT', 'COMMENT']);
+    for (const payload of posted.slice(1)) assert.match(payload.body, /A newer review generation superseded this review/);
+    assert.deepEqual(f.envelope, saved);
+  });
+});
+
+test('generation withholding notice overflow fails closed without changing the retained envelope', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) await t.test(event, async () => {
+    const f = generationSetup(event);
+    f.state.reviews.push(newerGeneration().receipt);
+    f.envelope.payload.body = 'x'.repeat(65536 - f.envelope.payload.body.length) + f.envelope.payload.body;
+    const saved = structuredClone(f.envelope);
+    await assert.rejects(publishReview({ ...f, env }), /Review body exceeds GitHub limit/);
+    assert.equal(f.state.posts, 0);
+    assert.deepEqual(f.envelope, saved);
+  });
+});
+
+test('generation withholding receipts reconcile across CRLF normalization and ambiguous publication', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    const valid = await generationReceipt(event);
+    for (const scenario of ['direct', 'recovery', 'ambiguous']) await t.test(`${event}, ${scenario}`, async () => {
+      const f = generationSetup(event);
+      f.state.reviews.push(newerGeneration().receipt);
+      f.envelope.payload.body = f.envelope.payload.body.replaceAll('\n', '\r\n') + '\r\n';
+      const saved = structuredClone(f.envelope);
+      const normalized = { ...valid, body: valid.body.replaceAll('\n', '\r\n') + '\r\n \t\r\n' };
+      if (scenario === 'recovery') f.state.reviews.push(normalized);
+      const original = f.github.request;
+      f.github.request = async (path, options) => {
+        if (!options) return original(path);
+        f.state.posts++;
+        assertPublishedPayload(options.body, saved.payload, true);
+        assert.match(options.body.body, /A newer review generation superseded this review/);
+        if (scenario === 'ambiguous') {
+          f.state.reviews.push(normalized);
+          throw new TypeError('generation comment response lost after commit');
+        }
+        return normalized;
+      };
+      assert.equal(await publishReview({ ...f, env, delay: async () => {} }), normalized);
+      assert.equal(f.state.posts, scenario === 'recovery' ? 0 : 1);
+      assert.deepEqual(f.envelope, saved);
+    });
+  }
+});
+
+test('both withholding notices require exact text and paragraph structure in direct and recovered receipts', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    for (const reason of ['revision', 'generation']) {
+      const valid = reason === 'revision' ? await downgradedReceipt(event) : await generationReceipt(event);
+      for (const recovery of [false, true]) {
+        for (const change of [
+          body => body.replace('withheld:', 'not withheld:'),
+          body => body.replace('published as a comment', 'published as a neutral comment'),
+          body => body.replace('\n\n', '\n'),
+          body => body.replace('\n\n', ' Extra text.\n\n'),
+          body => `Quoted notice\n${body}`,
+          body => body.replace(event === 'APPROVE' ? '**Approval' : '**Change request', event === 'APPROVE' ? '**Change request' : '**Approval'),
+        ]) await t.test(`${event}, ${reason}, recovery=${recovery}, ${change(valid.body).split('\n')[0]}`, async () => {
+          const f = reason === 'revision' ? setup(event) : generationSetup(event);
+          if (reason === 'revision') f.state.movement = 'head';
+          else f.state.reviews.push(newerGeneration().receipt);
+          const invalid = { ...valid, body: change(valid.body) };
+          if (recovery) f.state.reviews.push(invalid);
+          const original = f.github.request;
+          f.github.request = async (path, options) => {
+            if (!options) return original(path);
+            f.state.posts++;
+            return invalid;
+          };
+          await assert.rejects(publishReview({ ...f, env }));
+          assert.equal(f.state.posts, recovery ? 0 : 1);
+        });
+      }
+    }
+  }
+});
+
+test('direct comments confirm the actual withholding reason while recovery accepts either reason', async t => {
+  for (const event of ['APPROVE', 'REQUEST_CHANGES']) {
+    for (const reason of ['revision', 'generation']) await t.test(`${event}, ${reason}`, async () => {
+      const f = generationSetup(event);
+      const opposite = generationSetup(event);
+      if (reason === 'revision') {
+        f.state.movement = 'head';
+        opposite.state.reviews.push(newerGeneration().receipt);
+      } else {
+        f.state.reviews.push(newerGeneration().receipt);
+        opposite.state.movement = 'head';
+      }
+      const receipt = await publishReview({ ...opposite, env });
+      const original = f.github.request;
+      f.github.request = async (path, options) => {
+        if (!options) return original(path);
+        f.state.posts++;
+        assert.match(options.body.body, reason === 'revision' ? /The pull request head or base changed/ : /A newer review generation superseded this review/);
+        return receipt;
+      };
+      await assert.rejects(publishReview({ ...f, env }), /GitHub did not return a confirmed submitted review/);
+      assert.equal(f.state.posts, 1);
+      f.state.reviews.push(receipt);
+      assert.equal(await publishReview({ ...f, env }), receipt, 'recovery accepts either earlier withheld outcome');
+      assert.equal(f.state.posts, 1);
+    });
+  }
+});
+
 test('over-limit retained bodies and withheld notices fail closed without a native POST', async t => {
   for (const scenario of ['ascii', 'utf8', 'withheld-notice']) await t.test(scenario, async () => {
     const f = setup();

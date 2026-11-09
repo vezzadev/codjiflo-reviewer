@@ -2,83 +2,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
 import { PRESETS, isApproved } from './commands.mjs';
 import { filesFromApi, inlineComment } from './diff.mjs';
 import { reviewInput } from './evidence.mjs';
 import { runProcess, runReviewer } from './runner.mjs';
 import { publishReview, reportPublicationFailure, workflowRunUrl, validateReviewBody } from './publication.mjs';
 import { sanitizeGitEnv } from './git-environment.mjs';
-
-export const MARKER = /^<!-- codjiflo-reviewer:v4 (\{[^\n]+\}) -->\r?$/;
-const SHA = /^[a-f0-9]{40}$/;
-const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
-const FINDING_FIELDS = ['path', 'side', 'start_line', 'line', 'priority', 'disposition', 'title', 'body'];
-
-function validFinding(finding) {
-  return finding && typeof finding === 'object' && !Array.isArray(finding)
-    && ['blocking', 'advisory'].includes(finding.disposition)
-    && ['P0', 'P1', 'P2', 'P3'].includes(finding.priority)
-    && typeof finding.path === 'string' && finding.path.length > 0
-    && ['title', 'body'].every(key => typeof finding[key] === 'string' && finding[key].trim())
-    && ['LEFT', 'RIGHT'].includes(finding.side)
-    && Number.isSafeInteger(finding.start_line) && finding.start_line > 0
-    && Number.isSafeInteger(finding.line) && finding.line >= finding.start_line;
-}
-
-function checkpointRecord(body) {
-  // Published metadata occupies its own LF- or CRLF-delimited line after the summary.
-  // Select the last such record: prose/JSON may quote marker prefixes, and
-  // earlier standalone examples must not shadow the actual final metadata.
-  return typeof body === 'string' ? body.split('\n').findLast(line => line.startsWith('<!-- codjiflo-reviewer:')) : undefined;
-}
-
-function parseCheckpoint(prior) {
-  if (!['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'].includes(prior.state)) return null;
-  try {
-    const match = MARKER.exec(checkpointRecord(prior.body));
-    if (!match) return null;
-    const value = JSON.parse(match[1]);
-    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join() !== 'base,findings,head,kickoffId,preset'
-        || !Number.isSafeInteger(value.kickoffId) || value.kickoffId <= 0
-        || typeof value.head !== 'string' || !SHA.test(value.head) || typeof value.base !== 'string' || !SHA.test(value.base) || value.head !== prior.commit_id
-        || typeof value.preset !== 'string' || !Object.hasOwn(PRESETS, value.preset) || !Array.isArray(value.findings)) return null;
-    const ids = new Set();
-    for (const finding of value.findings) {
-      if (!validFinding(finding) || Object.keys(finding).sort().join() !== [...FINDING_FIELDS, 'id', 'originHead'].sort().join()
-          || typeof finding.id !== 'string' || !UUID.test(finding.id) || typeof finding.originHead !== 'string' || !SHA.test(finding.originHead) || ids.has(finding.id)) return null;
-      ids.add(finding.id);
-    }
-    const blockers = value.findings.some(finding => finding.disposition === 'blocking');
-    if ((prior.state === 'APPROVED' && blockers) || (prior.state === 'CHANGES_REQUESTED' && !blockers)) return null;
-    return { prior, value };
-  } catch { return null; }
-}
-
-function latestCheckpoint(reviews) {
-  let checkpoint = null;
-  let conflicted = false;
-  for (const prior of reviews) {
-    if (checkpointRecord(prior.body) === undefined) continue;
-    const candidate = parseCheckpoint(prior);
-    // A malformed or legacy marker starts a new valid-metadata segment:
-    // checkpoints from before this barrier must never be resurrected.
-    if (!candidate) {
-      checkpoint = null;
-      conflicted = false;
-    } else if (!checkpoint || candidate.value.kickoffId > checkpoint.value.kickoffId) {
-      checkpoint = candidate;
-      conflicted = false;
-    } else if (candidate.value.kickoffId === checkpoint.value.kickoffId) {
-      // A generation identifies one analysis. Conflicting ledgers cannot be
-      // resolved by publication order; identical retries use the latest state.
-      conflicted ||= !isDeepStrictEqual(candidate.value, checkpoint.value);
-      checkpoint = candidate;
-    }
-    // Lower generations can be delayed recoveries, not newer analyses.
-  }
-  return conflicted ? null : checkpoint;
-}
+import { FINDING_FIELDS, validFinding, latestCheckpoint } from './checkpoints.mjs';
 
 export function outstandingFindings(reviews) {
   return latestCheckpoint(reviews)?.value.findings ?? [];

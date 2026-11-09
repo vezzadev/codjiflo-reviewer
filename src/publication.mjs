@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { isApproved, PRESETS } from './commands.mjs';
 import { secretRedactor } from './redaction.mjs';
+import { observeCheckpoints, parseCheckpoint } from './checkpoints.mjs';
 
 export function workflowRunUrl(request, env) {
   return env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${request.repo}/actions/runs/${env.GITHUB_RUN_ID}` : null;
@@ -43,16 +44,21 @@ const withholdingNotices = {
   REQUEST_CHANGES: '**Change request withheld:** The pull request head or base changed after this review was prepared. This review covers the original commits shown below and is published as a comment, not a change request.',
 };
 
-function withheldReview(payload) {
+const generationWithholdingNotices = {
+  APPROVE: '**Approval withheld:** A newer review generation superseded this review after it was prepared. This review covers the original analysis shown below and is published as a comment, not an approval.',
+  REQUEST_CHANGES: '**Change request withheld:** A newer review generation superseded this review after it was prepared. This review covers the original analysis shown below and is published as a comment, not a change request.',
+};
+
+function withheldReview(payload, notices) {
   return {
     ...payload,
     event: 'COMMENT',
-    body: withholdingNotices[payload.event] + '\n\n' + payload.body,
+    body: notices[payload.event] + '\n\n' + payload.body,
   };
 }
 
 function confirmed(receipt, envelope, payload = envelope.payload) {
-  const notice = withholdingNotices[envelope.payload.event];
+  const notice = payload.body.slice(0, payload.body.indexOf('\n'));
   const state = { APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED', COMMENT: 'COMMENTED' }[payload.event];
   return Number.isSafeInteger(receipt?.id) && receipt.id > 0 &&
     receipt.commit_id === envelope.head &&
@@ -69,8 +75,17 @@ function confirmed(receipt, envelope, payload = envelope.payload) {
 export async function publishReview({ envelope, github, env = process.env, delay = sleep }) {
   validate(envelope, env);
   const { request, head, base, payload } = envelope;
-  let withheld;
-  const downgradedPayload = () => withheld ??= withheldReview(payload);
+  const withheld = new Map();
+  const downgradedPayload = reason => {
+    if (!withheld.has(reason)) withheld.set(reason, withheldReview(payload,
+      reason === 'generation' ? generationWithholdingNotices : withholdingNotices));
+    return withheld.get(reason);
+  };
+  const ownGeneration = parseCheckpoint({
+    state: payload.event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED',
+    commit_id: head, body: payload.body,
+  })?.value.kickoffId ?? 0;
+  let highestObservedGeneration = 0;
   const pullPath = `/repos/${request.repo}/pulls/${request.number}`;
   const identity = publicationId(payload.body);
   const read = async operation => {
@@ -84,13 +99,17 @@ export async function publishReview({ envelope, github, env = process.env, delay
   };
   const reconcile = async postError => {
     try {
-      const matches = (await read(() => github.list(`${pullPath}/reviews`))).filter(receipt =>
-        publicationId(receipt.body) === identity);
+      const reviews = await read(() => github.list(`${pullPath}/reviews`));
+      highestObservedGeneration = Math.max(highestObservedGeneration,
+        observeCheckpoints(reviews).highestKickoffId);
+      const matches = reviews.filter(receipt => publicationId(receipt.body) === identity);
       if (matches.length > 1) throw new Error('Multiple GitHub reviews have the publication identity; refusing ambiguous publication');
       const match = matches[0];
-      // Both outcomes remain valid across recovery and ambiguous POST retries:
-      // an earlier attempt may become visible after freshness changes the event.
-      if (match && !confirmed(match, envelope) && !confirmed(match, envelope, downgradedPayload())) throw new Error('Matching GitHub review has an invalid identity, head, ID or submitted state; refusing duplicate publication');
+      // All outcomes remain valid across recovery and ambiguous POST retries:
+      // an earlier attempt may become visible after revision/generation changes.
+      if (match && !confirmed(match, envelope)
+          && !confirmed(match, envelope, downgradedPayload('revision'))
+          && !confirmed(match, envelope, downgradedPayload('generation'))) throw new Error('Matching GitHub review has an invalid identity, head, ID or submitted state; refusing duplicate publication');
       return match;
     } catch (error) {
       if (!postError) throw error;
@@ -109,12 +128,13 @@ export async function publishReview({ envelope, github, env = process.env, delay
       const found = await reconcile(postError);
       if (found) return finish(found);
     }
-    // Recheck freshness immediately before each POST. Keep completed findings,
-    // but never change native approval or blocking state for outdated commits.
+    // Recheck revisions immediately before each POST. Generation observations
+    // come from reconciliation and remain monotonic even if later lists lag.
     const latest = await read(() => github.request(pullPath));
     if (latest.state !== 'open') throw new Error('Pull request is not open; refusing publication');
     const postedPayload = latest.head.sha !== head || latest.base.sha !== base
-      ? downgradedPayload() : payload;
+      ? downgradedPayload('revision')
+      : highestObservedGeneration > ownGeneration ? downgradedPayload('generation') : payload;
     validateReviewBody(postedPayload.body);
     try {
       // A direct receipt must confirm the exact event sent by this attempt.

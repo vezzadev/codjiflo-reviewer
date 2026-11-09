@@ -351,7 +351,9 @@ test('generation ordering respects malformed barriers, unmarked reviews, and amb
     assert.equal(baseline([newer, barrier], base, 'sol-xhigh'), null);
     assert.deepEqual(outstandingFindings([newer, barrier, older]), []);
     assert.equal(baseline([newer, barrier, older], base, 'sol-xhigh'), null);
-    assert.equal(baseline([newer, barrier, review(1)], base, 'sol-xhigh').head, head);
+    assert.deepEqual(outstandingFindings([newer, barrier, review(1)]), []);
+    assert.equal(baseline([newer, barrier, review(1)], base, 'sol-xhigh'), null);
+    assert.equal(baseline([newer, barrier, review(3)], base, 'sol-xhigh').head, head);
   }
   const conflict = review(2);
   for (const tied of [[newer, conflict], [conflict, newer], [newer, conflict, older]]) {
@@ -366,6 +368,61 @@ test('generation ordering respects malformed barriers, unmarked reviews, and amb
   assert.equal(baseline([newer, { ...newer, state: 'DISMISSED' }], base, 'sol-xhigh'), null);
   const reordered = { kickoffId: 2, findings: [blocker], preset: 'sol-xhigh', base, head: newerHead };
   assert.equal(baseline([newer, { ...newer, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify(reordered)} -->` }], base, 'sol-xhigh').head, newerHead);
+});
+
+test('invalid and legacy barriers retain the greatest observed generation through late recoveries', () => {
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const a = entry(head, { title: 'Generation A blocker' });
+  const b = entry(head, { title: 'Generation B blocker' });
+  const review = (generation, findings) => ({
+    state: 'CHANGES_REQUESTED', commit_id: head,
+    body: marker(head, base, findings, 'sol-xhigh', generation),
+  });
+  const oldA = review(100, [a]);
+  const oldB = review(200, [b]);
+  for (const body of [
+    '<!-- codjiflo-reviewer:v4 {bad JSON} -->',
+    marker(head, base, [], 'sol-xhigh', 1).replace(':v4 ', ':v3 '),
+  ]) {
+    const barrier = { state: 'COMMENTED', commit_id: head, body };
+    for (const recoveryState of ['CHANGES_REQUESTED', 'COMMENTED']) {
+      const history = [oldA, oldB, barrier];
+      for (const recovered of [oldA, oldB, oldA]) {
+        history.push({ ...recovered, state: recoveryState });
+        assert.equal(baseline(history, base, 'sol-xhigh'), null);
+        assert.deepEqual(outstandingFindings(history), []);
+      }
+      const fresh = review(201, [b]);
+      history.push(fresh);
+      assert.equal(baseline(history, base, 'sol-xhigh').head, head);
+      assert.deepEqual(outstandingFindings(history), [b]);
+      history.push({ ...oldB, state: recoveryState });
+      assert.equal(baseline(history, base, 'sol-xhigh').head, head);
+      assert.deepEqual(outstandingFindings(history), [b]);
+    }
+  }
+});
+
+test('conflicting generation ties stay closed through recovery until a strictly newer checkpoint', () => {
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const a = entry(head);
+  const b = entry(head);
+  const review = (generation, findings) => ({
+    state: 'CHANGES_REQUESTED', commit_id: head,
+    body: marker(head, base, findings, 'sol-xhigh', generation),
+  });
+  const first = review(200, [a]);
+  const conflict = review(200, [b]);
+  for (const pair of [[first, conflict], [conflict, first]]) {
+    const history = [...pair, review(100, [a]), first, conflict];
+    assert.equal(baseline(history, base, 'sol-xhigh'), null);
+    assert.deepEqual(outstandingFindings(history), []);
+    history.push(review(201, [b]));
+    assert.equal(baseline(history, base, 'sol-xhigh').head, head);
+    assert.deepEqual(outstandingFindings(history), [b]);
+  }
 });
 
 test('whitespace-only Git filenames publish inline and survive checkpoint reconciliation unchanged', async () => {
