@@ -7,8 +7,9 @@ import { fixture } from './fixture.mjs';
 
 const metadata = [{ filename: 'a.js', additions: 2, deletions: 2, patch: '@@ -1,3 +1,3 @@\n-old\n+new\n same\n last\n@@ -20 +20 @@\n-before\n+after\n' }];
 const finding = { path: 'a.js', side: 'RIGHT', start_line: 1, line: 2, priority: 'P1', disposition: 'blocking', title: 'Broken result', body: 'Fails for zero. Category: correctness.' };
-const marker = (head, base, preset = 'sol-xhigh') => `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head, base, preset })} -->`;
+const marker = (head, base, preset = 'sol-xhigh', findings = []) => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings })} -->`;
 const sha = 'a'.repeat(40);
+const baseSha = 'b'.repeat(40);
 
 test('authorization denies empty, absent and non-exact users; normalizes login case', () => {
   assert.equal(isApproved('alice'), false);
@@ -148,52 +149,56 @@ test('removed files retain legal left-side comments and reject right-side anchor
   assert.equal(inlineComment({ ...finding, side: 'LEFT', line: 1 }, files).line, 1);
   assert.throws(() => inlineComment({ ...finding, side: 'RIGHT', line: 1 }, files));
 });
-test('baseline accepts PAT or bot approval, pins commit/base/preset, and respects latest blockers', () => {
-  const approved = { state: 'APPROVED', user: { type: 'Bot' }, body: marker(sha, 'base'), commit_id: sha };
-  assert.equal(baseline([approved], 'base', 'sol-xhigh').head, sha);
-  assert.equal(baseline([approved], 'newbase', 'sol-xhigh'), null);
-  assert.equal(baseline([approved], 'base', 'opus-xhigh'), null);
+test('baseline accepts completed approvals and changes requests with valid ledgers', () => {
+  const approved = { state: 'APPROVED', user: { type: 'Bot' }, body: marker(sha, baseSha), commit_id: sha };
+  assert.equal(baseline([approved], baseSha, 'sol-xhigh').head, sha);
+  assert.equal(baseline([approved], 'c'.repeat(40), 'sol-xhigh'), null);
+  assert.equal(baseline([approved], baseSha, 'opus-xhigh'), null);
   for (const preset of ['sol-high', 'opus-high', 'codex', 'claude']) {
-    assert.equal(baseline([{ ...approved, body: marker(sha, 'base', preset) }], 'base', 'sol-xhigh'), null);
+    assert.equal(baseline([{ ...approved, body: marker(sha, baseSha, preset) }], baseSha, 'sol-xhigh'), null);
   }
-  const pat = { ...approved, user: { type: 'User' } };
-  assert.equal(baseline([pat], 'base', 'sol-xhigh').head, sha);
-  assert.equal(baseline([approved, { ...pat, state: 'CHANGES_REQUESTED' }], 'base', 'sol-xhigh'), null);
-  assert.equal(baseline([approved, { ...approved, state: 'DISMISSED' }], 'base', 'sol-xhigh'), null);
-  assert.equal(baseline([{ ...approved, commit_id: 'mismatch' }], 'base', 'sol-xhigh'), null);
+  const prior = { ...finding, id: '10000000-0000-4000-8000-000000000001', originHead: sha };
+  const changes = { ...approved, state: 'CHANGES_REQUESTED', user: { type: 'User' }, body: marker(sha, baseSha, 'sol-xhigh', [prior]) };
+  assert.equal(baseline([approved, changes], baseSha, 'sol-xhigh').head, sha);
+  for (const state of ['DISMISSED', 'COMMENTED']) {
+    assert.equal(baseline([approved, { ...changes, state }], baseSha, 'sol-xhigh'), null);
+  }
+  assert.equal(baseline([{ ...approved, commit_id: 'mismatch' }], baseSha, 'sol-xhigh'), null);
 });
-test('baseline ignores unsupported marker versions without parsing their payloads', () => {
-  const approved = { state: 'APPROVED', body: marker(sha, 'base'), commit_id: sha };
-  for (const version of ['v1', 'v2', 'v0', 'v4']) {
-    const legacy = { ...approved, body: approved.body.replace(':v3 ', `:${version} `) };
-    assert.equal(baseline([legacy], 'base', 'sol-xhigh'), null);
-    assert.equal(baseline([{ ...legacy, body: `<!-- codjiflo-reviewer:${version} {invalid JSON} -->` }], 'base', 'sol-xhigh'), null);
-    assert.equal(baseline([approved, legacy], 'base', 'sol-xhigh').head, sha);
+test('latest legacy or malformed marker prevents falling back to an older checkpoint', () => {
+  const approved = { state: 'APPROVED', body: marker(sha, baseSha), commit_id: sha };
+  for (const version of ['v1', 'v2', 'v3', 'v0', 'v5']) {
+    const legacy = { ...approved, body: approved.body.replace(':v4 ', `:${version} `) };
+    assert.equal(baseline([legacy], baseSha, 'sol-xhigh'), null);
+    assert.equal(baseline([approved, legacy], baseSha, 'sol-xhigh'), null);
+  }
+  for (const body of ['<!-- codjiflo-reviewer:v4 {invalid JSON} -->', marker(sha, baseSha, 'sol-xhigh', [{ ...finding }])]) {
+    assert.equal(baseline([approved, { ...approved, body }], baseSha, 'sol-xhigh'), null);
   }
 });
 test('malformed or contradictory results cannot approve', () => {
   const files = filesFromApi(metadata);
   assert.throws(() => validateResult({}, files, 15));
-  assert.throws(() => validateResult({ verdict: 'APPROVE', summary: 'ok', findings: [finding] }, files, 15));
-  assert.throws(() => validateResult({ verdict: 'APPROVE', summary: '', findings: [] }, files, 15));
-  assert.throws(() => validateResult({ verdict: 'REQUEST_CHANGES', summary: 'Found bug', findings: [{ ...finding, disposition: 'unknown' }] }, files, 15));
-  assert.equal(validateResult({ verdict: 'APPROVE', summary: 'Advisory only', findings: [{ ...finding, disposition: 'advisory' }] }, files, 15).length, 1);
-  assert.equal(validateResult({ verdict: 'REQUEST_CHANGES', summary: 'Found bug', findings: [finding] }, files, 15).length, 1);
+  assert.throws(() => validateResult({ verdict: 'APPROVE', summary: 'ok', findings: [finding], resolutions: [] }, files, 15));
+  assert.throws(() => validateResult({ verdict: 'APPROVE', summary: '', findings: [], resolutions: [] }, files, 15));
+  assert.throws(() => validateResult({ verdict: 'REQUEST_CHANGES', summary: 'Found bug', findings: [{ ...finding, disposition: 'unknown' }], resolutions: [] }, files, 15));
+  assert.equal(validateResult({ verdict: 'APPROVE', summary: 'Advisory only', findings: [{ ...finding, disposition: 'advisory' }], resolutions: [] }, files, 15).length, 1);
+  assert.equal(validateResult({ verdict: 'REQUEST_CHANGES', summary: 'Found bug', findings: [finding], resolutions: [] }, files, 15).length, 1);
 });
 
 test('incomplete analysis and defect-free changes requests fail without a verdict', () => {
   const files = filesFromApi(metadata);
   for (const findings of [[], [finding]]) {
     assert.throws(() => validateResult({
-      verdict: 'INCOMPLETE', summary: 'Required docs missing; pwsh.exe unavailable; DNS failed.', findings,
+      verdict: 'INCOMPLETE', summary: 'Required docs missing; pwsh.exe unavailable; DNS failed.', findings, resolutions: [],
     }, files, 15));
   }
   for (const findings of [[], [{ ...finding, disposition: 'advisory' }]]) {
     assert.throws(() => validateResult({
-      verdict: 'REQUEST_CHANGES', summary: 'Review failed before the ten-angle analysis; this is not a defect verdict.', findings,
+      verdict: 'REQUEST_CHANGES', summary: 'Review failed before the ten-angle analysis; this is not a defect verdict.', findings, resolutions: [],
     }, files, 15), /no blocking defect findings/);
   }
-  const unanchorable = { verdict: 'REQUEST_CHANGES', summary: 'Concrete defect found.', findings: [{ ...finding, line: 999 }] };
+  const unanchorable = { verdict: 'REQUEST_CHANGES', summary: 'Concrete defect found.', findings: [{ ...finding, line: 999 }], resolutions: [] };
   assert.deepEqual(validateResult(unanchorable, files, 15), []);
   assert.equal(unanchorable.verdict, 'REQUEST_CHANGES');
   assert.match(unanchorable.summary, /Broken result/);
@@ -232,7 +237,7 @@ test('left anchors reject context; ranges require legal endpoints, not deleted i
 test('missing and truncated API patches preserve advisory approval in the review summary', () => {
   for (const patch of [undefined, '@@ -1,2 +1,2 @@\n-old\n+new', '@@ -1 +1 @@\n-old\n+new']) {
     const files = filesFromApi([{ filename: 'a.js', additions: 2, deletions: 2, patch }]);
-    const result = { verdict: 'APPROVE', summary: 'Review complete.', findings: [{ ...finding, disposition: 'advisory' }] };
+    const result = { verdict: 'APPROVE', summary: 'Review complete.', findings: [{ ...finding, disposition: 'advisory' }], resolutions: [] };
     assert.deepEqual(validateResult(result, files, 10), []);
     assert.equal(result.verdict, 'APPROVE');
     assert.match(result.summary, /Broken result/);

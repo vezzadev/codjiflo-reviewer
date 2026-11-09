@@ -6,32 +6,92 @@ import { PRESETS, isApproved } from './commands.mjs';
 import { filesFromApi, inlineComment } from './diff.mjs';
 import { reviewInput } from './evidence.mjs';
 import { runProcess, runReviewer } from './runner.mjs';
-import { publishReview, reportPublicationFailure, workflowRunUrl } from './publication.mjs';
+import { publishReview, reportPublicationFailure, workflowRunUrl, validateReviewBody } from './publication.mjs';
 import { sanitizeGitEnv } from './git-environment.mjs';
 
-export const MARKER = /<!-- codjiflo-reviewer:v3 (\{[^\n]+\}) -->/;
-export function baseline(reviews, base, preset) {
-  // The latest marked review governs; blockers and withheld-approval comments
-  // both prevent reuse of an earlier approval.
-  const prior = reviews.filter(review => MARKER.test(review.body ?? '')).at(-1);
-  if (!prior || prior.state !== 'APPROVED') return null;
+export const MARKER = /^<!-- codjiflo-reviewer:v4 (\{[^\n]+\}) -->$/;
+const SHA = /^[a-f0-9]{40}$/;
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const FINDING_FIELDS = ['path', 'side', 'start_line', 'line', 'priority', 'disposition', 'title', 'body'];
+
+function validFinding(finding) {
+  return finding && typeof finding === 'object' && !Array.isArray(finding)
+    && ['blocking', 'advisory'].includes(finding.disposition)
+    && ['P0', 'P1', 'P2', 'P3'].includes(finding.priority)
+    && ['path', 'title', 'body'].every(key => typeof finding[key] === 'string' && finding[key].trim())
+    && ['LEFT', 'RIGHT'].includes(finding.side)
+    && Number.isSafeInteger(finding.start_line) && finding.start_line > 0
+    && Number.isSafeInteger(finding.line) && finding.line >= finding.start_line;
+}
+
+function checkpointRecord(body) {
+  // Published metadata occupies its own LF-delimited line after the summary.
+  // Select the last such record: prose/JSON may quote marker prefixes, and
+  // earlier standalone examples must not shadow the actual final metadata.
+  return typeof body === 'string' ? body.split('\n').findLast(line => line.startsWith('<!-- codjiflo-reviewer:')) : undefined;
+}
+
+function latestCheckpoint(reviews) {
+  // Any newer marker, even legacy or malformed, prevents falling back to an
+  // older ledger. Thread resolution is deliberately not an input.
+  const prior = reviews.filter(review => checkpointRecord(review.body) !== undefined).at(-1);
+  if (!prior || !['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'].includes(prior.state)) return null;
   try {
-    const value = JSON.parse(MARKER.exec(prior.body)[1]);
-    return value.base === base && value.preset === preset && value.head === prior.commit_id && /^[a-f0-9]{40}$/.test(value.head) ? value : null;
+    const match = MARKER.exec(checkpointRecord(prior.body));
+    if (!match) return null;
+    const value = JSON.parse(match[1]);
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join() !== 'base,findings,head,preset'
+        || typeof value.head !== 'string' || !SHA.test(value.head) || typeof value.base !== 'string' || !SHA.test(value.base) || value.head !== prior.commit_id
+        || typeof value.preset !== 'string' || !Object.hasOwn(PRESETS, value.preset) || !Array.isArray(value.findings)) return null;
+    const ids = new Set();
+    for (const finding of value.findings) {
+      if (!validFinding(finding) || Object.keys(finding).sort().join() !== [...FINDING_FIELDS, 'id', 'originHead'].sort().join()
+          || typeof finding.id !== 'string' || !UUID.test(finding.id) || typeof finding.originHead !== 'string' || !SHA.test(finding.originHead) || ids.has(finding.id)) return null;
+      ids.add(finding.id);
+    }
+    const blockers = value.findings.some(finding => finding.disposition === 'blocking');
+    if ((prior.state === 'APPROVED' && blockers) || (prior.state === 'CHANGES_REQUESTED' && !blockers)) return null;
+    return { prior, value };
   } catch { return null; }
 }
 
-export function validateResult(result, files, cap) {
+export function outstandingFindings(reviews) {
+  return latestCheckpoint(reviews)?.value.findings ?? [];
+}
+
+export function baseline(reviews, base, preset) {
+  const checkpoint = latestCheckpoint(reviews);
+  if (!checkpoint || !['APPROVED', 'CHANGES_REQUESTED'].includes(checkpoint.prior.state)) return null;
+  const { value } = checkpoint;
+  return value.base === base && value.preset === preset ? value : null;
+}
+
+export function validateResult(result, files, cap, priorFindings = []) {
   if (result?.verdict === 'INCOMPLETE') {
     throw new Error('Review incomplete; no defect verdict. Required analysis could not be completed. See provider logs for details.');
   }
-  if (!result || !['APPROVE', 'REQUEST_CHANGES'].includes(result.verdict) || typeof result.summary !== 'string' || !result.summary.trim() || !Array.isArray(result.findings) || result.findings.length > cap) throw new Error('Malformed review output');
+  if (!result || !['APPROVE', 'REQUEST_CHANGES'].includes(result.verdict) || typeof result.summary !== 'string' || !result.summary.trim() || !Array.isArray(result.findings) || result.findings.length > cap || !Array.isArray(result.resolutions)) throw new Error('Malformed review output');
   for (const finding of result.findings) {
-    if (!finding || !['blocking', 'advisory'].includes(finding.disposition) || !['P0', 'P1', 'P2', 'P3'].includes(finding.priority) || typeof finding.title !== 'string' || !finding.title.trim() || typeof finding.body !== 'string' || !finding.body.trim()) throw new Error('Malformed finding');
+    if (!validFinding(finding) || Object.keys(finding).sort().join() !== [...FINDING_FIELDS].sort().join()) throw new Error('Malformed finding');
   }
-  if (result.verdict === 'APPROVE' && result.findings.some(finding => finding.disposition === 'blocking')) throw new Error('Approval contradicts blocking findings');
-  if (result.verdict === 'REQUEST_CHANGES' && !result.findings.some(finding => finding.disposition === 'blocking')) {
+  const priorIds = new Set(priorFindings.map(finding => finding.id));
+  const resolutions = new Map();
+  for (const resolution of result.resolutions) {
+    if (!resolution || Object.keys(resolution).sort().join() !== 'id,reason,status'
+        || !priorIds.has(resolution.id) || resolutions.has(resolution.id)
+        || !['resolved', 'unresolved'].includes(resolution.status)
+        || typeof resolution.reason !== 'string' || !resolution.reason.trim()) throw new Error('Malformed finding resolutions');
+    resolutions.set(resolution.id, resolution);
+  }
+  if (resolutions.size !== priorIds.size) throw new Error('Finding resolutions must cover every prior finding exactly once');
+  const carried = priorFindings.filter(finding => resolutions.get(finding.id).status === 'unresolved');
+  const blockers = [...result.findings, ...carried].some(finding => finding.disposition === 'blocking');
+  if (result.verdict === 'APPROVE' && blockers) throw new Error('Approval contradicts blocking findings');
+  if (result.verdict === 'REQUEST_CHANGES' && !blockers) {
     throw new Error('Changes request has no blocking defect findings; refusing a defect verdict');
+  }
+  for (const finding of carried) {
+    result.summary += `\n\n### Outstanding [${finding.priority}] ${finding.title} (${finding.disposition})\n\nFinding ID: \`${finding.id}\`\nOriginal commit: \`${finding.originHead}\`\nOriginal location: \`${finding.path}\` (${finding.side} ${finding.start_line}-${finding.line})\n\n${finding.body}\n\nCurrent assessment: ${resolutions.get(finding.id).reason}`;
   }
   const comments = [];
   for (const finding of result.findings) {
@@ -122,19 +182,21 @@ export async function review({ request, github, env = process.env, reviewer = ru
       // selecting other dependencies. Descendants use their pinned gitlinks.
       await git(['--literal-pathspecs', 'submodule', 'update', '--init', '--recursive', '--checkout', '--', ...dependencies]);
     }
+    const reviews = await github.list(`${pullPath}/reviews`);
+    const priorFindings = outstandingFindings(reviews);
     let scope = mergeBase;
     let mode = 'full';
-    let reason = request.mode === 'full' ? 'explicit full review' : 'no usable successful baseline';
+    let reason = request.mode === 'full' ? 'explicit full review' : 'no usable v4 review checkpoint';
     if (request.mode === 'incremental') {
-      const previous = baseline(await github.list(`${pullPath}/reviews`), base, request.preset);
+      const previous = baseline(reviews, base, request.preset);
       if (previous && previous.head !== head) {
         try {
           await git(['fetch', '--no-tags', 'origin', previous.head]);
           if ((await git(['merge-base', previous.head, head])).trim() === previous.head) {
             if (await repositoryPromptBlob(git, previous.head) !== currentPromptBlob) {
-              reason = 'repository review instructions changed since the previous approval';
+              reason = 'repository review instructions changed since the previous completed review';
             } else {
-              scope = previous.head; mode = 'incremental'; reason = 'previous approval is an ancestor on the same base';
+              scope = previous.head; mode = 'incremental'; reason = 'previous completed review is an ancestor on the same base';
             }
           } else reason = 'history was rebased';
         } catch { reason = 'previous head is unavailable'; }
@@ -154,12 +216,17 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const diff = await git(['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', scope, head, '--']);
     const currentDiff = JSON.stringify([...files.values()].map(file => ({ filename: file.path, previous_filename: file.previousPath, patch: file.patch })), null, 2);
     const customInstructions = currentPromptBlob === undefined ? undefined : await git(['cat-file', 'blob', currentPromptBlob]);
-    const input = await reviewInput({ preset, options: { level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions }, cwd, temp, git });
+    const input = await reviewInput({ preset, options: { level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions, priorFindings }, cwd, temp, git });
     const result = await reviewer({ preset, prompt: input, cwd, temp, env: reviewEnv });
-    const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10);
+    const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10, priorFindings);
     const publication = randomUUID();
     const resultPath = output ?? `codjiflo-result-${publication}.json`;
-    const marker = `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head, base, preset: request.preset })} -->`;
+    const unresolved = new Set(result.resolutions.filter(resolution => resolution.status === 'unresolved').map(resolution => resolution.id));
+    const findings = [
+      ...priorFindings.filter(finding => unresolved.has(finding.id)),
+      ...result.findings.map(finding => ({ id: randomUUID(), originHead: head, ...finding })),
+    ];
+    const marker = `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset: request.preset, findings }).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e')} -->`;
     const workflowMarker = /^\d+$/.test(env.GITHUB_RUN_ID ?? '') && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? '') ?
       `\n<!-- codjiflo-workflow:${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT} -->` : '';
     const envelope = { version: 1, request, head, base, payload: {
@@ -167,6 +234,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
       body: `## Codjiflo Reviewer — ${request.preset}\n\n${result.summary}\n\nReviewed range: \`${scope}..${head}\`\nPR base snapshot: \`${base}\`\n\nScope: **${mode}** (${reason}).\n\n${marker}${workflowMarker}\n<!-- codjiflo-publication:${publication} -->`,
       comments,
     } };
+    validateReviewBody(envelope.payload.body);
     await writeFile(resultPath, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600, ...(output === undefined ? { flag: 'wx' } : {}) });
     console.log(`Validated review retained at ${resultPath}`);
     return await publishReview({ envelope, github, env });

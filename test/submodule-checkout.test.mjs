@@ -121,7 +121,7 @@ for (const selection of [undefined, '[]', '["SolidworksMCP-python"]', '["private
             await assert.rejects(readFile(join(cwd, 'SolidworksMCP-python', '.git')), { code: 'ENOENT' });
             assert.doesNotMatch(config, /submodule\./);
           }
-          return { verdict: 'APPROVE', summary: 'Only configured source dependencies inspected.', findings: [] };
+          return { verdict: 'APPROVE', summary: 'Only configured source dependencies inspected.', findings: [], resolutions: [] };
         },
       });
       if (selection === '["private-references"]') {
@@ -161,7 +161,7 @@ test('real Git treats wildcard characters in selected gitlink paths literally', 
         invoked = true;
         assert.equal(await readFile(join(cwd, 'vendor/sdk[1]', 'nested', 'source.txt'), 'utf8'), 'leaf pinned\n');
         await assert.rejects(readFile(join(cwd, 'vendor/sdk1', '.git')), { code: 'ENOENT' });
-        return { verdict: 'APPROVE', summary: 'Literal source path inspected.', findings: [] };
+        return { verdict: 'APPROVE', summary: 'Literal source path inspected.', findings: [], resolutions: [] };
       },
     });
     assert.equal(invoked, true);
@@ -195,7 +195,7 @@ test('review checkout recursively materializes exact pinned submodules with sani
         assert.equal(await readFile(join(nested, 'source.txt'), 'utf8'), 'leaf pinned\n');
         assert.doesNotMatch(await inspect(sdk, ['config', '--list', '--show-origin']), /AUTHORIZATION|fake-submodule-checkout-token/);
         assert.ok(!Object.keys(env).some(name => /^(?:GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)|GITHUB_TOKEN|GH_TOKEN)$/i.test(name)));
-        return { verdict: 'APPROVE', summary: 'Pinned SDK evidence inspected.', findings: [] };
+        return { verdict: 'APPROVE', summary: 'Pinned SDK evidence inspected.', findings: [], resolutions: [] };
       },
     });
     assert.equal(invoked, true);
@@ -315,7 +315,7 @@ process.exit(result.status ?? 1);
           // wholesale to stop the header leak.
           assert.equal(await runProcess('git', ['config', '--get', 'protocol.file.allow'], { cwd, env: reviewerEnv }), 'always\n');
           if (transport.startsWith('ssh-')) assert.equal(reviewerEnv.GIT_SSH_COMMAND, env.GIT_SSH_COMMAND);
-          return { verdict: 'APPROVE', summary: 'Transport evidence inspected.', findings: [] };
+          return { verdict: 'APPROVE', summary: 'Transport evidence inspected.', findings: [], resolutions: [] };
         },
       });
       assert.equal(invoked, true);

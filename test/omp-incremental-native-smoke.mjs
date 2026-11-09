@@ -59,6 +59,8 @@ try {
   const priorIds = first.checkpoint.findings.map(finding => finding.id).sort();
   await f.advance({ 'settings.txt': 'minimum=-1\nOnly this note changed.\n' + 'context\n'.repeat(8) });
   const second = await runRound('REQUEST_CHANGES', 'incremental');
+  assert.deepEqual(second.result.findings, [], 'An unchanged prior blocker must not be reported as a new finding');
+  assert.deepEqual(second.checkpoint.findings.map(finding => finding.id).sort(), priorIds);
   assert.deepEqual(second.result.resolutions.map(resolution => resolution.id).sort(), priorIds);
   assert.ok(second.result.resolutions.some(resolution => resolution.status === 'unresolved'));
   assert.ok(second.checkpoint.findings.some(finding => priorIds.includes(finding.id) && finding.disposition === 'blocking'));

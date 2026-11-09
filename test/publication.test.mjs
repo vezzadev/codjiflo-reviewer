@@ -26,6 +26,19 @@ function setup(event = 'REQUEST_CHANGES') {
   return { envelope, receipt, state, github };
 }
 
+test('over-limit retained bodies and withheld notices fail closed without a native POST', async t => {
+  for (const scenario of ['ascii', 'utf8', 'withheld-notice']) await t.test(scenario, async () => {
+    const f = setup();
+    const suffix = '\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->';
+    f.envelope.payload.body = (scenario === 'utf8' ? '漢'.repeat(24000) : 'x'.repeat(scenario === 'withheld-notice' ? 65536 - suffix.length : 65537)) + suffix;
+    if (scenario === 'withheld-notice') f.state.movement = 'head';
+    const saved = structuredClone(f.envelope);
+    await assert.rejects(publishReview({ ...f, env }), /Review body exceeds GitHub limit/);
+    assert.equal(f.state.posts, 0);
+    assert.deepEqual(f.envelope, saved);
+  });
+});
+
 function assertPublishedPayload(actual, saved, downgraded) {
   if (!downgraded) return assert.deepEqual(actual, saved);
   assert.deepEqual({ ...actual, event: saved.event, body: saved.body }, saved);

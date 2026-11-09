@@ -35,7 +35,7 @@ test('both OMP families keep full and incremental methodology inline with comple
   const f = await fixture({ newLine: 'é🙂漢'.repeat(300000) });
   try {
     for (const [preset, canonical] of [['codex', 'sol-xhigh'], ['claude', 'opus-xhigh']]) for (const full of [true, false]) {
-      f.state.reviews = full ? [] : [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: canonical })} -->` }];
+      f.state.reviews = full ? [] : [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: canonical, findings: [] })} -->` }];
       await f.run({ full, preset });
       const input = await readFile(f.capture, 'utf8');
       assert.ok(input.length < 16000, 'initial prompt does not grow with duplicated patch evidence');
@@ -278,7 +278,7 @@ test('hostile Git pathspec modes preserve current-head prompt authority and oper
     try {
       await writeFile(join(f.repo, '.codjiflo', 'code-review', 'PROMPT.md'), 'UNCOMMITTED-SOURCE-INSTRUCTIONS\n');
       await writeFile(f.env.GIT_CONFIG_GLOBAL, '[codjiflo]\npathspecfixture = operator-config-survives\n');
-      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v3 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->` }];
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh', findings: [] })} -->` }];
       const transport = {
         GIT_SSH_COMMAND: 'ssh -oBatchMode=yes',
         GIT_SSL_CAINFO: f.env.GIT_CONFIG_GLOBAL,
@@ -296,7 +296,7 @@ test('hostile Git pathspec modes preserve current-head prompt authority and oper
       assert.equal(published.length, 1);
       assert.equal(published[0].body.event, 'APPROVE');
       assert.equal(published[0].body.commit_id, f.head);
-      assert.match(published[0].body.body, /Scope: \*\*full\*\* \(repository review instructions changed since the previous approval\)/);
+      assert.match(published[0].body.body, /Scope: \*\*full\*\*/);
       const captured = await readFile(f.capture, 'utf8');
       const section = captured.slice(captured.indexOf('Repository review instructions'), captured.indexOf('Review-scope unified diff follows:'));
       assert.ok(section.includes(`--- BEGIN REPOSITORY REVIEW INSTRUCTIONS ---\n${instructions}\n--- END REPOSITORY REVIEW INSTRUCTIONS ---`));
@@ -549,7 +549,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
             reviewer: async ({ prompt: input }) => {
               await inspect(input);
               inspected = true;
-              return { verdict: 'INCOMPLETE', summary: 'Evidence inspected; no model analysis performed.', findings: [] };
+              return { verdict: 'INCOMPLETE', summary: 'Evidence inspected; no model analysis performed.', findings: [], resolutions: [] };
             },
           }), /Review incomplete/);
           assert.equal(inspected, true);

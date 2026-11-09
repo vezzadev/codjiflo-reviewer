@@ -135,8 +135,9 @@ const findings = process.env.FIXTURE_MODE === 'findings' ? [
  {path:'a.js',side:'RIGHT',start_line:1,line:2,priority:'P2',disposition:'blocking',title:'Range bug',body:'Concrete failure scenario.'}
 ] : [];
 const result = process.env.FIXTURE_MODE === 'incomplete-input'
- ? {verdict:'INCOMPLETE',summary:'A required review scope range could not be processed.',findings:[]}
- : {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings};
+ ? {verdict:'INCOMPLETE',summary:'A required review scope range could not be processed.',findings:[],resolutions:[]}
+ : process.env.FIXTURE_RESULT ? JSON.parse(process.env.FIXTURE_RESULT)
+ : {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings,resolutions:[]};
 const emit = event => console.log(JSON.stringify(event));
 const mode = process.env.FIXTURE_MODE;
 if (mode === 'raw-exit') {
@@ -190,12 +191,27 @@ if (mode === 'fatal-exit') process.exit(1);
     } else if (request.url === '/repos/org/repo/pulls/1') {
       state.reads++;
       const moved = state.reads >= (state.moveAtRead ?? 2);
-      response.end(JSON.stringify({ state: moved && state.movement === 'closed' ? 'closed' : 'open', changed_files: state.changedFiles, head: { sha: moved && ['head', 'both'].includes(state.movement) ? previous : head }, base: { sha: moved && ['base', 'both'].includes(state.movement) ? previous : base, repo: { clone_url: pathToFileURL(repo).href } } }));
+      response.end(JSON.stringify({ state: moved && state.movement === 'closed' ? 'closed' : 'open', changed_files: state.changedFiles, head: { sha: moved && ['head', 'both'].includes(state.movement) ? previous : state.head ?? head }, base: { sha: moved && ['base', 'both'].includes(state.movement) ? previous : base, repo: { clone_url: pathToFileURL(repo).href } } }));
     } else { response.statusCode = 404; response.end('{}'); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const api = `http://127.0.0.1:${server.address().port}`;
   return { state, api, head, base, previous, temp, repo, capture, localDiff, env, hostSentinel,
+    async advance(contents) {
+      for (const [path, content] of Object.entries(contents)) await writeFile(join(repo, path), content);
+      await git(['add', '.']);
+      await git(['commit', '-m', 'advance review round']);
+      state.head = (await git(['rev-parse', 'HEAD'])).trim();
+      const names = (await git(['diff', '--name-only', '-z', base, state.head])).split('\0').filter(Boolean);
+      state.files = await Promise.all(names.map(async filename => {
+        const diff = await git(['diff', '--src-prefix=a/', '--dst-prefix=b/', base, state.head, '--', filename]);
+        const start = diff.indexOf('@@ ');
+        const patch = start < 0 ? '' : diff.slice(start).replace(/\n$/, '');
+        return { filename, status: 'modified', additions: patch.split('\n').filter(line => line.startsWith('+')).length, deletions: patch.split('\n').filter(line => line.startsWith('-')).length, patch };
+      }));
+      state.changedFiles = state.files.length;
+      return state.head;
+    },
     async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs } = {}) {
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
         timeoutMs,

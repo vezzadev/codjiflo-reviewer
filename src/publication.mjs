@@ -26,7 +26,16 @@ function validate(envelope, env) {
       payload?.commit_id !== head || !['APPROVE', 'REQUEST_CHANGES'].includes(payload.event) ||
       !publicationId(payload.body) ||
       !Array.isArray(payload.comments)) throw new Error('Invalid saved publication or unapproved requester');
+  validateReviewBody(payload.body);
   return envelope;
+}
+
+// Apply the bound to both fresh and recovered envelopes, and again after the
+// superseded-review notice is added. Never truncate a persisted findings ledger.
+export function validateReviewBody(body) {
+  if (typeof body !== 'string' || body.length > 65536 || Buffer.byteLength(body, 'utf8') > 65536) {
+    throw new Error('Review body exceeds GitHub limit (65536 characters/UTF-8 bytes); no finding ledger was truncated');
+  }
 }
 
 const withholdingNotices = {
@@ -106,6 +115,7 @@ export async function publishReview({ envelope, github, env = process.env, delay
     if (latest.state !== 'open') throw new Error('Pull request is not open; refusing publication');
     const postedPayload = latest.head.sha !== head || latest.base.sha !== base
       ? downgradedPayload() : payload;
+    validateReviewBody(postedPayload.body);
     try {
       // A direct receipt must confirm the exact event sent by this attempt.
       const receipt = await github.request(`${pullPath}/reviews`, { method: 'POST', body: postedPayload });
