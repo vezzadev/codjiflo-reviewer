@@ -1,0 +1,15 @@
+{
+  "name": "codjiflo-webhook-relay",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  // Secrets (wrangler secret put): WEBHOOK_SECRET, APP_PRIVATE_KEY (PKCS#8 PEM).
+  "vars": {
+    "APP_ID": "2540540",
+    "GITHUB_API_URL": "https://api.github.com",
+    "DISPATCH_REPOSITORY": "vezzadev/codjiflo-reviewer",
+    "DISPATCH_WORKFLOW": "review.yml",
+    "DISPATCH_REF": "main"
+  }
+}

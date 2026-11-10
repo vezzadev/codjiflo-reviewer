@@ -35,6 +35,46 @@ test('native publication records the workflow attempt without moving its final i
   } finally { await f.close(); }
 });
 
+test('a mention located by comment ID reviews with the comment author, preset and mode', async () => {
+  const f = await fixture();
+  try {
+    f.state.mention = { user: { login: 'Alice', type: 'User' }, body: 'Fixed. @codjiflo claude full' };
+    await f.run({ mention: true, providerEnv: { GITHUB_RUN_ID: '123', GITHUB_REPOSITORY: 'bot-owner/bot-repo', GITHUB_SERVER_URL: 'https://github.example' } });
+    const kickoff = f.state.posts.find(post => post.path === '/repos/org/repo/issues/1/comments').body.body;
+    assert.match(kickoff, /starting \*\*opus-xhigh\*\* \(full\) at .*requested by @Alice\./);
+    // The run link targets the repository hosting the workflow, not the reviewed one.
+    assert.ok(kickoff.endsWith('[Live workflow logs](https://github.example/bot-owner/bot-repo/actions/runs/123)'));
+    assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+  } finally { await f.close(); }
+});
+
+test('a mention by an unapproved author or without a command performs no review work', async t => {
+  for (const mention of [
+    { user: { login: 'stranger', type: 'User' }, body: '@codjiflo codex' },
+    { user: { login: 'Alice', type: 'User' }, body: 'Thanks @codjiflo for reviewing' },
+  ]) await t.test(mention.body, async () => {
+    const f = await fixture();
+    try {
+      f.state.mention = mention;
+      assert.match(await f.run({ mention: true }), /Ignoring unauthorized or non-review comment/);
+      assert.deepEqual(f.state.posts, []);
+    } finally { await f.close(); }
+  });
+});
+
+test('Actions logs carry OMP output for public repositories only', async t => {
+  for (const [visibility, expected] of [[true, 'withheld'], [false, 'live']]) await t.test(`private=${visibility}`, async () => {
+    const f = await fixture();
+    try {
+      f.state.private = visibility;
+      const stdout = await f.run({ providerEnv: { GITHUB_ACTIONS: 'true' } });
+      assert.equal(stdout.includes('"type":"agent_start"'), expected === 'live');
+      assert.equal(stdout.includes('OMP output withheld from logs'), expected === 'withheld');
+      assert.equal(verdicts(f)[0].body.event, 'APPROVE');
+    } finally { await f.close(); }
+  });
+});
+
 test('OMP failures, malformed results and tool errors never approve', async t => {
   for (const scenario of ['failure', 'malformed', 'error-result']) await t.test(scenario, async () => {
     const f = await fixture();

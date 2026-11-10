@@ -3,7 +3,7 @@
 
 # Codjiflo Reviewer
 
-A mention-triggered GitHub PR reviewer for trusted self-hosters. Requires Node.js 22+, Git, and Oh My Pi (`omp`) with access to the selected model. Both Codex and Claude presets run through OMP; there is no standalone reviewer CLI, SDK adapter, or Codjiflo credential pool. No hosted review service or multi-tenant infrastructure.
+A mention-triggered GitHub PR reviewer for trusted self-hosters. One deployment serves every repository its GitHub App is installed on: repositories need no workflow, variable, secret, or runner of their own. Requires Node.js 22+, Git, and Oh My Pi (`omp`) with access to the selected model. Both Codex and Claude presets run through OMP; there is no standalone reviewer CLI, SDK adapter, or Codjiflo credential pool. No multi-tenant infrastructure.
 
 Comment on an open PR:
 
@@ -43,32 +43,61 @@ Optionally commit UTF-8 instructions to `.codjiflo/code-review/PROMPT.md` in the
 
 Incremental reviews reuse a completed review only when the optional custom prompt has the same regular Git blob identity at the reviewed head and the current PR head (or is absent at both). Adding, deleting, or changing its content forces a full PR review under the current instructions. A valid outstanding-finding ledger is still reconciled during that full review.
 
-## Install in a consumer repository
+## How a mention becomes a review
 
-1. Make sure this public repository's Actions workflows are usable by your organization. Choose a trusted Codjiflo commit SHA. Copy [`examples/codjiflo-reviewer.yml`](examples/codjiflo-reviewer.yml) to `.github/workflows/codjiflo-reviewer.yml` on your repository's **default branch**. Replace both `@main` and `bot-ref: main` with the **same** trusted commit SHA. `main` is usable for development but follows future source changes.
-2. Under Settings → Secrets and variables → Actions → Variables, set **`CODJIFLO_APPROVED_USERS`** to comma-, whitespace-, or newline-separated GitHub logins, for example `alice,bob`. Matching is exact and case-insensitive. **Unset/empty means nobody is approved.** Repository ownership, association, collaborator status and write permission do not override this list.
-3. Register a trusted Linux self-hosted Actions runner with the consumer repository/organization (`self-hosted` label by default). Install Git, Node 22+, and current `omp` on its PATH. Configure and authenticate OMP **as the runner OS user** using OMP's normal setup and account pool. Do not copy CLI credentials into Codjiflo, this repository, or Actions artifacts. Set `runner-label` in the caller if using a dedicated custom label.
-4. Grant the workflow `actions: read`, `contents: read`, `issues: write`, `pull-requests: write` as shown. Organization policy must allow these permissions and bot approvals (see below).
-5. Optionally configure the GitHub App below for a dedicated bot identity. Otherwise the workflow uses `GITHUB_TOKEN`.
-6. Post an allowed mention on an open PR. A kickoff comment links the workflow run. OMP output streams live in the review step's logs. A successful run posts a native review with validated inline findings; if the head or base moved after analysis began, either verdict is published as a neutral `COMMENT` instead.
+```mermaid
+sequenceDiagram
+  participant PR as Any installed repository
+  participant Relay as Webhook relay (Cloudflare Worker)
+  participant WF as review.yml in this repository
+  PR->>Relay: issue_comment webhook (GitHub App)
+  Relay->>WF: workflow_dispatch(repository, comment-id)
+  WF->>PR: gate re-reads the comment, checks the allowlist
+  WF->>PR: kickoff comment, then native review
+```
 
-The reusable workflow first runs an authorization gate on `ubuntu-latest`, **before scheduling self-hosted review work**. Both gate and CLI authorize the original `issue_comment.comment.user.login`, not the user who reruns the workflow. The CLI repeats authorization before any API mutation or provider invocation. The event JSON is the source of truth; workflow runs ignore local requester flags. No `workflow_dispatch` path or caller-supplied event login is supported.
+1. The GitHub App subscribes to **Issue comment** events for every repository it is installed on.
+2. [`worker/`](worker/src/index.mjs) verifies the webhook signature and, for a newly created PR comment by a non-bot that contains `@codjiflo`, dispatches [`.github/workflows/review.yml`](.github/workflows/review.yml) on this repository's default branch with the repository name and comment ID. It makes no authorization or command decision. A failed dispatch answers 502, so the delivery shows as failed in the App's delivery log and can be redelivered.
+3. The workflow's gate job runs on `ubuntu-latest`, **before scheduling self-hosted review work**. It mints an App installation token for the reviewed repository and re-reads the comment from GitHub: the dispatch inputs only locate it, so author and body never depend on the relay or on whoever started the run. The CLI repeats that lookup and authorization before any API mutation or provider invocation.
+4. The review job runs on this repository's self-hosted runners (label `codjiflo-reviewer`), posts a kickoff comment linking the run, and publishes a native review with validated inline findings; if the head or base moved after analysis began, either verdict is published as a neutral `COMMENT` instead.
 
-Every invoked CLI gate prints one concise `gate:` decision line and adds it to the Actions job summary. It includes `allowed`, `reason`, the original author, comment ID, and PR number; accepted requests also include provider, canonical preset, and mode. Denials distinguish `not-a-command`, `bot-author`, `not-approved`, `invalid-command`, and `not-a-pr`. Direct CLI gate invocation can report `not-a-pr` for non-PR issue comments and `not-a-command` for edited comments; the reusable workflow filters those events before invoking the CLI gate, so they produce no gate decision line or summary there. An invalid standalone command from an approved author records its decision before failing the gate. Ordinary newly created PR comments and the bot's own kickoff/failure comments may still create a hosted gate run, but are explicitly denied and never schedule the self-hosted review job.
+To review a new repository, install the App on it. Nothing else is per-repository.
 
-Bot implementation checkout always comes from trusted `vezzadev/codjiflo-reviewer` at `bot-ref`, **never the PR branch**. The target PR is fetched separately into a disposable Git repository, including fork heads via GitHub's accessible commit objects. It is not built or tested by the orchestrator. The review CLI can read files and use Git to inspect context. Trust must extend to the **PR authors and reviewed contents, including fork PRs**, not merely the base repository or the allowlisted requester. This is not a malicious-input isolation product: removing known publication tokens and fetch headers from the reviewer environment is not an OS sandbox, does not isolate `HOME` or host secrets, and does not prevent reviewer tools or PR-controlled settings from accessing the runner user's files.
+Every gate run prints one concise `gate:` decision line and adds it to the Actions job summary. It includes `allowed`, `reason`, the comment author, comment ID, and PR number; accepted requests also include provider, canonical preset, and mode. Denials distinguish `not-a-command`, `bot-author`, `not-approved`, `invalid-command`, and `not-a-pr`. An invalid standalone command from an approved author records its decision before failing the gate. Casual `@codjiflo` mentions still create a hosted gate run, but are explicitly denied and never schedule the self-hosted review job. Starting the workflow by hand with a repository and comment ID is equivalent to a relayed mention and is authorized the same way.
 
-This repository runs its own instance through [`.github/workflows/codjiflo.yml`](.github/workflows/codjiflo.yml). It uses the `codjiflo-reviewer` runner label and the existing `Codjiflo` GitHub App. The local reusable workflow and bot checkout use the same default-branch revision. Approved users and App credentials remain in repository Actions variables/secrets; consumer repositories should use the example workflow above.
+Bot implementation checkout is always this repository at the dispatched default-branch revision, **never the PR branch**. The target PR is fetched separately into a disposable Git repository, including fork heads via GitHub's accessible commit objects. It is not built or tested by the orchestrator. The review CLI can read files and use Git to inspect context. Trust must extend to the **PR authors and reviewed contents, including fork PRs**, not merely the base repository or the allowlisted requester. This is not a malicious-input isolation product: removing known publication tokens and fetch headers from the reviewer environment is not an OS sandbox, does not isolate `HOME` or host secrets, and does not prevent reviewer tools or PR-controlled settings from accessing the runner user's files.
+
+### Private repositories
+
+Runs, logs, and artifacts of this public repository are public. For a reviewed repository that GitHub does not report as public, OMP's live output is withheld from the Actions log and the review-result artifact is not uploaded; the review itself is unchanged. Without the artifact, `--publish` recovery is unavailable for that run: request the review again instead. The run title still names the repository, and the gate line names the comment author and PR number.
+
+## Deploy your own instance
+
+1. Fork or copy this repository. Set Actions variable **`CODJIFLO_APPROVED_USERS`** to comma-, whitespace-, or newline-separated GitHub logins, for example `alice,bob`. Matching is exact and case-insensitive. **Unset/empty means nobody is approved.** Repository ownership, association, collaborator status and write permission do not override this list.
+2. Create a GitHub App with repository permissions **Contents: read**, **Issues: read**, **Pull requests: read/write**, and **Actions: read/write** (the relay starts the workflow with it), subscribed to **Issue comment**. Set Actions variable `CODJIFLO_APP_ID` and secret `CODJIFLO_APP_PRIVATE_KEY`. Install the App on this repository and on every repository to review.
+3. Register trusted Linux self-hosted Actions runners with this repository under the label `codjiflo-reviewer`. Install Git, Node 22+, and current `omp` on its PATH. Configure and authenticate OMP **as the runner OS user** using OMP's normal setup and account pool. Do not copy CLI credentials into Codjiflo, this repository, or Actions artifacts.
+4. Deploy the relay and point the App's webhook at it:
+
+   ```sh
+   cd worker
+   # Edit wrangler.jsonc vars: APP_ID and DISPATCH_REPOSITORY.
+   openssl rand -hex 32 | npx wrangler secret put WEBHOOK_SECRET   # also set as the App's webhook secret
+   openssl pkcs8 -topk8 -nocrypt -in app-private-key.pem | npx wrangler secret put APP_PRIVATE_KEY
+   npx wrangler deploy
+   ```
+
+   WebCrypto imports PKCS#8 only, hence the conversion of GitHub's PKCS#1 key. The relay mints a token restricted to `actions: write` on the dispatch repository; it never touches reviewed repositories.
+5. Post an allowed mention on an open PR in any installed repository.
+
+Optional Actions variables `CODJIFLO_SOL_MODEL` and `CODJIFLO_OPUS_MODEL` override the presets' provider-qualified OMP models.
 
 ### GitHub identity and permissions
 
-**Recommended: GitHub App.** Create or reuse an App, install it on the consumer repository, and grant repository permissions **Contents: read** and **Pull requests: read/write**. Pull-request write permission also permits comments on PR conversations; Issues write permission is not required. No webhook subscription is needed. Set repository variable `CODJIFLO_APP_ID` and Actions secret `CODJIFLO_APP_PRIVATE_KEY`. The example passes them to the reusable workflow, which mints a short-lived installation token with `actions/create-github-app-token`. Reviews appear under the App's bot identity. Reusing an App does not require changing its OAuth callbacks, existing keys, or other installations.
-
-**Built-in `GITHUB_TOKEN`:** works where repository/organization policy allows it. Enable Settings → Actions → General → Workflow permissions → **Allow GitHub Actions to create and approve pull requests** if approval is restricted. Its actor is `github-actions[bot]`, not a custom Codjiflo App. GitHub can reject an approval by the PR's own author; bot-created PRs can therefore require a separate App identity. Events created using `GITHUB_TOKEN` generally do not start other Actions workflows; use an App token when downstream review-triggered automation is required. Fork/organization policies may further restrict token writes. An API rejection is a failed run, never silently converted into approval.
+Reviews appear under the App's bot identity, which can approve PRs where organization policy blocks `GITHUB_TOKEN` approvals. Every job mints a short-lived installation token scoped to the single reviewed repository with `actions/create-github-app-token`; the workflow's own `GITHUB_TOKEN` only reads this repository. Pull-request write permission also permits comments on PR conversations; Issues write permission is not required. GitHub can reject an approval by the PR's own author. An API rejection is a failed run, never silently converted into approval.
 
 OMP authentication is independent of the GitHub token. Subscription/API access, usage limits and model availability remain your responsibility. The code checks OMP exit status and structured completion; it does not turn quota/auth errors into a clean review.
 
-OMP work has one 45-minute limit; the review job has a 55-minute limit, below the GitHub App token's one-hour lifetime. Timeouts stop OMP and enter the normal failure-reporting path. After an authorized review job fails or is cancelled, a separate `ubuntu-latest` job reports its terminal status even if the self-hosted runner disappeared before uploading logs or running cleanup. It uses the ordinary GitHub token, not runner credentials, and submits no review verdict. It suppresses duplicate notices when a bot already posted a failure comment during the same run attempt or a native review carries that attempt's workflow marker. Grant callers `actions: read` as well as the existing comment/review permissions so it can scope comment reconciliation to the current attempt. Reporting still requires GitHub-hosted runner availability and API write access; force-cancelling the entire workflow can also stop its reporter. Keep the self-hosted machine running (including WSL for WSL-hosted runners); this notification does not restore a stopped runner or clean its temporary checkout.
+OMP work has one 45-minute limit; the review job has a 55-minute limit, below the GitHub App token's one-hour lifetime. Timeouts stop OMP and enter the normal failure-reporting path. After an authorized review job fails or is cancelled, a separate `ubuntu-latest` job reports its terminal status on the reviewed PR even if the self-hosted runner disappeared before uploading logs or running cleanup. It mints its own App token, not runner credentials, and submits no review verdict. It suppresses duplicate notices when a bot already posted a failure comment during the same run attempt or a native review carries that attempt's workflow marker. Reporting still requires GitHub-hosted runner availability and API write access; force-cancelling the entire workflow can also stop its reporter. Keep the self-hosted machine running (including WSL for WSL-hosted runners); this notification does not restore a stopped runner or clean its temporary checkout.
 
 ### OMP authentication and account selection
 
@@ -76,32 +105,33 @@ OMP owns provider authentication, refresh, automatic quota-aware account selecti
 
 Configure accounts through your normal OMP authentication workflow under the runner OS user. Ensure that user's service environment can find `omp` and its normal configuration. No Codjiflo API-key setup command, routing-state file, SDK installation, or credential migration is required. Existing obsolete Codjiflo pool files are not read. OMP account availability does not guarantee a model will finish a review: unsuccessful or incomplete runs still publish no verdict.
 
-### Prepare offline review prerequisites
+### Per-repository settings
 
-Use the optional `prepare-command` input for trusted host-side setup. It runs from the bot checkout after authorization and before the App token is minted or OMP starts. A nonzero exit stops the job without submitting a review; failures in prerequisite preparation or App token minting produce a neutral preparation-failure comment with a link to the run logs using the ordinary GitHub token. The original setup failure still fails the job; CLI failures use the CLI's own reporting instead of this setup comment. Preparation has a five-minute limit; commands come from the consumer's trusted workflow, not PR content. The failure comment omits command output to avoid exposing host secrets.
+[`repositories.json`](repositories.json) maps `owner/repo` (case-insensitive) to optional `prepareCommand` and `sourceSubmodules`. It is read from this trusted checkout, never from the reviewed repository; repositories without an entry need none.
 
-The disposable PR checkout leaves all submodules uninitialized by default. Configure the optional reusable-workflow input `source-submodules` as a JSON array string of exact root-repository gitlink paths, for example `source-submodules: '["SolidworksMCP-python"]'`. Local CLI callers set `CODJIFLO_SOURCE_SUBMODULES='["SolidworksMCP-python"]'`; unset defaults to `'[]'`. Each selected path must be a gitlink in the inspected **current PR head** tree, not a directory, ordinary file, nested dependency path, or pathspec pattern. Malformed JSON, non-array/non-string values, absolute paths, traversal segments, backslashes, control characters, and Git pathspec magic are rejected. Literal wildcard characters in an actual gitlink name are handled literally, never expanded to other dependencies. Unselected submodules retain only their tracked metadata and are not fetched, even if they are private or unavailable.
+`prepareCommand` is a single-line trusted host-side setup command. It runs from the bot checkout on the review runner after authorization and before OMP starts. A nonzero exit stops the job without submitting a review and posts a neutral preparation-failure comment with a link to the run logs. Preparation has a five-minute limit. The failure comment omits command output to avoid exposing host secrets.
+
+The disposable PR checkout leaves all submodules uninitialized by default. Set `sourceSubmodules` to an array of exact root-repository gitlink paths, for example `"sourceSubmodules": ["SolidworksMCP-python"]`. Local CLI callers set `CODJIFLO_SOURCE_SUBMODULES='["SolidworksMCP-python"]'`; unset defaults to `'[]'`. Each selected path must be a gitlink in the inspected **current PR head** tree, not a directory, ordinary file, nested dependency path, or pathspec pattern. Malformed JSON, non-array/non-string values, absolute paths, traversal segments, backslashes, control characters, and Git pathspec magic are rejected. Literal wildcard characters in an actual gitlink name are handled literally, never expanded to other dependencies. Unselected submodules retain only their tracked metadata and are not fetched, even if they are private or unavailable.
 
 Only selected root paths are initialized recursively at the exact pinned gitlink commits, including their nested dependencies. Checkout forces `--checkout`, never `--remote` or a submodule's configured merge/rebase update strategy. Fetches use the same sanitized, noninteractive Git authentication environment as the main checkout. For an HTTP(S) base clone URL, the temporary authorization header is scoped to that URL's origin (scheme, host, and port): same-origin submodule paths receive it, but other hosts or ports do not. File and SSH base clones receive no generated HTTP header. The header exists only in the fetch environment, is not persisted to Git config, and is not passed to OMP. Selecting dependencies does **not** broaden the root-repository-scoped publication token or grant access to private repositories; existing runner transport authentication must permit access to every selected repository and its descendants. Any selected dependency fetch failure stops preparation before OMP starts, with no verdict; there is no implicit all-submodules or legacy fallback.
 
-This fetch does not generate ignored build outputs. If repository review instructions require rendered sheets or other generated evidence, consumers must supply evidence for the inspected head (or demonstrably identical inputs), with its provenance and complete required scope. The host-side `prepare-command` runs before the disposable PR checkout exists; it cannot populate that checkout's `cad/out/` or establish head-specific native proof. A latest release, a different PR head's renders, or source-code predictions are not substitutes for required current-sheet evidence. When that evidence is unavailable, `INCOMPLETE` remains the correct result; installing a submodule or reference bundle alone does not make such a review complete.
+This fetch does not generate ignored build outputs. If repository review instructions require rendered sheets or other generated evidence, consumers must supply evidence for the inspected head (or demonstrably identical inputs), with its provenance and complete required scope. The host-side `prepareCommand` runs before the disposable PR checkout exists; it cannot populate that checkout's `cad/out/` or establish head-specific native proof. A latest release, a different PR head's renders, or source-code predictions are not substitutes for required current-sheet evidence. When that evidence is unavailable, `INCOMPLETE` remains the correct result; installing a submodule or reference bundle alone does not make such a review complete.
 
 For repositories requiring the `developing-solidworks` reference:
 
-```yaml
-with:
-  prepare-command: node scripts/prepare-solidworks-docs.mjs
+```json
+{ "owner/repo": { "prepareCommand": "node scripts/prepare-solidworks-docs.mjs" } }
 ```
 
 The helper resolves the enabled Codex plugin through `codex plugin list --json` and provisions its exact versioned skill directory from an installed Claude offline bundle. Malformed or truncated CLI manifests and Claude registries are reread up to three times, 250 ms apart; every attempt obtains fresh JSON, and persistent invalid data fails closed without selecting an old cache or publishing a readiness marker. It copies reference data only, preserving skill instructions, scripts, and learnings. A valid target is reused without requiring the source cache; an absent or incomplete bundle fails preparation. Plugin-version changes select a new target automatically.
 
-Install the source bundle once as the runner user before enabling this input. Preparation does not download documentation or invoke PowerShell. This optional helper remains a separate Codex plugin integration, not a reviewer execution path; it still requires the installed Codex executable and Claude offline bundle. `CODJIFLO_DOCS_CODEX_BIN` overrides only that helper's Codex executable. OMP can inspect prepared files when their paths are supplied by the review instructions; the helper does not install an OMP skill or establish head-specific generated evidence. Local CLI users should run the same preparation command before invoking the reviewer.
+Install the source bundle once as the runner user before configuring this command. Preparation does not download documentation or invoke PowerShell. This optional helper remains a separate Codex plugin integration, not a reviewer execution path; it still requires the installed Codex executable and Claude offline bundle. `CODJIFLO_DOCS_CODEX_BIN` overrides only that helper's Codex executable. OMP can inspect prepared files when their paths are supplied by the review instructions; the helper does not install an OMP skill or establish head-specific generated evidence. Local CLI users should run the same preparation command before invoking the reviewer.
 
 Concurrent preparation waits up to 30 seconds for a live lock owner, then checks the cache again. A stale lock fails with cleanup instructions instead of silently accepting unfinished data.
 
 ### Review parallelism
 
-Each self-hosted runner process executes one job at a time. To allow more simultaneous reviews, register additional runners with the same configured label and separate installation/work directories and services. They may share a machine, subject to its resources and the provider account's quotas. The per-PR concurrency group still serializes reviews of the same PR. `strategy.max-parallel` applies to matrix jobs and does not control this workflow.
+Each self-hosted runner process executes one job at a time, and all reviewed repositories share this repository's runner pool. To allow more simultaneous reviews, register additional runners here with the `codjiflo-reviewer` label and separate installation/work directories and services. They may share a machine, subject to its resources and the provider account's quotas. The per-PR concurrency group still serializes reviews of the same PR. `strategy.max-parallel` applies to matrix jobs and does not control this workflow.
 
 ## Incremental review and commit-pinned publication
 
@@ -154,8 +184,8 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 
 | Invocation | Behavior |
 | --- | --- |
-| `node bin/codjiflo-reviewer.mjs` | Uses `GITHUB_EVENT_PATH` for an issue_comment event |
-| `node bin/codjiflo-reviewer.mjs --gate` | Authorization/command check only; logs its decision and writes an Actions summary, sets `allowed` and `provider` in `GITHUB_OUTPUT`; no token/provider/API calls |
+| `--repo owner/repo --comment ID` | Workflow path: re-reads the comment, authorizes its author, and reviews as that comment requests |
+| `--repo owner/repo --comment ID --gate` | Authorization/command check only; logs its decision and writes an Actions summary, sets `allowed` and `provider` in `GITHUB_OUTPUT`, plus `number`, `visibility`, `prepare-command`, and `source-submodules` for accepted requests; read-only API calls, no provider calls |
 | `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `sol-xhigh` incremental; still requires allowlist |
 | `--preset PRESET` | Select one of the four canonical presets or the `codex`/`claude` aliases |
 | `--full` | Full review in local invocation |
@@ -163,9 +193,9 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 | `--publish FILE` | Reconcile/retry a retained review without invoking OMP |
 | `--help` | Print usage |
 
-Local `--requester` is an operator assertion, not remote authentication. Do not expose this CLI as an unauthenticated service. Event-based runs always use the original event author instead.
+Local `--requester` is an operator assertion, not remote authentication. Do not expose this CLI as an unauthenticated service. Comment-based runs always use the fetched comment's author instead.
 
-Other environment: `GH_TOKEN` is a fallback for `GITHUB_TOKEN`; `GITHUB_API_URL` supports GitHub Enterprise/the fixture server; PR metadata supplies its clone URL. `CODJIFLO_OMP_BIN` overrides the reviewer OMP executable path (also used by fixtures). `CODJIFLO_DOCS_CODEX_BIN` independently overrides Codex for the optional documentation helper only. `GITHUB_RUN_ID`/`GITHUB_SERVER_URL` build kickoff links. The reusable workflow exposes `sol-model`, `opus-model`, `runner-label`, optional `app-id`, and optional `prepare-command` inputs.
+Other environment: `GH_TOKEN` is a fallback for `GITHUB_TOKEN`; `GITHUB_API_URL` supports GitHub Enterprise/the fixture server; PR metadata supplies its clone URL. `CODJIFLO_OMP_BIN` overrides the reviewer OMP executable path (also used by fixtures). `CODJIFLO_DOCS_CODEX_BIN` independently overrides Codex for the optional documentation helper only. `GITHUB_RUN_ID`, `GITHUB_REPOSITORY`, and `GITHUB_SERVER_URL` build kickoff links to the run in the repository hosting the workflow.
 
 The disposable checkout and reviewer receive a copied environment without caller repository selectors (`GIT_DIR`, `GIT_WORK_TREE`, index/object/common-directory overrides, namespaces, discovery ceilings, and related Git-local variables), inherited pathspec modes (`GIT_ICASE_PATHSPECS`, `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS`, and `GIT_LITERAL_PATHSPECS`), or command-level config overrides (`GIT_CONFIG`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, and indexed `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`). Selector names are matched case-insensitively. This keeps Git inspection pinned to the fetched PR rather than a caller's checkout and prevents inherited pathspec magic from breaking current-head repository-instruction lookup. Git installation, TLS, and authentication transport settings such as `GIT_EXEC_PATH`, `GIT_SSL_CAINFO`, and `GIT_SSH_COMMAND` remain available. Normal trusted host Git configuration still applies, including operator selectors `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, and `GIT_CONFIG_NOSYSTEM`; this is not a universal Git-configuration sandbox. The orchestrator adds its GitHub authorization header only to its own Git commands. The reviewer receives neither that header nor inherited `GITHUB_TOKEN`/`GH_TOKEN` variables (including mixed-case spellings), while provider API credentials remain available. Publication retains the orchestrator's GitHub credentials.
 

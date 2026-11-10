@@ -89,9 +89,22 @@ export function parseCommand(body) {
   return null;
 }
 
+// The comment is re-read from GitHub: dispatch inputs only locate it, so its
+// author and body never depend on the relay that reported the mention.
+export async function commentEvent(github, repo, commentId) {
+  const parts = (repo ?? '').split('/');
+  if (parts.length !== 2 || parts.some(part => !/^[\w.-]+$/.test(part) || /^\.+$/.test(part)) || !/^[1-9]\d*$/.test(commentId ?? '')) {
+    throw new Error('Valid --repo owner/repo and --comment ID required');
+  }
+  const comment = await github.request(`/repos/${repo}/issues/comments/${commentId}`);
+  const number = /\/issues\/([1-9]\d*)$/.exec(comment?.issue_url ?? '')?.[1];
+  if (!number) throw new Error('Comment response must identify its issue');
+  const issue = await github.request(`/repos/${repo}/issues/${number}`);
+  return { comment, issue, repository: { full_name: repo } };
+}
+
 export function eventDecision(event, approved) {
   if (!event.issue?.pull_request) return { reason: 'not-a-pr' };
-  if (event.action !== 'created') return { reason: 'not-a-command' };
   const author = event.comment?.user;
   if (author?.type === 'Bot' || /\[bot\]$/i.test(author?.login ?? '')) return { reason: 'bot-author' };
   // The original comment author, never the workflow rerunner, is authoritative.

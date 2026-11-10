@@ -107,15 +107,14 @@ test('Markdown code spans stop at paragraphs and indented code respects paragrap
     'Example:\n\n    @codjiflo claude\n\nOwner authorized option (A). @codjiflo codex',
   ]) assert.deepEqual(parseCommand(body), { preset: 'sol-xhigh', mode: 'incremental' }, body);
 });
-test('shorthand events require an approved original author and a newly created PR comment', () => {
-  const event = { action: 'created', sender: { login: 'admin' }, comment: { body: '@codjiflo codex', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1853, pull_request: {} } };
+test('shorthand events require an approved original author and a PR comment', () => {
+  const event = { sender: { login: 'admin' }, comment: { body: '@codjiflo codex', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1853, pull_request: {} } };
   assert.deepEqual(eventDecision(event, 'admin'), { reason: 'not-approved' });
   assert.deepEqual(eventDecision(event, ''), { reason: 'not-approved' });
   event.comment.user.login = 'ADMIN';
   for (const [body, preset, mode] of [['@codjiflo codex', 'sol-xhigh', 'incremental'], ['@codjiflo claude full', 'opus-xhigh', 'full'], ['@codjiflo SOL-MEDIUM', 'sol-medium', 'incremental']]) {
     event.comment.body = body;
     assert.deepEqual(eventDecision(event, 'admin'), { reason: 'approved', request: { preset, mode, repo: 'org/repo', number: 1853, requester: 'ADMIN' } });
-    assert.deepEqual(eventDecision({ ...event, action: 'edited' }, 'admin'), { reason: 'not-a-command' });
     assert.deepEqual(eventDecision({ ...event, issue: { number: 1853 } }, 'admin'), { reason: 'not-a-pr' });
   }
   event.comment.body = '@codjiflo codex claude';
@@ -126,13 +125,12 @@ test('shorthand events require an approved original author and a newly created P
   assert.deepEqual(eventDecision(event, 'admin'), { reason: 'not-approved' });
 });
 test('event authorization uses original comment sender, not rerunner actor', () => {
-  const event = { action: 'created', sender: { login: 'admin' }, comment: { body: '@codjiflo-reviewer review', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1, pull_request: {} } };
+  const event = { sender: { login: 'admin' }, comment: { body: '@codjiflo-reviewer review', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1, pull_request: {} } };
   assert.deepEqual(eventDecision(event, 'admin'), { reason: 'not-approved' });
   event.comment.user.login = 'ADMIN';
   assert.equal(eventDecision(event, 'admin').request.requester, 'ADMIN');
   event.comment.body = '@codjiflo-reviewer review CLAUDE';
   assert.deepEqual(eventDecision(event, 'admin'), { reason: 'approved', request: { preset: 'opus-xhigh', mode: 'incremental', repo: 'org/repo', number: 1, requester: 'ADMIN' } });
-  assert.deepEqual(eventDecision({ ...event, action: 'edited' }, 'admin'), { reason: 'not-a-command' });
 });
 test('ranged comments retain correct left and right coordinates', () => {
   const files = filesFromApi(metadata);

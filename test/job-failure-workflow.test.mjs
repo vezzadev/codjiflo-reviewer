@@ -9,11 +9,11 @@ const shouldReport = new Function('always', 'needs', `return ${condition};`);
 const script = reporter.split('          script: |\n')[1].split('\n').map(line => line.slice(12)).join('\n');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const execute = new AsyncFunction('github', 'context', 'process', script);
+// The run lives in the bot repository; the PR lives in the reviewed one.
 const context = {
-  serverUrl: 'https://github.example', repo: { owner: 'owner', repo: 'repo' },
-  issue: { number: 1995 }, runId: 40601533783,
+  serverUrl: 'https://github.example', repo: { owner: 'bot-owner', repo: 'bot-repo' }, runId: 40601533783,
 };
-const runUrl = `${context.serverUrl}/owner/repo/actions/runs/${context.runId}`;
+const runUrl = `${context.serverUrl}/bot-owner/bot-repo/actions/runs/${context.runId}`;
 const marker = `<!-- codjiflo-workflow:${context.runId}:2 -->`;
 const bot = { type: 'Bot' };
 
@@ -24,11 +24,6 @@ async function report({ comments = [], reviews = [], result = 'failure', attempt
   const listReviews = () => {};
   const github = {
     rest: {
-      actions: { getWorkflowRunAttempt: async request => {
-        assert.deepEqual(request, { owner: 'owner', repo: 'repo', run_id: context.runId, attempt_number: Number(attempt) });
-        reads.push(request);
-        return { data: { run_started_at: '2026-10-29T01:00:00Z' } };
-      } },
       issues: { listComments, createComment: async request => { posts.push(request); } },
       pulls: { listReviews },
     },
@@ -46,7 +41,10 @@ async function report({ comments = [], reviews = [], result = 'failure', attempt
       return comments;
     },
   };
-  await execute(github, context, { env: { REVIEW_JOB_RESULT: result, GITHUB_RUN_ATTEMPT: attempt } });
+  await execute(github, context, { env: {
+    REVIEW_JOB_RESULT: result, GITHUB_RUN_ATTEMPT: attempt,
+    TARGET_REPOSITORY: 'owner/repo', TARGET_PR: '1995', ATTEMPT_STARTED_AT: '2026-10-29T01:00:00Z',
+  } });
   return { posts, reads };
 }
 
@@ -54,10 +52,8 @@ test('terminal reporter runs independently on hosted runner after authorized fai
   assert.match(reporter, /needs: \[gate, review\]/);
   assert.match(reporter, /runs-on: ubuntu-latest/);
   assert.match(reporter, /actions: read/);
-  assert.match(reporter, /issues: write/);
-  assert.match(reporter, /pull-requests: read/);
   assert.equal(Object.hasOwn(context, 'runAttempt'), false);
-  assert.doesNotMatch(reporter, /actions\/checkout|node bin\/|inputs\.prepare-command|steps\.review/);
+  assert.doesNotMatch(reporter, /actions\/checkout|node bin\/|steps\.review/);
   for (const allowed of ['true', 'false', '']) {
     for (const result of ['failure', 'cancelled', 'success', 'skipped']) {
       assert.equal(shouldReport(() => true, { gate: { outputs: { allowed } }, review: { result } }),
@@ -78,7 +74,6 @@ for (const result of ['failure', 'cancelled']) {
     assert.match(posts[0].body, /codjiflo-job-failure:40601533783:2/);
     assert.deepEqual(reads, [
       { owner: 'owner', repo: 'repo', pull_number: 1995, per_page: 100 },
-      { owner: 'owner', repo: 'repo', run_id: context.runId, attempt_number: 2 },
       { owner: 'owner', repo: 'repo', issue_number: 1995, since: '2026-10-29T01:00:00Z', per_page: 100 },
     ]);
   });
@@ -150,3 +145,13 @@ for (const attempt of [undefined, '', '0', '-1', '1.5', 'not-an-attempt', '90071
     );
   });
 }
+
+test('an unread attempt start time fails before API requests instead of widening reconciliation', async () => {
+  const github = new Proxy({}, {
+    get() { assert.fail('a missing start time must fail before accessing the GitHub client'); },
+  });
+  await assert.rejects(
+    execute(github, context, { env: { REVIEW_JOB_RESULT: 'failure', GITHUB_RUN_ATTEMPT: '2', TARGET_REPOSITORY: 'owner/repo', TARGET_PR: '1995', ATTEMPT_STARTED_AT: '' } }),
+    /ATTEMPT_STARTED_AT must be a timestamp/,
+  );
+});

@@ -3,8 +3,9 @@ import { isApproved, PRESETS } from './commands.mjs';
 import { secretRedactor } from './redaction.mjs';
 import { getCheckpointSnapshot, parseCheckpoint } from './checkpoints.mjs';
 
-export function workflowRunUrl(request, env) {
-  return env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${request.repo}/actions/runs/${env.GITHUB_RUN_ID}` : null;
+// The run belongs to the repository hosting the workflow, not the reviewed one.
+export function workflowRunUrl(env) {
+  return env.GITHUB_RUN_ID && env.GITHUB_REPOSITORY ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : null;
 }
 
 function transient(error) {
@@ -167,7 +168,7 @@ export async function publishReview({ envelope, github, env = process.env, delay
 }
 
 export async function reportPublicationFailure({ request, github, env = process.env, error }) {
-  const runUrl = workflowRunUrl(request, env);
+  const runUrl = workflowRunUrl(env);
   // Publication credentials stay outside the reviewer environment, so redact at
   // the public sink using the orchestrator's credentials as well as provider ones.
   const { redact } = secretRedactor([github.token, ...Object.entries(env)

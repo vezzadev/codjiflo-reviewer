@@ -109,7 +109,9 @@ export async function review({ request, github, env = process.env, reviewer = ru
   if (pr.state !== 'open') throw new Error('Pull request is not open');
   const head = pr.head.sha;
   const base = pr.base.sha;
-  const runUrl = workflowRunUrl(request, env);
+  const runUrl = workflowRunUrl(env);
+  // Actions logs of this public bot repository must not carry private repository content.
+  const logStream = pr.base.repo.private === true && env.GITHUB_ACTIONS === 'true' ? 'withheld' : 'live';
   const kickoff = await github.request(`${root}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer starting **${request.preset}** (${request.mode}) at \`${head}\`, requested by @${request.requester}.${runUrl ? `\n\n[Live workflow logs](${runUrl})` : ''}` } });
   const kickoffId = kickoff?.id;
   if (!Number.isSafeInteger(kickoffId) || kickoffId <= 0) throw new Error('Kickoff comment response must include a positive safe-integer id');
@@ -190,7 +192,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const currentDiff = JSON.stringify([...files.values()].map(file => ({ filename: file.path, previous_filename: file.previousPath, patch: file.patch })), null, 2);
     const customInstructions = currentPromptBlob === undefined ? undefined : await git(['cat-file', 'blob', currentPromptBlob]);
     const input = await reviewInput({ preset, options: { level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions, priorFindings }, cwd, temp, git });
-    const result = await reviewer({ preset, prompt: input, cwd, temp, env: reviewEnv });
+    const result = await reviewer({ preset, prompt: input, cwd, temp, env: reviewEnv, logStream });
     const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10, priorFindings);
     const publication = randomUUID();
     const resultPath = output ?? `codjiflo-result-${publication}.json`;
