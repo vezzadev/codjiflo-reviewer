@@ -11,10 +11,12 @@ import { secretRedactor } from '../src/redaction.mjs';
 
 const runtimeNames = ['TMPDIR', 'TMP', 'TEMP', 'XDG_CACHE_HOME', 'UV_CACHE_DIR', 'UV_PROJECT_ENVIRONMENT', 'PYTHONPYCACHEPREFIX'];
 const result = { verdict: 'INCOMPLETE', summary: 'Required source unavailable.', findings: [], resolutions: [] };
-const rejected = id => [
+const rejectedCall = id => [
   { type: 'tool_execution_start', toolName: 'final_review', toolCallId: id, args: { __parseError: "Expected ',' or '}' in object" } },
   { type: 'tool_execution_end', toolName: 'final_review', toolCallId: id, isError: true, result: { content: [{ type: 'text', text: 'Validation failed' }] } },
 ];
+// The model's next message ends after it has seen the rejection.
+const rejected = id => [...rejectedCall(id), { type: 'message_end', message: { role: 'assistant', stopReason: 'toolUse', content: [] } }];
 const events = () => [
   { type: 'tool_execution_start', toolName: 'final_review', toolCallId: 'review-1', args: structuredClone(result) },
   { type: 'tool_execution_end', toolName: 'final_review', toolCallId: 'review-1', isError: false, result: { details: { accepted: true } } },
@@ -112,6 +114,8 @@ for (const [name, mutate] of [
   ['duplicate end', value => value.splice(2, 0, structuredClone(value[1]))],
   ['rejected resubmission after the accepted result', value => value.splice(2, 0, ...rejected('late'))],
   ['rejected attempt overlapping the accepted call', value => value.splice(1, 0, ...rejected('overlap'))],
+  ['rejected attempt in the same message as the accepted call', value => value.unshift(...rejectedCall('batch'))],
+  ['rejected attempt whose result ends after the accepted call starts', value => { const [start, end] = rejectedCall('batch'); value.splice(0, 0, start); value.splice(2, 0, end); }],
   ['only rejected attempts', value => value.splice(0, 2, ...rejected('retry-1'))],
   ['two accepted results', value => value.splice(2, 0, ...events().slice(0, 2).map(event => ({ ...event, toolCallId: 'review-2' })))],
   ['mismatched call', value => { value[1].toolCallId = 'other'; }],
