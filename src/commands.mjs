@@ -62,7 +62,7 @@ export function parseCommand(body) {
     // Standalone command lines keep their existing grammar and error handling.
     if (prefix.trim() && suffix.split('\n\n', 1)[0].slice(rest.length).trim()) continue;
     const words = (first === 'review' ? rest : `${first}${rest}`).trim().split(/\s+/).filter(Boolean);
-    let preset = 'sol-xhigh';
+    let preset = 'opus-xhigh';
     let mode = 'incremental';
     const seen = new Set();
     let invalid = false;

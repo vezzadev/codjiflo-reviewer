@@ -28,7 +28,7 @@ try {
   const { values } = parseArgs({ options: {
     gate: { type: 'boolean' }, help: { type: 'boolean' },
     repo: { type: 'string' }, pr: { type: 'string' }, requester: { type: 'string' }, comment: { type: 'string' },
-    preset: { type: 'string', default: 'sol-xhigh' }, full: { type: 'boolean' },
+    preset: { type: 'string', default: 'opus-xhigh' }, full: { type: 'boolean' },
     publish: { type: 'string' }, output: { type: 'string' },
   } });
   if (values.help) {

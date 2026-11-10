@@ -20,7 +20,7 @@ test('authorization denies empty, absent and non-exact users; normalizes login c
 });
 test('commands support four presets, aliases, explicit full and default incremental', () => {
   assert.deepEqual(Object.keys(PRESETS), ['sol-xhigh', 'opus-xhigh', 'sol-medium', 'opus-medium']);
-  assert.deepEqual(parseCommand('@codjiflo-reviewer review'), { preset: 'sol-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('@codjiflo-reviewer review'), { preset: 'opus-xhigh', mode: 'incremental' });
   for (const preset of Object.keys(PRESETS)) assert.deepEqual(parseCommand(`@codjiflo review ${preset} full`), { preset, mode: 'full' });
   for (const [alias, preset] of [['CoDeX', 'sol-xhigh'], ['CLAUDE', 'opus-xhigh']]) {
     assert.deepEqual(parseCommand(`@codjiflo review ${alias}`), { preset, mode: 'incremental' });
@@ -52,9 +52,10 @@ test('explicit commands work after prose while casual mentions and quoted exampl
     assert.equal(parseCommand(body), null);
   }
   assert.deepEqual(parseCommand('@codjiflo thanks\n@codjiflo codex'), { preset: 'sol-xhigh', mode: 'incremental' });
-  assert.deepEqual(parseCommand('@codjiflo review'), { preset: 'sol-xhigh', mode: 'incremental' });
-  assert.deepEqual(parseCommand('@codjiflo review FULL'), { preset: 'sol-xhigh', mode: 'full' });
-  for (const body of ['Owner authorized option (A) (...). @codjiflo codex', 'Thanks @codjiflo codex', 'Please @CODJIFLO-REVIEWER review', '```text\n@codjiflo claude\n```\nPlease @codjiflo codex', '> @codjiflo claude\nPlease @codjiflo codex', '`example` @codjiflo codex']) {
+  assert.deepEqual(parseCommand('@codjiflo review'), { preset: 'opus-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('@codjiflo review FULL'), { preset: 'opus-xhigh', mode: 'full' });
+  assert.deepEqual(parseCommand('Please @CODJIFLO-REVIEWER review'), { preset: 'opus-xhigh', mode: 'incremental' });
+  for (const body of ['Owner authorized option (A) (...). @codjiflo codex', 'Thanks @codjiflo codex', '```text\n@codjiflo claude\n```\nPlease @codjiflo codex', '> @codjiflo claude\nPlease @codjiflo codex', '`example` @codjiflo codex']) {
     assert.deepEqual(parseCommand(body), { preset: 'sol-xhigh', mode: 'incremental' });
   }
   assert.deepEqual(parseCommand('Owner authorized. @codjiflo claude full'), { preset: 'opus-xhigh', mode: 'full' });

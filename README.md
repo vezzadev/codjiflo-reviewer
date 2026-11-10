@@ -18,7 +18,7 @@ Comment on an open PR:
 @codjiflo sol-medium incremental
 ```
 
-`@codjiflo` and `@codjiflo-reviewer` are both accepted. An explicit command mention may appear after ordinary prose (for example, `Owner authorized option (A). @codjiflo codex`), but the command and all its options must stay on the same line. Use `@codjiflo review [preset] [full|incremental]` or the shorthand `@codjiflo <preset> [full|incremental]`. Explicit `review` defaults to `sol-xhigh` when no preset is supplied; shorthand requires a known canonical preset or alias immediately after the mention. Commands, presets, aliases, and modes are case-insensitive. After `review`, options are optional and order-independent; both forms allow at most one preset and one mode, and duplicate arguments are rejected. Only newly created issue comments trigger work; editing an existing comment does not.
+`@codjiflo` and `@codjiflo-reviewer` are both accepted. An explicit command mention may appear after ordinary prose (for example, `Owner authorized option (A). @codjiflo codex`), but the command and all its options must stay on the same line. Use `@codjiflo review [preset] [full|incremental]` or the shorthand `@codjiflo <preset> [full|incremental]`. Explicit `review` defaults to `opus-xhigh` when no preset is supplied; shorthand requires a known canonical preset or alias immediately after the mention. Commands, presets, aliases, and modes are case-insensitive. After `review`, options are optional and order-independent; both forms allow at most one preset and one mode, and duplicate arguments are rejected. Only newly created issue comments trigger work; editing an existing comment does not.
 
 Bare mentions, casual mentions such as `Thanks @codjiflo for reviewing`, `Could @codjiflo review this?`, or `Thanks @codjiflo claude did great`, unknown shorthand profiles, and commands inside Markdown blockquotes, fenced or indented code blocks, or inline code do not trigger a review. A mention after ordinary prose triggers only if the rest of its line matches the complete command syntax and ends the paragraph: put a blank line before any following prose. A soft line break does not finish an after-prose command, so wrapping `Thanks to @codjiflo claude` onto a following `for the review` line remains inert. An earlier casual mention does not hide a valid standalone command on a later line. A standalone command (the mention starts its line, optionally preceded by whitespace) beginning with `review` or a known profile rejects unknown or duplicate options rather than ignoring them. Inline code before a mention still counts as a nonempty prefix, so `` `x` @codjiflo review turbo `` is ignored rather than reported as an invalid standalone command. For example, `@codjiflo turbo` is ignored, while standalone `@codjiflo review turbo` and `@codjiflo codex turbo` are invalid. Both forms require the same approved original comment author; bot-authored comments never trigger reviews.
 
@@ -26,8 +26,8 @@ Bare mentions, casual mentions such as `Thanks @codjiflo for reviewing`, `Could 
 
 | Preset | Provider/model default | Model effort | Default e-code-review recipe |
 | --- | --- | --- | --- |
-| `sol-xhigh` (default; alias `codex`) | OMP `openai-codex/gpt-6.1-sol` | high | xhigh |
-| `opus-xhigh` (alias `claude`) | OMP `anthropic/claude-opus-5-5` | high | xhigh |
+| `opus-xhigh` (default; alias `claude`) | OMP `anthropic/claude-opus-5-5` | high | xhigh |
+| `sol-xhigh` (alias `codex`) | OMP `openai-codex/gpt-6.1-sol` | high | xhigh |
 | `sol-medium` | OMP `openai-codex/gpt-6.1-sol` | medium | high |
 | `opus-medium` | OMP `anthropic/claude-opus-5-5` | medium | high |
 
@@ -186,7 +186,7 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 | --- | --- |
 | `--repo owner/repo --comment ID` | Workflow path: re-reads the comment, authorizes its author, and reviews as that comment requests |
 | `--repo owner/repo --comment ID --gate` | Authorization/command check only; logs its decision and writes an Actions summary, sets `allowed` and `provider` in `GITHUB_OUTPUT`, plus `number`, `visibility`, `prepare-command`, and `source-submodules` for accepted requests; read-only API calls, no provider calls |
-| `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `sol-xhigh` incremental; still requires allowlist |
+| `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `opus-xhigh` incremental; still requires allowlist |
 | `--preset PRESET` | Select one of the four canonical presets or the `codex`/`claude` aliases |
 | `--full` | Full review in local invocation |
 | `--output FILE` | Retain the validated publication payload outside temporary review worktrees |

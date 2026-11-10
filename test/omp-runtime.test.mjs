@@ -137,6 +137,12 @@ test('trusted extension narrows active tools, blocks mutation and requires uniqu
   for (const name of ['write', 'edit', 'task', 'eval', 'manage_skill', 'mcp__external']) assert.equal(handlers.get('tool_call')({ toolName: name }).block, true);
   for (const name of REVIEW_TOOLS) assert.equal(handlers.get('tool_call')({ toolName: name }), undefined);
   assert.equal(handlers.get('session_stop')().decision, 'block');
+  // A failed provider request ends the session; a later successful message restores the guard.
+  handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'error', errorMessage: 'model is not supported' } });
+  handlers.get('message_end')({ message: { role: 'custom', customType: 'session-stop-continuation' } });
+  assert.equal(handlers.get('session_stop')(), undefined);
+  handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'stop' } });
+  assert.equal(handlers.get('session_stop')().decision, 'block');
   assert.equal((await tool.execute()).details.accepted, true);
   await assert.rejects(tool.execute(), /only be submitted once/);
   assert.equal(handlers.get('session_stop')(), undefined);

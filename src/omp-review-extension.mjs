@@ -35,7 +35,14 @@ export default function reviewExtension(pi) {
       return { content: [{ type: 'text', text: 'Review captured. End now with a short acknowledgement.' }], details: { accepted: true } };
     },
   });
+  // A terminal provider failure (unavailable model, exhausted quota) cannot be
+  // fixed by continuing: refusing the stop would repeat the failed request until
+  // the time limit instead of letting OMP exit unsuccessfully with its error.
+  let providerFailed = false;
+  pi.on('message_end', event => {
+    if (event?.message?.role === 'assistant') providerFailed = event.message.stopReason === 'error';
+  });
   pi.on('session_stop', () => {
-    if (!submitted) return { decision: 'block', reason: 'Submit your review using final_review before ending. Continue required analysis while evidence and tools remain available.' };
+    if (!submitted && !providerFailed) return { decision: 'block', reason: 'Submit your review using final_review before ending. Continue required analysis while evidence and tools remain available.' };
   });
 }
