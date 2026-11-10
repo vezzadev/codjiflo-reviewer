@@ -110,8 +110,9 @@ export async function review({ request, github, env = process.env, reviewer = ru
   const head = pr.head.sha;
   const base = pr.base.sha;
   const runUrl = workflowRunUrl(env);
-  // Actions logs of this public bot repository must not carry private repository content.
-  const logStream = pr.base.repo.private === true && env.GITHUB_ACTIONS === 'true' ? 'withheld' : 'live';
+  // The workflow sets this from the gate's visibility decision: Actions logs of
+  // the public bot repository must not carry private repository content.
+  const logStream = env.CODJIFLO_LOG_STREAM === 'withheld' ? 'withheld' : 'live';
   const kickoff = await github.request(`${root}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer starting **${request.preset}** (${request.mode}) at \`${head}\`, requested by @${request.requester}.${runUrl ? `\n\n[Live workflow logs](${runUrl})` : ''}` } });
   const kickoffId = kickoff?.id;
   if (!Number.isSafeInteger(kickoffId) || kickoffId <= 0) throw new Error('Kickoff comment response must include a positive safe-integer id');

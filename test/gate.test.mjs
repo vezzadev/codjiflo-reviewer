@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runProcess } from '../src/runner.mjs';
+import { repositorySettings } from '../src/repositories.mjs';
 
 const cli = fileURLToPath(new URL('../bin/codjiflo-reviewer.mjs', import.meta.url));
 
@@ -58,29 +59,31 @@ test('gate authorizes only the fetched comment author against the allowlist', as
 
 test('gate explains every decision in logs and the Actions summary without starting review work', async t => {
   const cases = [
-    { name: 'embedded command', body: 'Owner authorized option (A). @codjiflo codex', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'embedded command', body: 'Owner authorized option (A). @codjiflo opus-medium', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-medium', mode: 'incremental' },
     { name: 'Claude full command', body: 'Please @codjiflo claude full', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-xhigh', mode: 'full' },
-    { name: 'embedded command ends paragraph', body: 'Owner authorized option (A). @codjiflo codex\n\nThanks for taking another look.', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'embedded command ends paragraph', body: 'Owner authorized option (A). @codjiflo opus-medium\n\nThanks for taking another look.', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-medium', mode: 'incremental' },
     { name: 'explicit Claude command ends paragraph', body: 'Please @codjiflo-reviewer review claude full\n\nFurther context below.', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-xhigh', mode: 'full' },
     { name: 'ordinary comment', body: 'Thanks @codjiflo for reviewing', reason: 'not-a-command' },
-    { name: 'quoted command', body: '> @codjiflo codex', reason: 'not-a-command' },
+    { name: 'quoted command', body: '> @codjiflo opus-medium', reason: 'not-a-command' },
     { name: 'casual review question', body: 'Could @codjiflo review this?', reason: 'not-a-command' },
     { name: 'casual known profile', body: 'Thanks @codjiflo claude did great', reason: 'not-a-command' },
     { name: 'soft-wrapped review prose', body: 'I think the earlier pass by @codjiflo review\nmissed this', reason: 'not-a-command' },
     { name: 'soft-wrapped profile prose', body: 'Thanks to @codjiflo claude\nfor the review', reason: 'not-a-command' },
     { name: 'inline code prefix before malformed mention', body: '`x` @codjiflo review turbo', reason: 'not-a-command' },
-    { name: 'soft-wrapped prose before standalone command', body: 'Thanks to @codjiflo claude\nfor the review\n\n@codjiflo codex', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
-    { name: 'casual mention before valid command', body: 'Could @codjiflo review this?\n@codjiflo codex', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
-    { name: 'indented code command', body: 'Example:\n\n    @codjiflo codex', reason: 'not-a-command' },
-    { name: 'paragraph continuation command', body: 'Owner authorized:\n    @codjiflo codex', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
-    { name: 'unmatched backticks in separate paragraphs', body: '`example\n\n@codjiflo codex\n\n`', allowed: true, reason: 'approved', provider: 'openai-codex', preset: 'sol-xhigh', mode: 'incremental' },
+    { name: 'soft-wrapped prose before standalone command', body: 'Thanks to @codjiflo claude\nfor the review\n\n@codjiflo opus-medium', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-medium', mode: 'incremental' },
+    { name: 'casual mention before valid command', body: 'Could @codjiflo review this?\n@codjiflo opus-medium', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-medium', mode: 'incremental' },
+    { name: 'indented code command', body: 'Example:\n\n    @codjiflo opus-medium', reason: 'not-a-command' },
+    { name: 'paragraph continuation command', body: 'Owner authorized:\n    @codjiflo opus-medium', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-medium', mode: 'incremental' },
+    { name: 'unmatched backticks in separate paragraphs', body: '`example\n\n@codjiflo opus-medium\n\n`', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-medium', mode: 'incremental' },
     { name: 'bot kickoff', author: 'codjiflo[bot]', type: 'Bot', body: 'Starting review', reason: 'bot-author' },
-    { name: 'allowlisted bot command', author: 'codjiflo[bot]', type: 'Bot', approved: 'codjiflo[bot]', body: '@codjiflo codex', reason: 'bot-author' },
-    { name: 'bot login without type', author: 'codjiflo[bot]', type: undefined, body: '@codjiflo codex', reason: 'bot-author' },
-    { name: 'unapproved command', author: 'stranger', body: '@codjiflo codex', reason: 'not-approved' },
+    { name: 'allowlisted bot command', author: 'codjiflo[bot]', type: 'Bot', approved: 'codjiflo[bot]', body: '@codjiflo opus-medium', reason: 'bot-author' },
+    { name: 'bot login without type', author: 'codjiflo[bot]', type: undefined, body: '@codjiflo opus-medium', reason: 'bot-author' },
+    { name: 'unapproved command', author: 'stranger', body: '@codjiflo opus-medium', reason: 'not-approved' },
     { name: 'unapproved malformed command', author: 'stranger', body: '@codjiflo review turbo', reason: 'not-approved' },
-    { name: 'issue command', pr: false, body: '@codjiflo codex', reason: 'not-a-pr' },
+    { name: 'issue command', pr: false, body: '@codjiflo opus-medium', reason: 'not-a-pr' },
     { name: 'invalid standalone command', body: '@codjiflo review turbo', reason: 'invalid-command', fails: true },
+    { name: 'codex shorthand is not a command', body: '@codjiflo codex', reason: 'not-a-command' },
+    { name: 'standalone codex preset is invalid', body: '@codjiflo review codex', reason: 'invalid-command', fails: true },
     { name: 'malformed prose mention', body: 'Please @codjiflo review turbo', reason: 'not-a-command' },
   ];
   for (const scenario of cases) await t.test(scenario.name, async () => {
@@ -100,12 +103,14 @@ test('gate explains every decision in logs and the Actions summary without start
   });
 });
 
-test('gate hands the job this checkout\'s settings for the reviewed repository, matched case-insensitively', async () => {
-  const g = await gate({ repo: 'PedroPauloVC/Harmonic-Analyzer' });
-  try {
-    await g.running;
-    assert.match(await g.output(), /\nnumber=2025\nvisibility=public\nprepare-command=\nsource-submodules=\["SolidworksMCP-python"\]\n$/);
-  } finally { await g.close(); }
+test('repository settings match the repository case-insensitively and reject malformed entries', () => {
+  const config = { 'Org/Repo': { prepareCommand: 'node prepare.mjs', sourceSubmodules: ['sdk'] } };
+  assert.deepEqual(repositorySettings(config, 'org/REPO'), { prepareCommand: 'node prepare.mjs', sourceSubmodules: ['sdk'] });
+  assert.deepEqual(repositorySettings(config, 'org/other'), { prepareCommand: '', sourceSubmodules: [] });
+  for (const entry of [{ prepareCommand: 'a\nb' }, { sourceSubmodules: 'sdk' }, { sourceSubmodules: [1] }, { prepareComand: 'typo' }]) {
+    assert.throws(() => repositorySettings({ 'org/repo': entry }, 'org/repo'), /repositories\.json org\/repo/);
+  }
+  assert.throws(() => repositorySettings([], 'org/repo'), /must be an object/);
 });
 
 for (const [name, visibility] of [['private', { private: true }], ['unstated', {}]]) {

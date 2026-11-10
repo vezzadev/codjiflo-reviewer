@@ -28,11 +28,11 @@ try {
   const { values } = parseArgs({ options: {
     gate: { type: 'boolean' }, help: { type: 'boolean' },
     repo: { type: 'string' }, pr: { type: 'string' }, requester: { type: 'string' }, comment: { type: 'string' },
-    preset: { type: 'string', default: 'opus-xhigh' }, full: { type: 'boolean' },
+    preset: { type: 'string' }, full: { type: 'boolean' },
     publish: { type: 'string' }, output: { type: 'string' },
   } });
   if (values.help) {
-    console.log('Usage: node bin/codjiflo-reviewer.mjs\nMention mode: --repo owner/repo --comment ID [--gate] [--output FILE] (authorizes the comment author against CODJIFLO_APPROVED_USERS)\nLocal mode: --repo owner/repo --pr N --requester login [--preset sol-xhigh|opus-xhigh|sol-medium|opus-medium|codex|claude] [--full] [--output FILE]\nPublication-only recovery: --publish FILE');
+    console.log('Usage: node bin/codjiflo-reviewer.mjs\nMention mode: --repo owner/repo --comment ID [--gate] [--output FILE] (authorizes the comment author against CODJIFLO_APPROVED_USERS)\nLocal mode: --repo owner/repo --pr N --requester login [--preset opus-xhigh|opus-medium|claude] [--full] [--output FILE]\nPublication-only recovery: --publish FILE');
   } else if (values.publish) {
     if (values.gate || values.repo || values.pr || values.requester || values.comment || values.full || values.output) throw new Error('--publish cannot be combined with review options');
     const envelope = JSON.parse(await readFile(values.publish, 'utf8'));
@@ -46,7 +46,7 @@ try {
     const github = new GitHub({ token: process.env.GITHUB_TOKEN || process.env.GH_TOKEN, url: process.env.GITHUB_API_URL });
     let request;
     if (values.comment) {
-      if (values.pr || values.requester || values.full) throw new Error('--comment cannot be combined with local review options');
+      if (values.pr || values.requester || values.preset || values.full) throw new Error('--comment cannot be combined with local review options');
       const event = await commentEvent(github, values.repo, values.comment);
       const decision = eventDecision(event, process.env.CODJIFLO_APPROVED_USERS);
       if (values.gate) await reportGate(event, decision, github);
@@ -54,12 +54,15 @@ try {
       request = decision.request;
     } else {
       if (values.gate) throw new Error('Gate requires --comment');
-      const preset = normalizePreset(values.preset);
+      const preset = normalizePreset(values.preset ?? 'opus-xhigh');
       if (!values.repo || !/^\d+$/.test(values.pr ?? '') || Number(values.pr) < 1 || !isApproved(values.requester, process.env.CODJIFLO_APPROVED_USERS) || !preset) throw new Error('Valid --repo, --pr, --requester and approved-user configuration required');
       request = { repo: values.repo, number: Number(values.pr), requester: values.requester, preset, mode: values.full ? 'full' : 'incremental' };
     }
-    if (!values.gate && request) await review({ request, github, output: values.output });
-    else if (!values.gate) console.log('Ignoring unauthorized or non-review comment');
+    if (values.gate) {
+      // The decision is already reported; nothing else runs in the gate.
+    } else if (request) await review({ request, github, output: values.output });
+    // The gate accepted this comment earlier: a different answer now means it was edited or deleted.
+    else throw new Error('Comment no longer requests an approved review');
   }
 } catch (error) {
   console.error(error.message);

@@ -31,10 +31,10 @@ function assertNestedGitScenarios(tap) {
   assert.match(tap, /^# fail 0$/m, tap);
 }
 
-test('both OMP families keep full and incremental methodology inline with complete navigable evidence', async () => {
+test('every preset keeps full and incremental methodology inline with complete navigable evidence', async () => {
   const f = await fixture({ newLine: 'é🙂漢'.repeat(300000) });
   try {
-    for (const [preset, canonical] of [['codex', 'sol-xhigh'], ['claude', 'opus-xhigh']]) for (const full of [true, false]) {
+    for (const [preset, canonical] of [['claude', 'opus-xhigh'], ['opus-medium', 'opus-medium']]) for (const full of [true, false]) {
       f.state.reviews = full ? [] : [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: canonical, findings: [], kickoffId: 1 })} -->` }];
       await f.run({ full, preset });
       const input = await readFile(f.capture, 'utf8');
@@ -64,8 +64,8 @@ test('both OMP families keep full and incremental methodology inline with comple
   } finally { await f.close(); }
 });
 
-test('oversized custom methodology fails closed for both families before OMP invocation or publication', async t => {
-  for (const preset of ['codex', 'claude']) await t.test(preset, async () => {
+test('oversized custom methodology fails closed for every preset before OMP invocation or publication', async t => {
+  for (const preset of ['claude', 'opus-medium']) await t.test(preset, async () => {
     const f = await fixture({ headPrompt: 'Inspect café 🙂 cancellation.\n'.repeat(45000) });
     try {
       await assert.rejects(f.run({ preset, full: true }));
@@ -76,8 +76,8 @@ test('oversized custom methodology fails closed for both families before OMP inv
   });
 });
 
-test('unprocessed large scope returns INCOMPLETE for both families without publishing a defect verdict', async t => {
-  for (const preset of ['codex', 'claude']) await t.test(preset, async () => {
+test('unprocessed large scope returns INCOMPLETE for every preset without publishing a defect verdict', async t => {
+  for (const preset of ['claude', 'opus-medium']) await t.test(preset, async () => {
     const f = await fixture({ newLine: 'x'.repeat(600000) });
     try {
       await assert.rejects(f.run({ preset, mode: 'incomplete-input', full: true }));
@@ -278,7 +278,7 @@ test('hostile Git pathspec modes preserve current-head prompt authority and oper
     try {
       await writeFile(join(f.repo, '.codjiflo', 'code-review', 'PROMPT.md'), 'UNCOMMITTED-SOURCE-INSTRUCTIONS\n');
       await writeFile(f.env.GIT_CONFIG_GLOBAL, '[codjiflo]\npathspecfixture = operator-config-survives\n');
-      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh', findings: [], kickoffId: 1 })} -->` }];
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'opus-xhigh', findings: [], kickoffId: 1 })} -->` }];
       const transport = {
         GIT_SSH_COMMAND: 'ssh -oBatchMode=yes',
         GIT_SSL_CAINFO: f.env.GIT_CONFIG_GLOBAL,
@@ -543,7 +543,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           // Exercise the production scope command in its disposable checkout,
           // inheriting diff.submodule=log and color.ui=always from Git config.
           await assert.rejects(review({
-            request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'full' },
+            request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'opus-xhigh', mode: 'full' },
             github,
             env: { ...env, CODJIFLO_APPROVED_USERS: 'alice' },
             reviewer: async ({ prompt: input }) => {
@@ -696,7 +696,7 @@ test('unbounded inventory records and inconsistent scope indices fail closed', a
 });
 
 test('OMP invalid, missing, failed, aborted or truncated completion cannot publish valid-looking results', async t => {
-  for (const preset of ['codex', 'claude']) for (const mode of [
+  for (const preset of ['claude', 'opus-medium']) for (const mode of [
     'malformed', 'missing-result', 'duplicate-result', 'missing-tool-end', 'mismatched-tool-end',
     'error-result', 'fatal-error', 'fatal-exit', 'missing-completion', 'aborted', 'length', 'truncated',
   ]) await t.test(`${preset}: ${mode}`, async () => {

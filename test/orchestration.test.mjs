@@ -50,24 +50,23 @@ test('a mention located by comment ID reviews with the comment author, preset an
 
 test('a mention by an unapproved author or without a command performs no review work', async t => {
   for (const mention of [
-    { user: { login: 'stranger', type: 'User' }, body: '@codjiflo codex' },
+    { user: { login: 'stranger', type: 'User' }, body: '@codjiflo claude' },
     { user: { login: 'Alice', type: 'User' }, body: 'Thanks @codjiflo for reviewing' },
   ]) await t.test(mention.body, async () => {
     const f = await fixture();
     try {
       f.state.mention = mention;
-      assert.match(await f.run({ mention: true }), /Ignoring unauthorized or non-review comment/);
+      await assert.rejects(f.run({ mention: true }), /Comment no longer requests an approved review/);
       assert.deepEqual(f.state.posts, []);
     } finally { await f.close(); }
   });
 });
 
-test('Actions logs carry OMP output for public repositories only', async t => {
-  for (const [visibility, expected] of [[true, 'withheld'], [false, 'live']]) await t.test(`private=${visibility}`, async () => {
+test('OMP output reaches the logs unless the workflow withholds it', async t => {
+  for (const expected of ['withheld', 'live']) await t.test(expected, async () => {
     const f = await fixture();
     try {
-      f.state.private = visibility;
-      const stdout = await f.run({ providerEnv: { GITHUB_ACTIONS: 'true' } });
+      const stdout = await f.run({ providerEnv: { CODJIFLO_LOG_STREAM: expected } });
       assert.equal(stdout.includes('"type":"agent_start"'), expected === 'live');
       assert.equal(stdout.includes('OMP output withheld from logs'), expected === 'withheld');
       assert.equal(verdicts(f)[0].body.event, 'APPROVE');
@@ -79,7 +78,7 @@ test('OMP failures, malformed results and tool errors never approve', async t =>
   for (const scenario of ['failure', 'malformed', 'error-result']) await t.test(scenario, async () => {
     const f = await fixture();
     try {
-      await assert.rejects(f.run({ mode: scenario, preset: scenario === 'error-result' ? 'opus-xhigh' : 'sol-xhigh' }));
+      await assert.rejects(f.run({ mode: scenario }));
       assert.equal(verdicts(f).length, 0);
       assert.match(f.state.posts.at(-1).body.body, /failed/);
     } finally { await f.close(); }
@@ -141,7 +140,7 @@ test('movement after snapshot validation makes either verdict neutral; closure r
           const marker = JSON.parse(/<!-- codjiflo-reviewer:v4 (\{[^\n]+\}) -->/.exec(result.body)[1]);
           assert.equal(marker.head, f.head);
           assert.equal(marker.base, f.base);
-          assert.equal(marker.preset, 'sol-xhigh');
+          assert.equal(marker.preset, 'opus-xhigh');
           assert.equal(marker.findings.length, mode === 'approve' ? 0 : 2);
           assert.equal(retained.payload.event, mode === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES');
           assert.equal(result.commit_id, retained.payload.commit_id);
@@ -199,7 +198,7 @@ test('environment-blocked and legacy defect-free outputs post only a neutral fai
         async list() { return f.state.files; },
       };
       await assert.rejects(review({
-        request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'full' },
+        request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'opus-xhigh', mode: 'full' },
         github,
         env: { ...f.env, CODJIFLO_APPROVED_USERS: 'alice' },
         reviewer: async () => ({
@@ -224,8 +223,8 @@ test('Claude structured stream produces native approval', async () => {
   } finally { await f.close(); }
 });
 
-test('repository prompt replaces the default methodology with PR-head UTF-8 or empty text for both providers', async t => {
-  for (const preset of ['codex', 'claude']) for (const instructions of ['Check résumé parsing and preserve café identifiers.\nFocus on concurrency.', '']) await t.test(`${preset}: ${instructions === '' ? 'empty' : 'UTF-8'}`, async () => {
+test('repository prompt replaces the default methodology with PR-head UTF-8 or empty text for every preset', async t => {
+  for (const preset of ['claude', 'opus-medium']) for (const instructions of ['Check résumé parsing and preserve café identifiers.\nFocus on concurrency.', '']) await t.test(`${preset}: ${instructions === '' ? 'empty' : 'UTF-8'}`, async () => {
     const f = await fixture({ basePrompt: 'Old base instructions.', headPrompt: instructions });
     try {
       // Neither the base revision nor uncommitted content in the clone source may win.
@@ -262,7 +261,7 @@ test('oversized custom review output fails before publication', async () => {
       async list() { return f.state.files; },
     };
     await assert.rejects(review({
-      request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'full' },
+      request: { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'opus-xhigh', mode: 'full' },
       github,
       env: { ...f.env, CODJIFLO_APPROVED_USERS: 'alice' },
       reviewer: async ({ prompt: instructions }) => {
@@ -302,7 +301,7 @@ test('missing repository prompt preserves the default prompt, including after de
 
 test('repository prompt rejects non-regular Git paths before provider launch or disclosure', async t => {
   for (const headPromptType of ['directory', 'symlink', 'parent-symlink', 'ancestor-symlink', 'submodule']) {
-    for (const preset of ['codex', 'claude']) await t.test(`${headPromptType}: ${preset}`, async () => {
+    for (const preset of ['claude', 'opus-medium']) await t.test(`${headPromptType}: ${preset}`, async () => {
       // Symlink targets are readable host files outside the repository, not dangling links.
       const f = await fixture({ headPromptType });
       try {
@@ -373,7 +372,7 @@ test('repository instruction identity governs successful incremental baselines',
   ]) await t.test(scenario, async () => {
     const f = await fixture(options);
     try {
-      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh', findings: [], kickoffId: 1 })} -->` }];
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'opus-xhigh', findings: [], kickoffId: 1 })} -->` }];
       await f.run();
       const result = verdicts(f)[0].body;
       const captured = await readFile(f.capture, 'utf8');
@@ -407,7 +406,7 @@ test('legacy approvals cannot reuse an unchanged preexisting repository prompt',
     try {
       f.state.reviews = [{
         user: { type: 'Bot' }, state: 'APPROVED', commit_id: f.previous,
-        body: `<!-- codjiflo-reviewer:${version} ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh' })} -->`,
+        body: `<!-- codjiflo-reviewer:${version} ${JSON.stringify({ head: f.previous, base: f.base, preset: 'opus-xhigh' })} -->`,
       }];
       await f.run();
       const result = verdicts(f)[0].body;
@@ -428,7 +427,7 @@ test('legacy approvals cannot reuse an unchanged preexisting repository prompt',
 
 
 test('local aliases and mixed-case canonical names retain canonical publication and baseline scope', async t => {
-  for (const [input, preset] of [['CoDeX', 'sol-xhigh'], ['CLAUDE', 'opus-xhigh'], ['SOL-XHIGH', 'sol-xhigh'], ['OpUs-XhIgH', 'opus-xhigh']]) await t.test(input, async () => {
+  for (const [input, preset] of [['CLAUDE', 'opus-xhigh'], ['OpUs-XhIgH', 'opus-xhigh'], ['OPUS-MEDIUM', 'opus-medium']]) await t.test(input, async () => {
     const f = await fixture();
     try {
       f.state.reviews = [{ user: { type: 'Bot' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset, findings: [], kickoffId: 1 })} -->` }];
@@ -444,10 +443,10 @@ test('local aliases and mixed-case canonical names retain canonical publication 
   });
 });
 
-test('local replaced high names are rejected before HTTP requests or provider launch', async () => {
+test('local unknown presets are rejected before HTTP requests or provider launch', async () => {
   const f = await fixture();
   try {
-    for (const preset of ['sol-high', 'opus-high']) await assert.rejects(f.run({ preset }));
+    for (const preset of ['opus-high', 'codex']) await assert.rejects(f.run({ preset }));
     assert.equal(f.state.requests.length, 0);
     await assert.rejects(readFile(f.capture));
   } finally { await f.close(); }
@@ -469,9 +468,9 @@ test('completed checkpoints, explicit full, same head and changed preset choose 
     try {
       const prior = scenario === 'rebase' ? 'f'.repeat(40) : scenario === 'same-head' ? f.head : f.previous;
       const base = scenario === 'base-change' ? 'c'.repeat(40) : f.base;
-      const approved = { user: { type: 'Bot' }, state: 'APPROVED', commit_id: prior, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: prior, base, preset: 'sol-xhigh', findings: [], kickoffId: 1 })} -->` };
+      const approved = { user: { type: 'Bot' }, state: 'APPROVED', commit_id: prior, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: prior, base, preset: 'opus-xhigh', findings: [], kickoffId: 1 })} -->` };
       f.state.reviews = [approved];
-      await f.run({ full: scenario === 'full', preset: scenario === 'preset-change' ? 'opus-xhigh' : 'sol-xhigh' });
+      await f.run({ full: scenario === 'full', preset: scenario === 'preset-change' ? 'opus-medium' : 'opus-xhigh' });
       assert.match(verdicts(f)[0].body.body, new RegExp(`Scope: \\*\\*${scenario === 'incremental' ? 'incremental' : 'full'}\\*\\*`));
       assert.equal(verdicts(f).length, 1);
     } finally { await f.close(); }
@@ -481,7 +480,7 @@ test('completed checkpoints, explicit full, same head and changed preset choose 
 test('a latest marked withheld-approval COMMENTED review prevents reuse of an earlier approval', async () => {
   const f = await fixture();
   try {
-    const marked = { commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh', findings: [], kickoffId: 1 })} -->` };
+    const marked = { commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'opus-xhigh', findings: [], kickoffId: 1 })} -->` };
     f.state.reviews = [
       { ...marked, state: 'APPROVED' },
       { ...marked, state: 'COMMENTED' },
@@ -500,7 +499,7 @@ test('full and incremental native coordinates use API patches rather than local 
   for (const full of [false, true]) await t.test(String(full), async () => {
     const f = await fixture();
     try {
-      f.state.reviews = [{ user: { type: 'User' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'sol-xhigh', findings: [], kickoffId: 1 })} -->` }];
+      f.state.reviews = [{ user: { type: 'User' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'opus-xhigh', findings: [], kickoffId: 1 })} -->` }];
       f.state.files[0].patch = '@@ -20,2 +20,2 @@\n-old\n-second\n+new\n+changed';
       await f.run({ mode: 'findings', full });
       const result = verdicts(f)[0].body;

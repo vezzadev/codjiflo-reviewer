@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isApproved, parseCommand, eventDecision, PRESETS } from '../src/commands.mjs';
+import { isApproved, normalizePreset, parseCommand, eventDecision, PRESETS } from '../src/commands.mjs';
 import { filesFromApi, inlineComment } from '../src/diff.mjs';
 import { baseline, validateResult } from '../src/review.mjs';
 import { fixture } from './fixture.mjs';
 
 const metadata = [{ filename: 'a.js', additions: 2, deletions: 2, patch: '@@ -1,3 +1,3 @@\n-old\n+new\n same\n last\n@@ -20 +20 @@\n-before\n+after\n' }];
 const finding = { path: 'a.js', side: 'RIGHT', start_line: 1, line: 2, priority: 'P1', disposition: 'blocking', title: 'Broken result', body: 'Fails for zero. Category: correctness.' };
-const marker = (head, base, preset = 'sol-xhigh', findings = [], kickoffId = 1) => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings, kickoffId })} -->`;
+const marker = (head, base, preset = 'opus-xhigh', findings = [], kickoffId = 1) => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings, kickoffId })} -->`;
 const sha = 'a'.repeat(40);
 const baseSha = 'b'.repeat(40);
 
@@ -18,25 +18,32 @@ test('authorization denies empty, absent and non-exact users; normalizes login c
   assert.equal(isApproved('Alice', 'bob, ALICE\ncarol'), true);
   assert.equal(isApproved(undefined, 'alice'), false);
 });
-test('commands support four presets, aliases, explicit full and default incremental', () => {
-  assert.deepEqual(Object.keys(PRESETS), ['sol-xhigh', 'opus-xhigh', 'sol-medium', 'opus-medium']);
+test('commands support two presets, alias, explicit full and default incremental', () => {
+  assert.deepEqual(Object.keys(PRESETS), ['opus-xhigh', 'opus-medium']);
   assert.deepEqual(parseCommand('@codjiflo-reviewer review'), { preset: 'opus-xhigh', mode: 'incremental' });
   for (const preset of Object.keys(PRESETS)) assert.deepEqual(parseCommand(`@codjiflo review ${preset} full`), { preset, mode: 'full' });
-  for (const [alias, preset] of [['CoDeX', 'sol-xhigh'], ['CLAUDE', 'opus-xhigh']]) {
-    assert.deepEqual(parseCommand(`@codjiflo review ${alias}`), { preset, mode: 'incremental' });
-    assert.deepEqual(parseCommand(`@codjiflo review FULL ${alias}`), { preset, mode: 'full' });
-    for (const options of [`${alias} ${preset}`, `${preset} ${alias}`, `${alias} ${alias}`, `${alias} sol-medium`]) {
-      assert.throws(() => parseCommand(`@codjiflo review ${options}`));
-    }
+  const [alias, preset] = ['CLAUDE', 'opus-xhigh'];
+  assert.deepEqual(parseCommand(`@codjiflo review ${alias}`), { preset, mode: 'incremental' });
+  assert.deepEqual(parseCommand(`@codjiflo review FULL ${alias}`), { preset, mode: 'full' });
+  for (const options of [`${alias} ${preset}`, `${preset} ${alias}`, `${alias} ${alias}`, `${alias} opus-medium`]) {
+    assert.throws(() => parseCommand(`@codjiflo review ${options}`));
   }
-  assert.throws(() => parseCommand('@codjiflo review codex claude'));
-  for (const preset of ['sol-high', 'opus-high']) assert.throws(() => parseCommand(`@codjiflo review ${preset}`));
+  assert.throws(() => parseCommand('@codjiflo review opus-xhigh opus-medium'));
+  assert.throws(() => parseCommand('@codjiflo review opus-high'));
   assert.equal(parseCommand('not a review'), null);
   assert.throws(() => parseCommand('@codjiflo review turbo'));
   assert.throws(() => parseCommand('@codjiflo review full incremental'));
 });
+test('codex and sol presets are rejected like unknown presets', () => {
+  for (const name of ['codex', 'sol-xhigh', 'sol-medium', 'opus-high']) {
+    assert.equal(normalizePreset(name), null);
+    assert.equal(parseCommand(`@codjiflo ${name}`), null);
+    assert.equal(parseCommand(`@codjiflo ${name} full`), null);
+    assert.throws(() => parseCommand(`@codjiflo review ${name}`), /Invalid review command/);
+  }
+});
 test('profile shorthand normalizes aliases and canonical names with optional mode', () => {
-  for (const [name, preset] of [...Object.keys(PRESETS).map(preset => [preset, preset]), ['codex', 'sol-xhigh'], ['claude', 'opus-xhigh']]) {
+  for (const [name, preset] of [...Object.keys(PRESETS).map(preset => [preset, preset]), ['claude', 'opus-xhigh']]) {
     for (const mention of ['@codjiflo', '@codjiflo-reviewer']) {
       assert.deepEqual(parseCommand(`${mention} ${name}`), { preset, mode: 'incremental' });
       assert.deepEqual(parseCommand(`Context\n \t${mention.toUpperCase()} ${name.toUpperCase()} FULL\nThanks`), { preset, mode: 'full' });
@@ -48,20 +55,20 @@ test('profile shorthand normalizes aliases and canonical names with optional mod
   }
 });
 test('explicit commands work after prose while casual mentions and quoted examples stay inert', () => {
-  for (const body of [undefined, '', '@codjiflo', '@codjiflo-reviewer', '@codjiflo thanks', '@codjiflo turbo', '@codjiflo sol-high full', '@codjiflo full', 'Thanks @codjiflo for reviewing', '> @codjiflo claude full', '  > quoted @codjiflo codex', '`@codjiflo codex`', 'Example: ``@codjiflo review``', '```\n@codjiflo codex\n```', '~~~markdown\n@codjiflo review\n~~~', '```text\n@codjiflo codex', '@codjiflo-other codex', 'email@codjiflo codex', '@codjiflo codexish', '@codjiflo\ncodex', '@codjiflo\nreview']) {
+  for (const body of [undefined, '', '@codjiflo', '@codjiflo-reviewer', '@codjiflo thanks', '@codjiflo turbo', '@codjiflo opus-high full', '@codjiflo full', 'Thanks @codjiflo for reviewing', '> @codjiflo claude full', '  > quoted @codjiflo opus-medium', '`@codjiflo opus-medium`', 'Example: ``@codjiflo review``', '```\n@codjiflo opus-medium\n```', '~~~markdown\n@codjiflo review\n~~~', '```text\n@codjiflo opus-medium', '@codjiflo-other opus-medium', 'email@codjiflo opus-medium', '@codjiflo opus-mediumish', '@codjiflo\nopus-medium', '@codjiflo\nreview']) {
     assert.equal(parseCommand(body), null);
   }
-  assert.deepEqual(parseCommand('@codjiflo thanks\n@codjiflo codex'), { preset: 'sol-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('@codjiflo thanks\n@codjiflo opus-medium'), { preset: 'opus-medium', mode: 'incremental' });
   assert.deepEqual(parseCommand('@codjiflo review'), { preset: 'opus-xhigh', mode: 'incremental' });
   assert.deepEqual(parseCommand('@codjiflo review FULL'), { preset: 'opus-xhigh', mode: 'full' });
   assert.deepEqual(parseCommand('Please @CODJIFLO-REVIEWER review'), { preset: 'opus-xhigh', mode: 'incremental' });
-  for (const body of ['Owner authorized option (A) (...). @codjiflo codex', 'Thanks @codjiflo codex', '```text\n@codjiflo claude\n```\nPlease @codjiflo codex', '> @codjiflo claude\nPlease @codjiflo codex', '`example` @codjiflo codex']) {
-    assert.deepEqual(parseCommand(body), { preset: 'sol-xhigh', mode: 'incremental' });
+  for (const body of ['Owner authorized option (A) (...). @codjiflo opus-medium', 'Thanks @codjiflo opus-medium', '```text\n@codjiflo claude\n```\nPlease @codjiflo opus-medium', '> @codjiflo claude\nPlease @codjiflo opus-medium', '`example` @codjiflo opus-medium']) {
+    assert.deepEqual(parseCommand(body), { preset: 'opus-medium', mode: 'incremental' });
   }
   assert.deepEqual(parseCommand('Owner authorized. @codjiflo claude full'), { preset: 'opus-xhigh', mode: 'full' });
-  assert.deepEqual(parseCommand('Thanks @codjiflo for the earlier pass. Please @codjiflo codex'), { preset: 'sol-xhigh', mode: 'incremental' });
-  assert.equal(parseCommand('Please @codjiflo codex turbo'), null);
-  assert.deepEqual(parseCommand('Owner authorized option (A). @codjiflo codex\n\nThanks for taking another look.'), { preset: 'sol-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('Thanks @codjiflo for the earlier pass. Please @codjiflo opus-medium'), { preset: 'opus-medium', mode: 'incremental' });
+  assert.equal(parseCommand('Please @codjiflo opus-medium turbo'), null);
+  assert.deepEqual(parseCommand('Owner authorized option (A). @codjiflo opus-medium\n\nThanks for taking another look.'), { preset: 'opus-medium', mode: 'incremental' });
   assert.deepEqual(parseCommand('Please @codjiflo-reviewer review claude full\n\nFurther context below.'), { preset: 'opus-xhigh', mode: 'full' });
 });
 test('soft-wrapped prose mentions are not complete after-prose commands', () => {
@@ -76,49 +83,49 @@ test('soft-wrapped prose mentions are not complete after-prose commands', () => 
     '`x\ncontinued` @codjiflo review turbo',
   ]) {
     assert.equal(parseCommand(body), null, body);
-    assert.deepEqual(parseCommand(`${body}\n\n@codjiflo codex full`), { preset: 'sol-xhigh', mode: 'full' }, body);
+    assert.deepEqual(parseCommand(`${body}\n\n@codjiflo opus-medium full`), { preset: 'opus-medium', mode: 'full' }, body);
   }
 });
 test('casual profile and review mentions do not fail or hide later commands', () => {
-  for (const body of ['Could @codjiflo review this?', 'Thanks @codjiflo claude did great', 'Please @codjiflo codex turbo']) {
+  for (const body of ['Could @codjiflo review this?', 'Thanks @codjiflo claude did great', 'Please @codjiflo opus-medium turbo']) {
     assert.equal(parseCommand(body), null);
-    assert.deepEqual(parseCommand(`${body}\n@codjiflo codex`), { preset: 'sol-xhigh', mode: 'incremental' });
+    assert.deepEqual(parseCommand(`${body}\n@codjiflo opus-medium`), { preset: 'opus-medium', mode: 'incremental' });
   }
-  for (const body of ['@codjiflo review this?', '@codjiflo claude did great', 'Context\n@codjiflo codex turbo', '  @codjiflo review full full']) {
+  for (const body of ['@codjiflo review this?', '@codjiflo claude did great', 'Context\n@codjiflo opus-medium turbo', '  @codjiflo review full full']) {
     assert.throws(() => parseCommand(body), /Invalid review command/);
   }
 });
 test('Markdown code spans stop at paragraphs and indented code respects paragraph context', () => {
   for (const body of [
-    '    @codjiflo codex',
-    '\t@codjiflo codex',
-    'Example:\n\n    @codjiflo codex',
+    '    @codjiflo opus-medium',
+    '\t@codjiflo opus-medium',
+    'Example:\n\n    @codjiflo opus-medium',
     'Example:\n\n    @codjiflo review turbo\n    @codjiflo claude full',
-    '`example\n@codjiflo codex\n`',
-    '``example `\n@codjiflo codex\n``',
-    '    ```\n    @codjiflo codex\n    ```',
+    '`example\n@codjiflo opus-medium\n`',
+    '``example `\n@codjiflo opus-medium\n``',
+    '    ```\n    @codjiflo opus-medium\n    ```',
   ]) assert.equal(parseCommand(body), null, body);
   for (const body of [
-    '`unmatched\n\n@codjiflo codex\n\n`',
-    '``unmatched\n \t\n@codjiflo codex\n\n``',
-    'Example:\n    @codjiflo codex',
-    'Example:\n\t@codjiflo codex',
-    '    @codjiflo claude\n\n@codjiflo codex',
-    '    @codjiflo claude\n@codjiflo codex',
-    'Example:\n\n    @codjiflo claude\n\nOwner authorized option (A). @codjiflo codex',
-  ]) assert.deepEqual(parseCommand(body), { preset: 'sol-xhigh', mode: 'incremental' }, body);
+    '`unmatched\n\n@codjiflo opus-medium\n\n`',
+    '``unmatched\n \t\n@codjiflo opus-medium\n\n``',
+    'Example:\n    @codjiflo opus-medium',
+    'Example:\n\t@codjiflo opus-medium',
+    '    @codjiflo claude\n\n@codjiflo opus-medium',
+    '    @codjiflo claude\n@codjiflo opus-medium',
+    'Example:\n\n    @codjiflo claude\n\nOwner authorized option (A). @codjiflo opus-medium',
+  ]) assert.deepEqual(parseCommand(body), { preset: 'opus-medium', mode: 'incremental' }, body);
 });
 test('shorthand events require an approved original author and a PR comment', () => {
-  const event = { sender: { login: 'admin' }, comment: { body: '@codjiflo codex', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1853, pull_request: {} } };
+  const event = { sender: { login: 'admin' }, comment: { body: '@codjiflo opus-medium', user: { login: 'stranger' } }, repository: { full_name: 'org/repo' }, issue: { number: 1853, pull_request: {} } };
   assert.deepEqual(eventDecision(event, 'admin'), { reason: 'not-approved' });
   assert.deepEqual(eventDecision(event, ''), { reason: 'not-approved' });
   event.comment.user.login = 'ADMIN';
-  for (const [body, preset, mode] of [['@codjiflo codex', 'sol-xhigh', 'incremental'], ['@codjiflo claude full', 'opus-xhigh', 'full'], ['@codjiflo SOL-MEDIUM', 'sol-medium', 'incremental']]) {
+  for (const [body, preset, mode] of [['@codjiflo opus-medium', 'opus-medium', 'incremental'], ['@codjiflo claude full', 'opus-xhigh', 'full'], ['@codjiflo OPUS-XHIGH', 'opus-xhigh', 'incremental']]) {
     event.comment.body = body;
     assert.deepEqual(eventDecision(event, 'admin'), { reason: 'approved', request: { preset, mode, repo: 'org/repo', number: 1853, requester: 'ADMIN' } });
     assert.deepEqual(eventDecision({ ...event, issue: { number: 1853 } }, 'admin'), { reason: 'not-a-pr' });
   }
-  event.comment.body = '@codjiflo codex claude';
+  event.comment.body = '@codjiflo opus-medium claude';
   const invalid = eventDecision(event, 'admin');
   assert.equal(invalid.reason, 'invalid-command');
   assert.match(invalid.error.message, /Invalid review command/);
@@ -150,29 +157,29 @@ test('removed files retain legal left-side comments and reject right-side anchor
 });
 test('baseline accepts completed approvals and changes requests with valid ledgers', () => {
   const approved = { state: 'APPROVED', user: { type: 'Bot' }, body: marker(sha, baseSha), commit_id: sha };
-  assert.equal(baseline([approved], baseSha, 'sol-xhigh').head, sha);
-  assert.equal(baseline([approved], 'c'.repeat(40), 'sol-xhigh'), null);
-  assert.equal(baseline([approved], baseSha, 'opus-xhigh'), null);
-  for (const preset of ['sol-high', 'opus-high', 'codex', 'claude']) {
-    assert.equal(baseline([{ ...approved, body: marker(sha, baseSha, preset) }], baseSha, 'sol-xhigh'), null);
+  assert.equal(baseline([approved], baseSha, 'opus-xhigh').head, sha);
+  assert.equal(baseline([approved], 'c'.repeat(40), 'opus-xhigh'), null);
+  assert.equal(baseline([approved], baseSha, 'opus-medium'), null);
+  for (const preset of ['opus-high', 'claude']) {
+    assert.equal(baseline([{ ...approved, body: marker(sha, baseSha, preset) }], baseSha, 'opus-xhigh'), null);
   }
   const prior = { ...finding, id: '10000000-0000-4000-8000-000000000001', originHead: sha };
-  const changes = { ...approved, state: 'CHANGES_REQUESTED', user: { type: 'User' }, body: marker(sha, baseSha, 'sol-xhigh', [prior], 2) };
-  assert.equal(baseline([approved, changes], baseSha, 'sol-xhigh').head, sha);
+  const changes = { ...approved, state: 'CHANGES_REQUESTED', user: { type: 'User' }, body: marker(sha, baseSha, 'opus-xhigh', [prior], 2) };
+  assert.equal(baseline([approved, changes], baseSha, 'opus-xhigh').head, sha);
   for (const state of ['DISMISSED', 'COMMENTED']) {
-    assert.equal(baseline([approved, { ...changes, state }], baseSha, 'sol-xhigh'), null);
+    assert.equal(baseline([approved, { ...changes, state }], baseSha, 'opus-xhigh'), null);
   }
-  assert.equal(baseline([{ ...approved, commit_id: 'mismatch' }], baseSha, 'sol-xhigh'), null);
+  assert.equal(baseline([{ ...approved, commit_id: 'mismatch' }], baseSha, 'opus-xhigh'), null);
 });
 test('latest legacy or malformed marker prevents falling back to an older checkpoint', () => {
   const approved = { state: 'APPROVED', body: marker(sha, baseSha), commit_id: sha };
   for (const version of ['v1', 'v2', 'v3', 'v0', 'v5']) {
     const legacy = { ...approved, body: approved.body.replace(':v4 ', `:${version} `) };
-    assert.equal(baseline([legacy], baseSha, 'sol-xhigh'), null);
-    assert.equal(baseline([approved, legacy], baseSha, 'sol-xhigh'), null);
+    assert.equal(baseline([legacy], baseSha, 'opus-xhigh'), null);
+    assert.equal(baseline([approved, legacy], baseSha, 'opus-xhigh'), null);
   }
-  for (const body of ['<!-- codjiflo-reviewer:v4 {invalid JSON} -->', marker(sha, baseSha, 'sol-xhigh', [{ ...finding }])]) {
-    assert.equal(baseline([approved, { ...approved, body }], baseSha, 'sol-xhigh'), null);
+  for (const body of ['<!-- codjiflo-reviewer:v4 {invalid JSON} -->', marker(sha, baseSha, 'opus-xhigh', [{ ...finding }])]) {
+    assert.equal(baseline([approved, { ...approved, body }], baseSha, 'opus-xhigh'), null);
   }
 });
 test('malformed or contradictory results cannot approve', () => {

@@ -3,43 +3,40 @@
 
 # Codjiflo Reviewer
 
-A mention-triggered GitHub PR reviewer for trusted self-hosters. One deployment serves every repository its GitHub App is installed on: repositories need no workflow, variable, secret, or runner of their own. Requires Node.js 22+, Git, and Oh My Pi (`omp`) with access to the selected model. Both Codex and Claude presets run through OMP; there is no standalone reviewer CLI, SDK adapter, or Codjiflo credential pool. No multi-tenant infrastructure.
+A mention-triggered GitHub PR reviewer for trusted self-hosters. One deployment serves every repository its GitHub App is installed on: repositories need no workflow, variable, secret, or runner of their own. Requires Node.js 22+, Git, and Oh My Pi (`omp`) with access to the selected model. All presets run through OMP; there is no standalone reviewer CLI, SDK adapter, or Codjiflo credential pool. No multi-tenant infrastructure.
 
 Comment on an open PR:
 
 ```text
 @codjiflo-reviewer review
 @codjiflo-reviewer review opus-xhigh full
-@codjiflo-reviewer review sol-medium
-@codjiflo-reviewer review codex
+@codjiflo-reviewer review opus-medium
 @codjiflo-reviewer review claude full
-@codjiflo codex
+@codjiflo claude
 @codjiflo claude full
-@codjiflo sol-medium incremental
+@codjiflo opus-medium incremental
 ```
 
-`@codjiflo` and `@codjiflo-reviewer` are both accepted. An explicit command mention may appear after ordinary prose (for example, `Owner authorized option (A). @codjiflo codex`), but the command and all its options must stay on the same line. Use `@codjiflo review [preset] [full|incremental]` or the shorthand `@codjiflo <preset> [full|incremental]`. Explicit `review` defaults to `opus-xhigh` when no preset is supplied; shorthand requires a known canonical preset or alias immediately after the mention. Commands, presets, aliases, and modes are case-insensitive. After `review`, options are optional and order-independent; both forms allow at most one preset and one mode, and duplicate arguments are rejected. Only newly created issue comments trigger work; editing an existing comment does not.
+`@codjiflo` and `@codjiflo-reviewer` are both accepted. An explicit command mention may appear after ordinary prose (for example, `Owner authorized option (A). @codjiflo claude`), but the command and all its options must stay on the same line. Use `@codjiflo review [preset] [full|incremental]` or the shorthand `@codjiflo <preset> [full|incremental]`. Explicit `review` defaults to `opus-xhigh` when no preset is supplied; shorthand requires a known canonical preset or alias immediately after the mention. Commands, presets, aliases, and modes are case-insensitive. After `review`, options are optional and order-independent; both forms allow at most one preset and one mode, and duplicate arguments are rejected. Only newly created issue comments trigger work; editing an existing comment does not.
 
-Bare mentions, casual mentions such as `Thanks @codjiflo for reviewing`, `Could @codjiflo review this?`, or `Thanks @codjiflo claude did great`, unknown shorthand profiles, and commands inside Markdown blockquotes, fenced or indented code blocks, or inline code do not trigger a review. A mention after ordinary prose triggers only if the rest of its line matches the complete command syntax and ends the paragraph: put a blank line before any following prose. A soft line break does not finish an after-prose command, so wrapping `Thanks to @codjiflo claude` onto a following `for the review` line remains inert. An earlier casual mention does not hide a valid standalone command on a later line. A standalone command (the mention starts its line, optionally preceded by whitespace) beginning with `review` or a known profile rejects unknown or duplicate options rather than ignoring them. Inline code before a mention still counts as a nonempty prefix, so `` `x` @codjiflo review turbo `` is ignored rather than reported as an invalid standalone command. For example, `@codjiflo turbo` is ignored, while standalone `@codjiflo review turbo` and `@codjiflo codex turbo` are invalid. Both forms require the same approved original comment author; bot-authored comments never trigger reviews.
+Bare mentions, casual mentions such as `Thanks @codjiflo for reviewing`, `Could @codjiflo review this?`, or `Thanks @codjiflo claude did great`, unknown shorthand profiles, and commands inside Markdown blockquotes, fenced or indented code blocks, or inline code do not trigger a review. A mention after ordinary prose triggers only if the rest of its line matches the complete command syntax and ends the paragraph: put a blank line before any following prose. A soft line break does not finish an after-prose command, so wrapping `Thanks to @codjiflo claude` onto a following `for the review` line remains inert. An earlier casual mention does not hide a valid standalone command on a later line. A standalone command (the mention starts its line, optionally preceded by whitespace) beginning with `review` or a known profile rejects unknown or duplicate options rather than ignoring them. Inline code before a mention still counts as a nonempty prefix, so `` `x` @codjiflo review turbo `` is ignored rather than reported as an invalid standalone command. For example, `@codjiflo turbo` is ignored, while standalone `@codjiflo review turbo` and `@codjiflo claude turbo` are invalid. Both forms require the same approved original comment author; bot-authored comments never trigger reviews.
 
 ## Presets
 
 | Preset | Provider/model default | Model effort | Default e-code-review recipe |
 | --- | --- | --- | --- |
 | `opus-xhigh` (default; alias `claude`) | OMP `anthropic/claude-opus-5-5` | high | xhigh |
-| `sol-xhigh` (alias `codex`) | OMP `openai-codex/gpt-6.1-sol` | high | xhigh |
-| `sol-medium` | OMP `openai-codex/gpt-6.1-sol` | medium | high |
 | `opus-medium` | OMP `anthropic/claude-opus-5-5` | medium | high |
 
-Preset names and aliases are case-insensitive in mentions and local `--preset` arguments. Aliases resolve to their canonical preset before kickoff, review publication, and baseline selection; they do not add extra presets. An alias and its canonical name still count as two preset arguments and are rejected together in a mention. `sol-high` and `opus-high` have been replaced by `sol-xhigh` and `opus-xhigh`; the old names are no longer accepted. Model effort remains `high`, and medium presets are unchanged. Historical reviews marked with the old names do not match the new presets, so the next review falls back to full scope.
+Preset names and aliases are case-insensitive in mentions and local `--preset` arguments. Aliases resolve to their canonical preset before kickoff, review publication, and baseline selection; they do not add extra presets. An alias and its canonical name still count as two preset arguments and are rejected together in a mention. `opus-high` has been replaced by `opus-xhigh`; the old name is no longer accepted. Model effort remains `high`, and the medium preset is unchanged. Historical reviews marked with the old name do not match the new preset, so the next review falls back to full scope.
 
-`CODJIFLO_SOL_MODEL` and `CODJIFLO_OPUS_MODEL` override model IDs for their preset families. Overrides must be fully provider-qualified and match the family: `openai-codex/…` for Sol and `anthropic/…` for Opus. Configure a model available through your normal OMP installation; there is no Codjiflo cross-provider fallback. The `codex` and `claude` names are command aliases, not executable selections.
+`CODJIFLO_OPUS_MODEL` overrides the model ID for every preset. Overrides must be fully provider-qualified as `anthropic/…`. Configure a model available through your normal OMP installation; there is no Codjiflo cross-provider fallback. The `claude` name is a command alias, not an executable selection.
 
-When `.codjiflo/code-review/PROMPT.md` is absent, the default high and xhigh methodology uses eight/ten sequential independent angles (no subagent fanout), deduplication without verification, severity ordering, a gap sweep for xhigh, and caps of ten/fifteen new findings. Outstanding findings from earlier rounds are reassessed separately and do not consume that cap. These instructions are adapted from the e-code-review skill and embedded for both providers; no skill installation is required on the runner. Structured JSON/native GitHub reviews replace ReportFindings. See `src/prompt.mjs` for the complete instructions.
+When `.codjiflo/code-review/PROMPT.md` is absent, the default high and xhigh methodology uses eight/ten sequential independent angles (no subagent fanout), deduplication without verification, severity ordering, a gap sweep for xhigh, and caps of ten/fifteen new findings. Outstanding findings from earlier rounds are reassessed separately and do not consume that cap. These instructions are adapted from the e-code-review skill and embedded in the reviewer; no skill installation is required on the runner. Structured JSON/native GitHub reviews replace ReportFindings. See `src/prompt.mjs` for the complete instructions.
 
 ### Repository-specific review instructions
 
-Optionally commit UTF-8 instructions to `.codjiflo/code-review/PROMPT.md` in the repository being reviewed. Codjiflo loads only a regular Git blob directly from the exact inspected **current PR head** tree, not the worktree, default branch, or bot checkout. Its contents **replace the default methodology, even when empty**, for both OMP-backed preset families. Shared review-only, review-scope, JSON verdict, outstanding-finding reconciliation, native GitHub comment-anchor requirements, and the output maximum of ten new findings for medium presets or fifteen for xhigh presets remain enforced. Built-in angles, target finding quotas, reporting conventions, and verifier restrictions do not apply to custom methodology. Only an absent file selects the default methodology. Symlinks at the file or any ancestor, directories in place of the file, submodules anywhere along the path, and other read errors fail the review before OMP is invoked.
+Optionally commit UTF-8 instructions to `.codjiflo/code-review/PROMPT.md` in the repository being reviewed. Codjiflo loads only a regular Git blob directly from the exact inspected **current PR head** tree, not the worktree, default branch, or bot checkout. Its contents **replace the default methodology, even when empty**, for every preset. Shared review-only, review-scope, JSON verdict, outstanding-finding reconciliation, native GitHub comment-anchor requirements, and the output maximum of ten new findings for medium presets or fifteen for xhigh presets remain enforced. Built-in angles, target finding quotas, reporting conventions, and verifier restrictions do not apply to custom methodology. Only an absent file selects the default methodology. Symlinks at the file or any ancestor, directories in place of the file, submodules anywhere along the path, and other read errors fail the review before OMP is invoked.
 
 Incremental reviews reuse a completed review only when the optional custom prompt has the same regular Git blob identity at the reviewed head and the current PR head (or is absent at both). Adding, deleting, or changing its content forces a full PR review under the current instructions. A valid outstanding-finding ledger is still reconciled during that full review.
 
@@ -69,7 +66,7 @@ Bot implementation checkout is always this repository at the dispatched default-
 
 ### Private repositories
 
-Runs, logs, and artifacts of this public repository are public. For a reviewed repository that GitHub does not report as public, OMP's live output is withheld from the Actions log and the review-result artifact is not uploaded; the review itself is unchanged. Without the artifact, `--publish` recovery is unavailable for that run: request the review again instead. The run title still names the repository, and the gate line names the comment author and PR number.
+Runs, logs, and artifacts of this public repository are public. For a reviewed repository that GitHub does not report as public, the gate's `visibility` output makes the workflow set `CODJIFLO_LOG_STREAM=withheld`, which keeps OMP's output out of the Actions log, and skip the review-result artifact; the review itself is unchanged. Without the artifact, `--publish` recovery is unavailable for that run: request the review again instead. A failure that OMP reports before its first model response then has no log detail; rerun that review locally. The run title still names the repository, and the gate line names the comment author and PR number.
 
 ## Deploy your own instance
 
@@ -80,7 +77,7 @@ Runs, logs, and artifacts of this public repository are public. For a reviewed r
 
    ```sh
    cd worker
-   # Edit wrangler.jsonc vars: APP_ID and DISPATCH_REPOSITORY.
+   # Edit wrangler.jsonc: account_id (yours, or delete the line) and vars APP_ID and DISPATCH_REPOSITORY.
    openssl rand -hex 32 | npx wrangler secret put WEBHOOK_SECRET   # also set as the App's webhook secret
    openssl pkcs8 -topk8 -nocrypt -in app-private-key.pem | npx wrangler secret put APP_PRIVATE_KEY
    npx wrangler deploy
@@ -89,7 +86,7 @@ Runs, logs, and artifacts of this public repository are public. For a reviewed r
    WebCrypto imports PKCS#8 only, hence the conversion of GitHub's PKCS#1 key. The relay mints a token restricted to `actions: write` on the dispatch repository; it never touches reviewed repositories.
 5. Post an allowed mention on an open PR in any installed repository.
 
-Optional Actions variables `CODJIFLO_SOL_MODEL` and `CODJIFLO_OPUS_MODEL` override the presets' provider-qualified OMP models.
+Optional Actions variable `CODJIFLO_OPUS_MODEL` overrides the presets' provider-qualified OMP model.
 
 ### GitHub identity and permissions
 
@@ -101,7 +98,7 @@ OMP work has one 45-minute limit; the review job has a 55-minute limit, below th
 
 ### OMP authentication and account selection
 
-OMP owns provider authentication, refresh, automatic quota-aware account selection, and its configured account pool. Codjiflo invokes the ordinary `omp` installation with the selected provider/model and does not pin an account, extract OAuth tokens, copy credentials from standalone CLIs, rotate API keys, or maintain quota/cooldown state. An exhausted account in a standalone Codex or Claude CLI does not establish that OMP's configured account pool is exhausted.
+OMP owns provider authentication, refresh, automatic quota-aware account selection, and its configured account pool. Codjiflo invokes the ordinary `omp` installation with the selected provider/model and does not pin an account, extract OAuth tokens, copy credentials from standalone CLIs, rotate API keys, or maintain quota/cooldown state. An exhausted account in a standalone Claude CLI does not establish that OMP's configured account pool is exhausted.
 
 Configure accounts through your normal OMP authentication workflow under the runner OS user. Ensure that user's service environment can find `omp` and its normal configuration. No Codjiflo API-key setup command, routing-state file, SDK installation, or credential migration is required. Existing obsolete Codjiflo pool files are not read. OMP account availability does not guarantee a model will finish a review: unsuccessful or incomplete runs still publish no verdict.
 
@@ -138,7 +135,7 @@ Each self-hosted runner process executes one job at a time, and all reviewed rep
 Incremental is the default. Completed reviews publish a v4 checkpoint with their outstanding findings:
 
 ```html
-<!-- codjiflo-reviewer:v4 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"sol-xhigh","kickoffId":123456,"findings":[]} -->
+<!-- codjiflo-reviewer:v4 {"head":"<40-character-sha>","base":"<40-character-sha>","preset":"opus-xhigh","kickoffId":123456,"findings":[]} -->
 ```
 
 Both approvals and changes-requested reviews can establish a checkpoint. Checkpoints are ordered by their GitHub-issued kickoff comment ID, so delayed publication-only recovery cannot replace a newer analysis or resurrect its resolved findings. The selected checkpoint must have valid v4 metadata matching its GitHub `commit_id`, current base, and requested preset. Its head must be an available ancestor of the new head, with unchanged repository review instructions. Both App/bot and PAT-authored reviews participate. Codjiflo then reviews the new diff and reassesses every outstanding finding against the current source, including findings outside that diff.
@@ -187,7 +184,7 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 | `--repo owner/repo --comment ID` | Workflow path: re-reads the comment, authorizes its author, and reviews as that comment requests |
 | `--repo owner/repo --comment ID --gate` | Authorization/command check only; logs its decision and writes an Actions summary, sets `allowed` and `provider` in `GITHUB_OUTPUT`, plus `number`, `visibility`, `prepare-command`, and `source-submodules` for accepted requests; read-only API calls, no provider calls |
 | `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `opus-xhigh` incremental; still requires allowlist |
-| `--preset PRESET` | Select one of the four canonical presets or the `codex`/`claude` aliases |
+| `--preset PRESET` | Select one of the two canonical presets or the `claude` alias |
 | `--full` | Full review in local invocation |
 | `--output FILE` | Retain the validated publication payload outside temporary review worktrees |
 | `--publish FILE` | Reconcile/retry a retained review without invoking OMP |
@@ -199,7 +196,7 @@ Other environment: `GH_TOKEN` is a fallback for `GITHUB_TOKEN`; `GITHUB_API_URL`
 
 The disposable checkout and reviewer receive a copied environment without caller repository selectors (`GIT_DIR`, `GIT_WORK_TREE`, index/object/common-directory overrides, namespaces, discovery ceilings, and related Git-local variables), inherited pathspec modes (`GIT_ICASE_PATHSPECS`, `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS`, and `GIT_LITERAL_PATHSPECS`), or command-level config overrides (`GIT_CONFIG`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, and indexed `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`). Selector names are matched case-insensitively. This keeps Git inspection pinned to the fetched PR rather than a caller's checkout and prevents inherited pathspec magic from breaking current-head repository-instruction lookup. Git installation, TLS, and authentication transport settings such as `GIT_EXEC_PATH`, `GIT_SSL_CAINFO`, and `GIT_SSH_COMMAND` remain available. Normal trusted host Git configuration still applies, including operator selectors `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, and `GIT_CONFIG_NOSYSTEM`; this is not a universal Git-configuration sandbox. The orchestrator adds its GitHub authorization header only to its own Git commands. The reviewer receives neither that header nor inherited `GITHUB_TOKEN`/`GH_TOKEN` variables (including mixed-case spellings), while provider API credentials remain available. Publication retains the orchestrator's GitHub credentials.
 
-Both preset families invoke OMP in print/JSON mode with the selected model and thinking effort, no persistent session, and a trusted Codjiflo extension exposing `final_review`. Codjiflo limits active reviewer tools to `read`, `grep`, `glob`, `find`, `bash`, and `final_review`, and disables normal extension/skill/rule loading for the invocation. Tool selection and extension hooks are **policy controls, not an OS sandbox**: in particular, allowed Bash commands can write files, access the network, and access runner-user secrets. The review-only prompt does not make arbitrary PR contents safe. Use only trusted PR authors and contents on a trusted runner. Temporary runtime scratch/cache paths are outside the checkout and staged evidence and are cleaned up with the invocation.
+Every preset invokes OMP in print/JSON mode with the selected model and thinking effort, no persistent session, and a trusted Codjiflo extension exposing `final_review`. Codjiflo limits active reviewer tools to `read`, `grep`, `glob`, `find`, `bash`, and `final_review`, and disables normal extension/skill/rule loading for the invocation. Tool selection and extension hooks are **policy controls, not an OS sandbox**: in particular, allowed Bash commands can write files, access the network, and access runner-user secrets. The review-only prompt does not make arbitrary PR contents safe. Use only trusted PR authors and contents on a trusted runner. Temporary runtime scratch/cache paths are outside the checkout and staged evidence and are cleaned up with the invocation.
 
 Prompts up to 512 Ki UTF-16 code units are unchanged and sent inline; preparation and execution share the same budget constant. Larger reviews keep the **complete methodology and output/validation rules in the initial prompt**, while staging structured evidence outside the PR-controlled checkout: `review-scope.diff`, authoritative current-PR `pr-patches.json`, and a JSON-lines inventory with per-file additions/deletions, rename metadata, and exact UTF-8 byte ranges in the staged text. Each scope record carries its `scope` range and, when its current filename matches the current PR API response, its primary `api` range and `anchors` value (`"inline"` for valid inline anchors, `"none"` otherwise). Alternate API records connected through current or previous filenames are retained in `apiRelated`, each with its API filename, optional previous filename, range, and the same `anchors` enum. These alternates support location mapping when Git and GitHub detect renames differently, including LEFT anchors; the selected API record's current filename is always the publication path. API-only files retain standalone records without `scope`. A small manifest names these files and gives total counts/sizes; it does not embed an unbounded filename list. The reviewer enumerates the inventory and processes **every scope file and hunk incrementally**, retaining a compact coverage ledger and API ranges across bounded batches and applying the full methodology. Current-PR API records are consulted directly by retained range for anchor mapping, without repeated inventory scans or obligatory duplicate-diff ingestion. Evidence-mode instructions name the staged files rather than referring to absent inline patches; small inline prompts retain their shape.
 
@@ -227,16 +224,14 @@ npm run smoke
 
 Tests cover authorization, native review coordinates, approval and changes-requested checkpoints, multi-round finding reconciliation, incompatible and legacy checkpoint fallbacks, malformed results, superseded publication, initial snapshot consistency, closed-PR rejection, publication-only recovery, subprocess deadlines, secret redaction, OMP invocation and completion validation, and the shared tool-policy contract.
 
-The smoke runs the **real entry point and orchestration**, native fetch against a loopback GitHub fixture, Git fetch/checkout of a temporary repository, and a fixture OMP executable for both preset families. It checks native review payloads and LEFT/RIGHT ranges, approval withholding and changes requests pinned through head/base movement, initial snapshot rejection before model invocation, and closed-PR rejection. The deterministic suite makes no paid model calls or remote writes and cleans up afterward; hosted CI needs no self-hosted runner or live authentication. Historical-commit and inline-coordinate acceptance on real GitHub remains subject to the API, not established by these fixtures.
+The smoke runs the **real entry point and orchestration**, native fetch against a loopback GitHub fixture, Git fetch/checkout of a temporary repository, and a fixture OMP executable for each preset. It checks native review payloads and LEFT/RIGHT ranges, approval withholding and changes requests pinned through head/base movement, initial snapshot rejection before model invocation, and closed-PR rejection. The deterministic suite makes no paid model calls or remote writes and cleans up afterward; hosted CI needs no self-hosted runner or live authentication. Historical-commit and inline-coordinate acceptance on real GitHub remains subject to the API, not established by these fixtures.
 
 Fixture executables prove adapter behavior, not real OMP authentication, account selection, model analysis, or OS isolation. Live acceptance requires the installed OMP and actual model to consume evidence and produce the structured verdict; a fixture payload or copied CLI options alone is not that proof.
 
 Opt-in native smokes exercise the installed OMP and actual models:
 
 ```sh
-node test/omp-native-smoke.mjs sol-medium
 node test/omp-native-smoke.mjs opus-medium
-node test/omp-incremental-native-smoke.mjs sol-medium
 node test/omp-incremental-native-smoke.mjs opus-medium
 ```
 

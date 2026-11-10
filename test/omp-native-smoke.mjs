@@ -9,7 +9,7 @@ import { fixture } from './fixture.mjs';
 
 // Opt-in: consumes real OMP quota and normal shared OMP credentials. GitHub
 // publication is real HTTP to the fixture's loopback server, never github.com.
-const preset = normalizePreset(process.argv[2] || 'sol-medium');
+const preset = normalizePreset(process.argv[2] || 'opus-medium');
 assert.ok(preset && Object.hasOwn(PRESETS, preset), 'Choose a supported reviewer preset');
 const proof = await mkdtemp(join(tmpdir(), 'codjiflo-omp-native-proof-'));
 const source = join(proof, 'source-proof.mjs');
@@ -48,13 +48,6 @@ try {
   let declaredToolMessages = 0;
   for (const message of assistants) {
     const tools = message.requestControls?.tools;
-    // Anthropic exposes requestControls; OpenAI Codex responses may omit it.
-    // Validate observed declarations without claiming missing metadata proves
-    // the unobserved tool surface. Executed-tool checks above apply to both.
-    if (tools?.declared === undefined && PRESETS[preset].provider === 'openai-codex') {
-      if (tools?.active !== undefined) assert.ok(Array.isArray(tools.active) && tools.active.every(tool => REVIEW_TOOLS.includes(tool)), 'Observed active tools must be restricted');
-      continue;
-    }
     assert.ok(Array.isArray(tools?.declared), 'OMP must expose valid request tool declarations when metadata is available');
     assert.ok(tools.declared.includes('final_review'), 'Trusted completion tool must reach the model');
     assert.ok(tools.declared.every(tool => REVIEW_TOOLS.includes(tool)), `Unexpected declared tool: ${tools.declared.join(',')}`);

@@ -8,7 +8,7 @@ import { PRESETS, normalizePreset } from '../src/commands.mjs';
 import { fixture } from './fixture.mjs';
 
 // Opt-in: real model analysis and native HTTP publication to loopback only.
-const preset = normalizePreset(process.argv[2] || 'sol-medium');
+const preset = normalizePreset(process.argv[2] || 'opus-medium');
 assert.ok(preset && Object.hasOwn(PRESETS, preset), 'Choose a supported reviewer preset');
 const proof = await mkdtemp(join(tmpdir(), 'codjiflo-incremental-native-'));
 const source = join(proof, 'source-proof.txt');

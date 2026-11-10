@@ -40,7 +40,7 @@ console.log(events.map(event => JSON.stringify(event)).join('\\n'));
 `);
   await chmod(cli, 0o755);
   const env = { ...process.env, CODJIFLO_OMP_BIN: cli, CAPTURE: capture, MODE: mode, ...Object.fromEntries(runtimeNames.map(name => [name, '/host/runtime-must-not-be-used'])) };
-  return { temp, cwd, capture, env, run: (preset = PRESETS['sol-xhigh']) => runReviewer({ preset, prompt: 'Review completely or submit INCOMPLETE.', cwd, temp, env }) };
+  return { temp, cwd, capture, env, run: (preset = PRESETS['opus-xhigh']) => runReviewer({ preset, prompt: 'Review completely or submit INCOMPLETE.', cwd, temp, env }) };
 }
 
 for (const name of Object.keys(PRESETS)) test(`OMP ${name} uses shared auth, explicit model, private scratch and cleanup`, async () => {
@@ -85,8 +85,8 @@ test('OMP rejects scratch inside checkout including symlink aliases and unqualif
   try {
     const nested = join(f.cwd, 'nested'); await mkdir(nested);
     const alias = join(f.temp, 'alias'); await symlink(nested, alias, 'dir');
-    for (const temp of [f.cwd, nested, alias]) await assert.rejects(runReviewer({ preset: PRESETS['sol-xhigh'], prompt: 'Review.', cwd: f.cwd, temp, env: f.env }), /outside the checkout/);
-    for (const model of ['gpt-6.1-sol', 'anthropic/claude-opus-5-5', 'openai-codex/']) await assert.rejects(runReviewer({ preset: PRESETS['sol-xhigh'], prompt: 'Review.', cwd: f.cwd, temp: f.temp, env: { ...f.env, CODJIFLO_SOL_MODEL: model } }), /provider-qualified/);
+    for (const temp of [f.cwd, nested, alias]) await assert.rejects(runReviewer({ preset: PRESETS['opus-xhigh'], prompt: 'Review.', cwd: f.cwd, temp, env: f.env }), /outside the checkout/);
+    for (const model of ['claude-opus-5-5', 'google/gemini-3-pro', 'anthropic/']) await assert.rejects(runReviewer({ preset: PRESETS['opus-xhigh'], prompt: 'Review.', cwd: f.cwd, temp: f.temp, env: { ...f.env, CODJIFLO_OPUS_MODEL: model } }), /provider-qualified/);
     await assert.rejects(readFile(f.capture), { code: 'ENOENT' });
   } finally { await rm(f.temp, { recursive: true, force: true }); }
 });
@@ -137,11 +137,16 @@ test('trusted extension narrows active tools, blocks mutation and requires uniqu
   for (const name of ['write', 'edit', 'task', 'eval', 'manage_skill', 'mcp__external']) assert.equal(handlers.get('tool_call')({ toolName: name }).block, true);
   for (const name of REVIEW_TOOLS) assert.equal(handlers.get('tool_call')({ toolName: name }), undefined);
   assert.equal(handlers.get('session_stop')().decision, 'block');
-  // A failed provider request ends the session; a later successful message restores the guard.
-  handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'error', errorMessage: 'model is not supported' } });
+  // One failed provider request is continued once; a second consecutive failure
+  // ends the session, and a successful message in between restores the guard.
+  const failed = { message: { role: 'assistant', stopReason: 'error', errorMessage: 'model is not supported' } };
+  handlers.get('message_end')(failed);
+  assert.equal(handlers.get('session_stop')().decision, 'block');
   handlers.get('message_end')({ message: { role: 'custom', customType: 'session-stop-continuation' } });
+  handlers.get('message_end')(failed);
   assert.equal(handlers.get('session_stop')(), undefined);
   handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'stop' } });
+  handlers.get('message_end')(failed);
   assert.equal(handlers.get('session_stop')().decision, 'block');
   assert.equal((await tool.execute()).details.accepted, true);
   await assert.rejects(tool.execute(), /only be submitted once/);

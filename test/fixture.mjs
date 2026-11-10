@@ -193,7 +193,7 @@ if (mode === 'fatal-exit') process.exit(1);
     } else if (request.url === '/repos/org/repo/pulls/1') {
       state.reads++;
       const moved = state.reads >= (state.moveAtRead ?? 2);
-      response.end(JSON.stringify({ state: moved && state.movement === 'closed' ? 'closed' : 'open', changed_files: state.changedFiles, head: { sha: moved && ['head', 'both'].includes(state.movement) ? previous : state.head ?? head }, base: { sha: moved && ['base', 'both'].includes(state.movement) ? previous : base, repo: { clone_url: pathToFileURL(repo).href, ...(state.private === undefined ? {} : { private: state.private }) } } }));
+      response.end(JSON.stringify({ state: moved && state.movement === 'closed' ? 'closed' : 'open', changed_files: state.changedFiles, head: { sha: moved && ['head', 'both'].includes(state.movement) ? previous : state.head ?? head }, base: { sha: moved && ['base', 'both'].includes(state.movement) ? previous : base, repo: { clone_url: pathToFileURL(repo).href } } }));
     } else if (state.mention && request.url === '/repos/org/repo/issues/comments/900') {
       response.end(JSON.stringify({ id: 900, ...state.mention, issue_url: `${api}/repos/org/repo/issues/1` }));
     } else if (request.url === '/repos/org/repo/issues/1') {
@@ -219,7 +219,7 @@ if (mode === 'fatal-exit') process.exit(1);
       return state.head;
     },
     // `mention: true` drives the workflow path: the request comes from state.mention.
-    async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, mention = false, providerEnv = {}, timeoutMs, streamOutput } = {}) {
+    async run({ mode = 'approve', preset = 'opus-xhigh', approved = 'alice', requester = 'Alice', full = false, mention = false, providerEnv = {}, timeoutMs, streamOutput } = {}) {
       const request = mention ? ['--comment', '900'] : ['--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])];
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', ...request], {
         timeoutMs,

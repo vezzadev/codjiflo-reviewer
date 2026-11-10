@@ -130,8 +130,8 @@ export async function runProcess(command, args, { cwd, env = process.env, input,
 
 export async function runReviewer({ preset, prompt, cwd, temp, env = process.env, logStream = 'live' }) {
   if (prompt.length > MAX_INLINE_INPUT) throw new Error('OMP review input exceeds inline budget; structured evidence preparation is required');
-  const model = (preset.provider === 'openai-codex' ? env.CODJIFLO_SOL_MODEL : env.CODJIFLO_OPUS_MODEL) || preset.model;
-  if (!['openai-codex', 'anthropic'].includes(preset.provider) || !model.startsWith(`${preset.provider}/`) || !model.slice(preset.provider.length + 1)) {
+  const model = env.CODJIFLO_OPUS_MODEL || preset.model;
+  if (preset.provider !== 'anthropic' || !model.startsWith(`${preset.provider}/`) || !model.slice(preset.provider.length + 1)) {
     throw new Error('OMP review model must be explicitly provider-qualified and match its preset provider');
   }
   const parent = await realpath(temp), checkout = await realpath(cwd);
@@ -166,7 +166,8 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
   } catch (error) {
     const diagnostic = ompDiagnostics(error.stdout, out.redact);
     const status = error.termination === 'timeout' ? 'timed out' : error.termination === 'exit' ? `failed (exit ${error.exitCode})` : error.termination === 'signal' ? `failed (${error.signal})` : 'could not run';
-    throw new Error(`OMP review ${status}.${diagnostic ? `\n${diagnostic}` : ' See process logs for details.'}`);
+    const logs = logStream === 'live' ? 'See process logs for details.' : 'OMP output was withheld from the logs; rerun the review locally for details.';
+    throw new Error(`OMP review ${status}.${diagnostic ? `\n${diagnostic}` : ` ${logs}`}`);
   } finally {
     out.end();
     err.end();

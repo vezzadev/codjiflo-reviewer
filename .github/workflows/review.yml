@@ -52,6 +52,9 @@ jobs:
           private-key: ${{ secrets.CODJIFLO_APP_PRIVATE_KEY }}
           owner: ${{ steps.target.outputs.owner }}
           repositories: ${{ steps.target.outputs.name }}
+          permission-issues: read
+          permission-pull-requests: read
+          permission-metadata: read
       - id: gate
         run: node bin/codjiflo-reviewer.mjs --gate --repo "$REPOSITORY" --comment "$COMMENT_ID"
         env:
@@ -83,6 +86,9 @@ jobs:
           private-key: ${{ secrets.CODJIFLO_APP_PRIVATE_KEY }}
           owner: ${{ needs.gate.outputs.owner }}
           repositories: ${{ needs.gate.outputs.name }}
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: write
       - name: Prepare review prerequisites
         id: prepare
         if: needs.gate.outputs.prepare-command != ''
@@ -115,9 +121,9 @@ jobs:
           COMMENT_ID: ${{ inputs.comment-id }}
           GITHUB_TOKEN: ${{ steps.app.outputs.token }}
           CODJIFLO_APPROVED_USERS: ${{ vars.CODJIFLO_APPROVED_USERS }}
-          CODJIFLO_SOL_MODEL: ${{ vars.CODJIFLO_SOL_MODEL }}
           CODJIFLO_OPUS_MODEL: ${{ vars.CODJIFLO_OPUS_MODEL }}
           CODJIFLO_SOURCE_SUBMODULES: ${{ needs.gate.outputs.source-submodules }}
+          CODJIFLO_LOG_STREAM: ${{ needs.gate.outputs.visibility == 'public' && 'live' || 'withheld' }}
       # Artifacts of this public repository are public: retain public reviews only.
       - name: Retain review result
         id: artifact
@@ -148,6 +154,7 @@ jobs:
           private-key: ${{ secrets.CODJIFLO_APP_PRIVATE_KEY }}
           owner: ${{ needs.gate.outputs.owner }}
           repositories: ${{ needs.gate.outputs.name }}
+          permission-pull-requests: write
       - name: Read attempt start time
         id: attempt
         shell: bash

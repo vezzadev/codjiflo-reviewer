@@ -1,13 +1,10 @@
 export const PRESETS = {
-  'sol-xhigh': { provider: 'openai-codex', model: 'openai-codex/gpt-6.1-sol', effort: 'high', level: 'xhigh' },
   'opus-xhigh': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'high', level: 'xhigh' },
-  'sol-medium': { provider: 'openai-codex', model: 'openai-codex/gpt-6.1-sol', effort: 'medium', level: 'high' },
   'opus-medium': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'medium', level: 'high' },
 };
 
 export function normalizePreset(value) {
   const name = value.toLowerCase();
-  if (name === 'codex') return 'sol-xhigh';
   if (name === 'claude') return 'opus-xhigh';
   return Object.hasOwn(PRESETS, name) ? name : null;
 }
@@ -81,7 +78,7 @@ export function parseCommand(body) {
     if (invalid) {
       // Prose mentions must match the complete grammar to count as commands.
       // Standalone commands retain actionable errors for malformed options.
-      if (!prefix.trim()) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [sol-xhigh|opus-xhigh|sol-medium|opus-medium|codex|claude] [full|incremental] or @codjiflo <preset> [full|incremental]`);
+      if (!prefix.trim()) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental] or @codjiflo <preset> [full|incremental]`);
       continue;
     }
     return { preset, mode };
