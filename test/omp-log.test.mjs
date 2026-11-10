@@ -50,7 +50,9 @@ test('rendering does not depend on stream chunk boundaries', () => {
 
 test('model and tool content cannot start a log line with a workflow command', () => {
   const output = render([
-    '::add-mask::raw',
+    '::add-mask::raw ##[add-mask]raw',
+    { type: 'notice', level: 'error', message: 'x ##[error]notice' },
+    { type: 'tool_execution_end', toolName: 'read', toolCallId: 't0', isError: false, result: { content: [{ type: 'text', text: 'x ##[warning]injected' }] } },
     { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '::error::text\n::stop-commands::x\rok\r::add-mask::cr\u2028::add-mask::ls' }], stopReason: 'error\n::error::stop', errorMessage: '::warning::diagnostic' } },
     { type: 'tool_execution_start', toolName: 'bash\n::add-mask::name', toolCallId: 't1', intent: 'Reading\n::add-mask::intent\r::add-mask::cr', args: { command: 'true\n::set-output name=a::b' } },
     { type: 'tool_execution_end', toolName: 'bash\r::add-mask::name', toolCallId: 't1', isError: true, result: { content: [{ type: 'text', text: 'ok\r::group::tool' }] } },
@@ -60,6 +62,7 @@ test('model and tool content cannot start a log line with a workflow command', (
     { type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop\n::error::terminal' }] },
   ]);
   assert.equal(output.split(/[\r\n\u0085\u2028\u2029]/).filter(line => line.trimStart().startsWith('::')).length, 0);
+  assert.equal(output.includes('##['), false);
   assert.match(output, /✗ failed bash/);
 });
 
@@ -76,6 +79,33 @@ test('secrets are redacted before clipping or JSON escaping can split or disguis
   for (const fragment of ['sec"', 'sec\\"', 'ret', 'value']) assert.equal(output.includes(fragment), false, fragment);
   assert.match(output, /"path":"\[REDACTED\]"/);
   assert.match(output, /not json \[REDACTED\]/);
+});
+
+test('a secret spanning raw output lines is redacted', () => {
+  let output = '';
+  const formatter = ompLogFormatter(text => { output += text; }, text => text.split('BEGIN\nKEY\nEND').join('[REDACTED]'));
+  formatter.write('before BEGIN\nKEY\nEND after\n{"type":"agent_start"}\n');
+  formatter.end();
+  assert.equal(output, '  │ before [REDACTED] after\n── OMP agent started\n');
+});
+
+test('retries, notices and unknown events stay visible', () => {
+  const output = render([
+    { type: 'auto_retry_start', attempt: 1, maxAttempts: 3, errorMessage: 'overloaded_error 529' },
+    { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'DELTA-NOISE' } },
+  ]);
+  assert.equal(output, '· auto_retry_start {"attempt":1,"maxAttempts":3,"errorMessage":"overloaded_error 529"}\n');
+});
+
+test('an event the renderer cannot handle neither throws nor corrupts the next line', () => {
+  const cyclic = () => { throw new Error('redaction failed'); };
+  let output = '';
+  let calls = 0;
+  const formatter = ompLogFormatter(text => { output += text; }, text => { if (++calls === 1) cyclic(); return text; });
+  formatter.write('{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first"}]}}\n{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":5},{"type":"text","text":"second"}]}}\n');
+  formatter.end();
+  assert.match(output, /^ {2}│ \{"type":"message_end".*"first".*\n/);
+  assert.match(output, /thinking:\n {2}│ 5\nassistant:\n {2}│ second\n$/);
 });
 
 test('long tool output is truncated with the omitted amount', () => {
