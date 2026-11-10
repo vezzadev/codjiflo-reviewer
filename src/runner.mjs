@@ -58,15 +58,28 @@ export function parseOmpReview(stdout) {
       || events.slice(terminalIndex + 1).some(event => ['agent_start', 'message_start', 'message_end', 'tool_execution_start', 'tool_execution_end'].includes(event.type))) {
     throw new Error('OMP review did not complete successfully (missing terminal agent_end or unsuccessful last assistant).');
   }
-  const starts = events.filter(event => event.type === 'tool_execution_start' && event.toolName === 'final_review');
-  const ends = events.filter(event => event.type === 'tool_execution_end' && event.toolName === 'final_review');
+  const calls = type => events.filter(event => event.type === type && event.toolName === 'final_review');
+  const allStarts = calls('tool_execution_start'), allEnds = calls('tool_execution_end');
+  // A call the tool rejected (unparseable or invalid arguments) captured
+  // nothing, so the model may correct it. Only a rejection the model saw is
+  // a retry: an assistant message must end between it and the accepted call.
+  // A rejected call beside or after the accepted one is a second review.
+  const acceptedEnd = allEnds.find(event => event.isError === false);
+  const acceptedStart = events.indexOf(allStarts.find(event => event.toolCallId === acceptedEnd?.toolCallId));
+  const seen = events.slice(0, Math.max(acceptedStart, 0)).findLastIndex(event => event.type === 'message_end' && event.message?.role === 'assistant');
+  // Events are classified by position, not by call ID alone: an ID reused
+  // after the accepted call must not hide a later attempt.
+  const early = event => events.indexOf(event) < seen;
+  const retriedIds = new Set(allEnds.filter(event => event.isError === true && typeof event.toolCallId === 'string' && early(event)).map(event => event.toolCallId));
+  const retried = event => early(event) && retriedIds.has(event.toolCallId);
+  const starts = allStarts.filter(event => !retried(event)), ends = allEnds.filter(event => !retried(event));
   if (starts.length !== 1 || ends.length !== 1 || typeof starts[0].toolCallId !== 'string' || !starts[0].toolCallId
       || ends[0].toolCallId !== starts[0].toolCallId || ends[0].isError !== false
       || events.indexOf(ends[0]) <= events.indexOf(starts[0]) || events.indexOf(ends[0]) >= terminalIndex
       || !matchesSchema(starts[0].args, schema)) {
     // Counts only: with withheld logs this message is the sole diagnostic, and call arguments are review content.
-    const failed = ends.filter(event => event.isError !== false).length;
-    const detail = `${starts.length} started, ${ends.length} completed, ${failed} rejected${starts.length === 1 && ends.length === 1 && !failed ? ', arguments or ordering invalid' : ''}`;
+    const failed = allEnds.filter(event => event.isError !== false).length;
+    const detail = `${allStarts.length} started, ${allEnds.length} completed, ${failed} rejected${starts.length === 1 && ends.length === 1 && ends[0].isError === false ? ', arguments or ordering invalid' : ''}`;
     throw new Error(`OMP review failed: missing, duplicate, failed or malformed final_review result (final_review calls: ${detail}).`);
   }
   return starts[0].args;
