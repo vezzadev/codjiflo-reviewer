@@ -32,8 +32,8 @@ function redactDeep(value, redact) {
 function assistantLines(message, show) {
   const lines = [];
   for (const part of Array.isArray(message.content) ? message.content : []) {
-    if (part?.type === 'thinking' && show(part.thinking).trim()) lines.push('thinking:', ...quote(show(part.thinking)));
-    if (part?.type === 'text' && show(part.text).trim()) lines.push('assistant:', ...quote(show(part.text)));
+    const content = part?.type === 'thinking' ? show(part.thinking) : part?.type === 'text' ? show(part.text) : '';
+    if (content.trim()) lines.push(part.type === 'thinking' ? 'thinking:' : 'assistant:', ...quote(content));
   }
   if (typeof message.errorMessage === 'string') lines.push(`assistant error (${show(message.stopReason)}):`, ...quote(show(message.errorMessage)));
   return lines;
@@ -90,24 +90,36 @@ const guard = lines => lines.flatMap(rendered => rendered.replaceAll('##[', '##\
 
 // Stream chunks need not align with event lines, and one event can span many
 // chunks: join the parts of a line only once it is complete.
-export function ompLogFormatter(write, redact = text => text) {
+export function ompLogFormatter(write, redact = text => text, { rawIdleMs = 1000, maxRawLines = 200 } = {}) {
   let parts = [];
   // Consecutive lines that are not events are redacted together: a secret
-  // may span lines.
+  // may span lines. They are held only briefly, so a diagnostic printed
+  // before a stall still reaches the log.
   let raw = [];
+  let idle;
   const print = lines => { for (const rendered of guard(lines)) write(`${rendered}\n`); };
   const flushRaw = () => {
-    if (raw.length) print(quote(redact(raw.join('\n'))));
+    clearTimeout(idle);
+    if (raw.some(line => line.trim())) print(quote(redact(raw.join('\n'))));
     raw = [];
   };
+  const hold = line => {
+    raw.push(line);
+    clearTimeout(idle);
+    if (raw.length >= maxRawLines) { flushRaw(); return; }
+    idle = setTimeout(flushRaw, rawIdleMs);
+    idle.unref();
+  };
   const emit = line => {
-    if (!line.trim()) return;
-    const event = parse(line);
-    if (!event) { raw.push(line); return; }
+    const event = line.trim() ? parse(line) : undefined;
+    // A blank line may be part of a secret spanning raw lines.
+    if (!event) { if (line.trim() || raw.length) hold(line); return; }
     flushRaw();
-    // Rendering must not fail the review: the protocol is validated elsewhere.
+    // Rendering must not fail the review: the protocol is validated
+    // elsewhere. The fallback carries no event content, which would be
+    // JSON-escaped and so beyond redaction.
     let lines;
-    try { lines = eventLines(event, redact); } catch { lines = quote(redact(line)); }
+    try { lines = eventLines(event, redact); } catch (error) { lines = [`· event could not be rendered (${error?.name})`]; }
     print(lines);
   };
   const take = () => { const line = parts.join(''); parts = []; return line; };

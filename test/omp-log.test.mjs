@@ -89,6 +89,26 @@ test('a secret spanning raw output lines is redacted', () => {
   assert.equal(output, '  │ before [REDACTED] after\n── OMP agent started\n');
 });
 
+test('a secret containing a blank line is redacted across raw output lines', () => {
+  let output = '';
+  const formatter = ompLogFormatter(text => { output += text; }, text => text.split('A1\n\nB2').join('[REDACTED]'));
+  formatter.write('\nx A1\n\nB2 y\n\n{"type":"agent_start"}\n');
+  formatter.end();
+  assert.equal(output, '  │ x [REDACTED] y\n── OMP agent started\n');
+});
+
+test('raw output reaches the log without waiting for the next event', async () => {
+  let output = '';
+  const formatter = ompLogFormatter(text => { output += text; }, undefined, { rawIdleMs: 5, maxRawLines: 3 });
+  formatter.write('diagnostic before a stall\n');
+  assert.equal(output, '');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(output, '  │ diagnostic before a stall\n');
+  formatter.write('a\nb\nc\n');
+  assert.equal(output, '  │ diagnostic before a stall\n  │ a\n  │ b\n  │ c\n');
+  formatter.end();
+});
+
 test('retries, notices and unknown events stay visible', () => {
   const output = render([
     { type: 'auto_retry_start', attempt: 1, maxAttempts: 3, errorMessage: 'overloaded_error 529' },
@@ -102,9 +122,10 @@ test('an event the renderer cannot handle neither throws nor corrupts the next l
   let output = '';
   let calls = 0;
   const formatter = ompLogFormatter(text => { output += text; }, text => { if (++calls === 1) cyclic(); return text; });
-  formatter.write('{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first"}]}}\n{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":5},{"type":"text","text":"second"}]}}\n');
+  formatter.write('{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first sec\\"ret"}]}}\n{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":5},{"type":"text","text":"second"}]}}\n');
   formatter.end();
-  assert.match(output, /^ {2}│ \{"type":"message_end".*"first".*\n/);
+  assert.match(output, /^· event could not be rendered \(Error\)\n/);
+  assert.equal(output.includes('first'), false);
   assert.match(output, /thinking:\n {2}│ 5\nassistant:\n {2}│ second\n$/);
 });
 
