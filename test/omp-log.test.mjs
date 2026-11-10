@@ -51,13 +51,31 @@ test('rendering does not depend on stream chunk boundaries', () => {
 test('model and tool content cannot start a log line with a workflow command', () => {
   const output = render([
     '::add-mask::raw',
-    { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '::error::text\n::stop-commands::x' }], stopReason: 'error', errorMessage: '::warning::diagnostic' } },
-    { type: 'tool_execution_start', toolName: 'bash', toolCallId: 't1', args: { command: 'true\n::set-output name=a::b' } },
-    { type: 'tool_execution_end', toolName: 'bash', toolCallId: 't1', isError: true, result: { content: [{ type: 'text', text: '::group::tool' }] } },
-    { type: 'tool_execution_start', toolName: 'final_review', toolCallId: 't2', args: { verdict: 'APPROVE', summary: '::notice::summary', findings: [] } },
+    { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '::error::text\n::stop-commands::x\rok\r::add-mask::cr\u2028::add-mask::ls' }], stopReason: 'error\n::error::stop', errorMessage: '::warning::diagnostic' } },
+    { type: 'tool_execution_start', toolName: 'bash\n::add-mask::name', toolCallId: 't1', intent: 'Reading\n::add-mask::intent\r::add-mask::cr', args: { command: 'true\n::set-output name=a::b' } },
+    { type: 'tool_execution_end', toolName: 'bash\r::add-mask::name', toolCallId: 't1', isError: true, result: { content: [{ type: 'text', text: 'ok\r::group::tool' }] } },
+    { type: 'tool_execution_start', toolName: 'final_review', toolCallId: 't2', args: { verdict: '\n::error::verdict', summary: '::notice::summary', findings: [
+      { priority: '\n::error::priority', disposition: '\r::error::disposition', path: '\n::notice::path', line: '\n::notice::line', title: '\n::warning::title' },
+    ] } },
+    { type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop\n::error::terminal' }] },
   ]);
-  assert.equal(output.split('\n').filter(line => line.trimStart().startsWith('::')).length, 0);
+  assert.equal(output.split(/[\r\n\u0085\u2028\u2029]/).filter(line => line.trimStart().startsWith('::')).length, 0);
   assert.match(output, /✗ failed bash/);
+});
+
+test('secrets are redacted before clipping or JSON escaping can split or disguise them', () => {
+  const secret = 'sec"ret\\value';
+  let output = '';
+  const formatter = ompLogFormatter(text => { output += text; }, text => text.split(secret).join('[REDACTED]'));
+  for (const event of [
+    { type: 'tool_execution_end', toolName: 'read', toolCallId: 't1', isError: false, result: { content: [{ type: 'text', text: 'x'.repeat(395) + secret }] } },
+    { type: 'tool_execution_start', toolName: 'read', toolCallId: 't2', intent: 'i'.repeat(115) + secret, args: { path: secret } },
+  ]) formatter.write(JSON.stringify(event) + '\n');
+  formatter.write(`not json ${secret}\n`);
+  formatter.end();
+  for (const fragment of ['sec"', 'sec\\"', 'ret', 'value']) assert.equal(output.includes(fragment), false, fragment);
+  assert.match(output, /"path":"\[REDACTED\]"/);
+  assert.match(output, /not json \[REDACTED\]/);
 });
 
 test('long tool output is truncated with the omitted amount', () => {
