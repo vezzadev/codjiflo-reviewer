@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import { isApproved, PRESETS } from './commands.mjs';
+import { isApproved } from './commands.mjs';
 import { secretRedactor } from './redaction.mjs';
-import { getCheckpointSnapshot, parseCheckpoint } from './checkpoints.mjs';
+import { getCheckpointSnapshot, parseCheckpoint, PRESET_NAME } from './checkpoints.mjs';
 
 // The run belongs to the repository hosting the workflow, not the reviewed one.
 export function workflowRunUrl(env) {
@@ -22,7 +22,7 @@ function validate(envelope, env) {
   const { request, head, base, payload, analyzedCheckpoint } = envelope ?? {};
   if (envelope?.version !== 2 || !request ||
       !/^[\w.-]+\/[\w.-]+$/.test(request.repo) || !Number.isSafeInteger(request.number) || request.number < 1 ||
-      typeof request.preset !== 'string' || !/^[a-z0-9-]+$/.test(request.preset) || !['full', 'incremental'].includes(request.mode) ||
+      typeof request.preset !== 'string' || !PRESET_NAME.test(request.preset) || !['full', 'incremental'].includes(request.mode) ||
       !isApproved(request.requester, env.CODJIFLO_APPROVED_USERS) ||
       !/^[a-f0-9]{40}$/.test(head) || !/^[a-f0-9]{40}$/.test(base) ||
       !analyzedCheckpoint || typeof analyzedCheckpoint !== 'object' || Array.isArray(analyzedCheckpoint) ||

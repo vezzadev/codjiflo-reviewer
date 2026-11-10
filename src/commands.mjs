@@ -1,3 +1,4 @@
+export const COMMAND_SYNTAX = ['@codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental]', '@codjiflo <preset> [full|incremental]'];
 export const PRESETS = {
   'opus-xhigh': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'high', level: 'xhigh' },
   'opus-medium': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'medium', level: 'high' },
@@ -79,7 +80,7 @@ export function parseCommand(body) {
       // Prose mentions must match the complete grammar to count as commands.
       // Standalone commands retain actionable errors for malformed options.
       // The comment body stays out of the message: it is printed in public gate logs.
-      if (!prefix.trim()) throw new Error('Invalid review command. Use @codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental] or @codjiflo <preset> [full|incremental]');
+      if (!prefix.trim()) throw new Error(`Invalid review command. Use ${COMMAND_SYNTAX.join(' or ')}`);
       continue;
     }
     return { preset, mode };

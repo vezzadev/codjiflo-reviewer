@@ -106,7 +106,7 @@ test('gate explains every decision in logs and the Actions summary without start
       // malformed command is answered on the PR, without echoing the comment.
       assert.equal(g.requests.filter(request => request.startsWith('GET ')).length, allowed ? 3 : 2);
       assert.ok(g.requests.every(request => request.endsWith(' Bearer fixture-token-not-real')));
-      assert.deepEqual(g.comments, scenario.fails ? ['Codjiflo Reviewer did not start: Invalid review command. Use @codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental] or @codjiflo <preset> [full|incremental]'] : []);
+      assert.deepEqual(g.comments, scenario.fails ? ['Codjiflo Reviewer did not start: invalid review command. Use `@codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental]` or `@codjiflo <preset> [full|incremental]`.'] : []);
     } finally { await g.close(); }
   });
 });

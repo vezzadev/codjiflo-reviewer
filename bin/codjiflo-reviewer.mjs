@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile, appendFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
-import { commentEvent, eventDecision, isApproved, normalizePreset, PRESETS } from '../src/commands.mjs';
+import { COMMAND_SYNTAX, commentEvent, eventDecision, isApproved, normalizePreset, PRESETS } from '../src/commands.mjs';
 import { GitHub } from '../src/github.mjs';
 import { review } from '../src/review.mjs';
 import { publishReview, reportPublicationFailure } from '../src/publication.mjs';
@@ -51,7 +51,11 @@ try {
       const decision = eventDecision(event, process.env.CODJIFLO_APPROVED_USERS);
       if (values.gate) await reportGate(event, decision, github);
       // An approved author who mistyped a command gets the answer where they asked, not only in this run's log.
-      if (values.gate && decision.error) await github.request(`/repos/${values.repo}/issues/${event.issue.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer did not start: ${decision.error.message}` } });
+      // Best effort: the gate must still fail with the command error. Inline code keeps the syntax from mentioning anyone.
+      if (values.gate && decision.error) {
+        await github.request(`/repos/${values.repo}/issues/${event.issue.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer did not start: invalid review command. Use ${COMMAND_SYNTAX.map(form => `\`${form}\``).join(' or ')}.` } })
+          .catch(error => console.error(`Could not post the invalid-command reply: ${error.message}`));
+      }
       if (decision.error) throw decision.error;
       request = decision.request;
     } else {
