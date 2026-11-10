@@ -194,6 +194,10 @@ if (mode === 'fatal-exit') process.exit(1);
       state.reads++;
       const moved = state.reads >= (state.moveAtRead ?? 2);
       response.end(JSON.stringify({ state: moved && state.movement === 'closed' ? 'closed' : 'open', changed_files: state.changedFiles, head: { sha: moved && ['head', 'both'].includes(state.movement) ? previous : state.head ?? head }, base: { sha: moved && ['base', 'both'].includes(state.movement) ? previous : base, repo: { clone_url: pathToFileURL(repo).href } } }));
+    } else if (state.mention && request.url === '/repos/org/repo/issues/comments/900') {
+      response.end(JSON.stringify({ id: 900, ...state.mention, issue_url: `${api}/repos/org/repo/issues/1` }));
+    } else if (request.url === '/repos/org/repo/issues/1') {
+      response.end(JSON.stringify({ number: 1, pull_request: {} }));
     } else { response.statusCode = 404; response.end('{}'); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -214,12 +218,14 @@ if (mode === 'fatal-exit') process.exit(1);
       state.changedFiles = state.files.length;
       return state.head;
     },
-    async run({ mode = 'approve', preset = 'sol-xhigh', approved = 'alice', requester = 'Alice', full = false, providerEnv = {}, timeoutMs, streamOutput } = {}) {
-      return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', '--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])], {
+    // `mention: true` drives the workflow path: the request comes from state.mention.
+    async run({ mode = 'approve', preset = 'opus-xhigh', approved = 'alice', requester = 'Alice', full = false, mention = false, providerEnv = {}, timeoutMs, streamOutput } = {}) {
+      const request = mention ? ['--comment', '900'] : ['--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])];
+      return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', ...request], {
         timeoutMs,
         stream: streamOutput !== undefined,
         streamOutput,
-        env: { ...env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: fake, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
+        env: { ...env, GITHUB_ACTIONS: '', GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: fake, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
       });
     },
     async close() { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },

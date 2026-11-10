@@ -9,7 +9,7 @@ const { publishReview, reportPublicationFailure } = await import(process.env.COD
 
 const env = { CODJIFLO_APPROVED_USERS: 'alice' };
 function setup(event = 'REQUEST_CHANGES') {
-  const envelope = { version: 2, analyzedCheckpoint: { fingerprint: null, highestKickoffId: 0 }, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'sol-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event, body: 'Review\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->', comments: [] } };
+  const envelope = { version: 2, analyzedCheckpoint: { fingerprint: null, highestKickoffId: 0 }, request: { repo: 'org/repo', number: 1, requester: 'alice', preset: 'opus-xhigh', mode: 'full' }, head: 'a'.repeat(40), base: 'b'.repeat(40), payload: { commit_id: 'a'.repeat(40), event, body: 'Review\n<!-- codjiflo-publication:12345678-1234-4234-8234-123456789abc -->', comments: [] } };
   const receipt = { id: 42, state: event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: envelope.head, body: envelope.payload.body };
   const state = { posts: 0, lists: 0, reviews: [], movement: 'none', events: [] };
   const github = {
@@ -175,7 +175,7 @@ function generationSetup(event = 'REQUEST_CHANGES', kickoffId = 100) {
     path: 'a.js', side: 'RIGHT', start_line: 1, line: 1, priority: 'P1',
     disposition: 'blocking', title: 'Unresolved blocker', body: 'The original failure remains.',
   }];
-  const metadata = { head: f.envelope.head, base: f.envelope.base, preset: 'sol-xhigh', findings, kickoffId };
+  const metadata = { head: f.envelope.head, base: f.envelope.base, preset: 'opus-xhigh', findings, kickoffId };
   f.envelope.payload.body = `Review\n<!-- codjiflo-reviewer:v4 ${JSON.stringify(metadata)} -->\n${f.envelope.payload.body.split('\n').at(-1)}`;
   f.receipt.body = f.envelope.payload.body;
   return f;

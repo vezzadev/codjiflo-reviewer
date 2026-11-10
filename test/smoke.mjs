@@ -6,7 +6,7 @@ import { fixture } from './fixture.mjs';
 
 // No remote writes, credentials or real provider account required. This launches
 // the actual entry point, git checkout/fetch, native-fetch HTTP client and OMP adapter.
-for (const [preset, canonical] of [['codex', 'sol-xhigh'], ['claude', 'opus-xhigh']]) {
+for (const [preset, canonical] of [['claude', 'opus-xhigh'], ['opus-medium', 'opus-medium']]) {
  for (const headPrompt of [undefined, 'Review café parsing and résumé handling.\nCheck cancellation paths.', '']) {
   const f = await fixture({ headPrompt });
   try {

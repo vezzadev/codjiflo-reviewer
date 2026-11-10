@@ -18,14 +18,16 @@ function checkpointFallbackReason(checkpoint, base, preset) {
   const unavailable = 'no usable v4 review checkpoint';
   if (!checkpoint || !['APPROVED', 'CHANGES_REQUESTED'].includes(checkpoint.prior.state)) return unavailable;
   const { value } = checkpoint;
-  const cap = PRESETS[value.preset].level === 'xhigh' ? 15 : 10;
+  // A ledger from another (possibly retired) preset stays reconcilable but is never an incremental baseline.
+  if (value.base !== base || value.preset !== preset) return unavailable;
+  const cap = PRESETS[preset].level === 'xhigh' ? 15 : 10;
   let count = 0;
   for (const finding of value.findings) {
     // Same-head carried findings conservatively count too: capped analyses
     // cannot establish that the unchanged scope has no further findings.
     if (finding.originHead === value.head && ++count >= cap) return 'previous review reached the new-findings cap';
   }
-  return value.base === base && value.preset === preset ? null : unavailable;
+  return null;
 }
 
 export function baseline(reviews, base, preset) {
@@ -109,7 +111,10 @@ export async function review({ request, github, env = process.env, reviewer = ru
   if (pr.state !== 'open') throw new Error('Pull request is not open');
   const head = pr.head.sha;
   const base = pr.base.sha;
-  const runUrl = workflowRunUrl(request, env);
+  const runUrl = workflowRunUrl(env);
+  // Actions logs of the public bot repository must not carry private repository
+  // content: there, only the workflow's explicit public decision streams output.
+  const logStream = env.CODJIFLO_LOG_STREAM === 'live' || (env.GITHUB_ACTIONS !== 'true' && env.CODJIFLO_LOG_STREAM !== 'withheld') ? 'live' : 'withheld';
   const kickoff = await github.request(`${root}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer starting **${request.preset}** (${request.mode}) at \`${head}\`, requested by @${request.requester}.${runUrl ? `\n\n[Live workflow logs](${runUrl})` : ''}` } });
   const kickoffId = kickoff?.id;
   if (!Number.isSafeInteger(kickoffId) || kickoffId <= 0) throw new Error('Kickoff comment response must include a positive safe-integer id');
@@ -190,7 +195,7 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const currentDiff = JSON.stringify([...files.values()].map(file => ({ filename: file.path, previous_filename: file.previousPath, patch: file.patch })), null, 2);
     const customInstructions = currentPromptBlob === undefined ? undefined : await git(['cat-file', 'blob', currentPromptBlob]);
     const input = await reviewInput({ preset, options: { level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions, priorFindings }, cwd, temp, git });
-    const result = await reviewer({ preset, prompt: input, cwd, temp, env: reviewEnv });
+    const result = await reviewer({ preset, prompt: input, cwd, temp, env: reviewEnv, logStream });
     const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10, priorFindings);
     const publication = randomUUID();
     const resultPath = output ?? `codjiflo-result-${publication}.json`;

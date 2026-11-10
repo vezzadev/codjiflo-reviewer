@@ -35,7 +35,21 @@ export default function reviewExtension(pi) {
       return { content: [{ type: 'text', text: 'Review captured. End now with a short acknowledgement.' }], details: { accepted: true } };
     },
   });
+  // A provider failure that survives OMP's own retries gets one continuation in
+  // case it was transient. Failing again (unavailable model, exhausted quota)
+  // is terminal: refusing that stop would repeat the failed request until the
+  // time limit instead of letting OMP exit with its error. Stops are counted,
+  // not messages: each of OMP's internal retries also ends an assistant message.
+  let lastAssistant = 'none';
+  let failedStops = 0;
+  pi.on('message_end', event => {
+    if (event?.message?.role !== 'assistant') return;
+    lastAssistant = event.message.stopReason === 'error' ? 'failed' : 'completed';
+    if (lastAssistant === 'completed') failedStops = 0;
+  });
   pi.on('session_stop', () => {
-    if (!submitted) return { decision: 'block', reason: 'Submit your review using final_review before ending. Continue required analysis while evidence and tools remain available.' };
+    if (submitted) return;
+    if (lastAssistant === 'failed' && ++failedStops >= 2) return;
+    return { decision: 'block', reason: 'Submit your review using final_review before ending. Continue required analysis while evidence and tools remain available.' };
   });
 }

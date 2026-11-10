@@ -67,7 +67,7 @@ async function submoduleFixture({ sdkPath = 'SolidworksMCP-python', unavailableU
   return { f, git, leaf, leafHead, sdkHead, head, posts, github };
 }
 
-const request = { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'sol-xhigh', mode: 'full' };
+const request = { repo: 'org/repo', number: 1, requester: 'Alice', preset: 'opus-xhigh', mode: 'full' };
 
 test('source selection rejects malformed values, unsafe paths, and non-gitlinks before review', async t => {
   const s = await submoduleFixture();

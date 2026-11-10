@@ -1,121 +1,133 @@
 name: Codjiflo Reviewer
+run-name: Review ${{ inputs.repository }} comment ${{ inputs.comment-id }}
+# The webhook relay dispatches one run per mention in any repository the App
+# is installed on. Inputs only locate the comment; the gate re-reads it.
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
-      approved-users:
+      repository:
+        description: owner/repo containing the pull request comment
         type: string
         required: true
-      bot-ref:
-        description: Trusted Codjiflo source revision; pin to the same SHA as the reusable workflow
+      comment-id:
+        description: Issue comment ID of the review mention
         type: string
-        default: main
-      runner-label:
-        type: string
-        default: self-hosted
-      sol-model:
-        type: string
-        default: openai-codex/gpt-6.1-sol
-      opus-model:
-        type: string
-        default: anthropic/claude-opus-5-5
-      prepare-command:
-        description: Trusted host-side prerequisite command, run before credentials and review
-        type: string
-        default: ''
-      source-submodules:
-        description: JSON array of exact PR-root gitlink paths to fetch recursively at pinned commits; no submodules by default
-        type: string
-        default: '[]'
-      app-id:
-        type: string
-        default: ''
-    secrets:
-      app-private-key:
-        required: false
+        required: true
 permissions:
   actions: read
   contents: read
-  issues: write
-  pull-requests: write
 jobs:
   gate:
-    if: github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request
     runs-on: ubuntu-latest
     outputs:
       allowed: ${{ steps.gate.outputs.allowed }}
       provider: ${{ steps.gate.outputs.provider }}
+      number: ${{ steps.gate.outputs.number }}
+      visibility: ${{ steps.gate.outputs.visibility }}
+      prepare-command: ${{ steps.gate.outputs.prepare-command }}
+      source-submodules: ${{ steps.gate.outputs.source-submodules }}
+      owner: ${{ steps.target.outputs.owner }}
+      name: ${{ steps.target.outputs.name }}
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: vezzadev/codjiflo-reviewer
-          ref: ${{ inputs.bot-ref }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - id: gate
-        run: node bin/codjiflo-reviewer.mjs --gate
+      - name: Resolve target repository
+        id: target
+        shell: bash
         env:
-          CODJIFLO_APPROVED_USERS: ${{ inputs.approved-users }}
+          REPOSITORY: ${{ inputs.repository }}
+        run: |
+          [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::repository must be owner/repo"; exit 1; }
+          echo "owner=${REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+      - name: Mint GitHub App installation token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.CODJIFLO_APP_ID }}
+          private-key: ${{ secrets.CODJIFLO_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.name }}
+          permission-issues: read
+          permission-pull-requests: write
+          permission-metadata: read
+      - id: gate
+        run: node bin/codjiflo-reviewer.mjs --gate --repo "$REPOSITORY" --comment "$COMMENT_ID"
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          COMMENT_ID: ${{ inputs.comment-id }}
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+          CODJIFLO_APPROVED_USERS: ${{ vars.CODJIFLO_APPROVED_USERS }}
   review:
     needs: gate
     if: needs.gate.outputs.allowed == 'true'
-    runs-on: ${{ inputs.runner-label }}
+    runs-on: codjiflo-reviewer
     concurrency:
-      group: codjiflo-${{ github.repository }}-${{ github.event.issue.number }}
+      group: codjiflo-${{ inputs.repository }}-${{ needs.gate.outputs.number }}
       cancel-in-progress: false
     timeout-minutes: 55
     steps:
-      # Never checkout or run the PR branch as the bot implementation.
+      # The bot implementation is this repository's revision, never the PR branch.
       - uses: actions/checkout@v4
         with:
-          repository: vezzadev/codjiflo-reviewer
-          ref: ${{ inputs.bot-ref }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Prepare review prerequisites
-        id: prepare
-        if: inputs.prepare-command != ''
-        timeout-minutes: 5
-        shell: bash
-        run: ${{ inputs.prepare-command }}
-      - name: Mint GitHub App installation token (optional)
+      - name: Mint GitHub App installation token
         id: app
-        if: inputs.app-id != ''
         uses: actions/create-github-app-token@v2
         with:
-          app-id: ${{ inputs.app-id }}
-          private-key: ${{ secrets.app-private-key }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
+          app-id: ${{ vars.CODJIFLO_APP_ID }}
+          private-key: ${{ secrets.CODJIFLO_APP_PRIVATE_KEY }}
+          owner: ${{ needs.gate.outputs.owner }}
+          repositories: ${{ needs.gate.outputs.name }}
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: write
+      - name: Prepare review prerequisites
+        id: prepare
+        if: needs.gate.outputs.prepare-command != ''
+        timeout-minutes: 5
+        shell: bash
+        # Trusted: comes from repositories.json in this checkout.
+        run: ${{ needs.gate.outputs.prepare-command }}
       - name: Report preparation failure
-        id: setup_failure
-        if: failure() && (steps.prepare.outcome == 'failure' || steps.app.outcome == 'failure')
+        if: failure() && steps.prepare.outcome == 'failure'
         uses: actions/github-script@v7
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_PR: ${{ needs.gate.outputs.number }}
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ steps.app.outputs.token }}
           script: |
+            const [owner, repo] = process.env.TARGET_REPOSITORY.split('/');
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             await github.rest.issues.createComment({
-              ...context.repo,
-              issue_number: context.issue.number,
-              body: `Codjiflo Reviewer preparation failed; **no review verdict was submitted**. Review prerequisite preparation or GitHub App token setup failed. [Workflow logs](${runUrl})`,
+              owner, repo,
+              issue_number: Number(process.env.TARGET_PR),
+              body: `Codjiflo Reviewer preparation failed; **no review verdict was submitted**. Review prerequisite preparation failed. [Workflow logs](${runUrl})`,
             });
       - name: Review pull request
         id: review
         shell: bash
-        run: node bin/codjiflo-reviewer.mjs --output "$RUNNER_TEMP/codjiflo-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+        run: node bin/codjiflo-reviewer.mjs --repo "$REPOSITORY" --comment "$COMMENT_ID" --output "$RUNNER_TEMP/codjiflo-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
         env:
-          GITHUB_TOKEN: ${{ steps.app.outputs.token || github.token }}
-          CODJIFLO_APPROVED_USERS: ${{ inputs.approved-users }}
-          CODJIFLO_SOL_MODEL: ${{ inputs.sol-model }}
-          CODJIFLO_OPUS_MODEL: ${{ inputs.opus-model }}
-          CODJIFLO_SOURCE_SUBMODULES: ${{ inputs.source-submodules }}
+          REPOSITORY: ${{ inputs.repository }}
+          COMMENT_ID: ${{ inputs.comment-id }}
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+          CODJIFLO_APPROVED_USERS: ${{ vars.CODJIFLO_APPROVED_USERS }}
+          CODJIFLO_OPUS_MODEL: ${{ vars.CODJIFLO_OPUS_MODEL }}
+          CODJIFLO_SOURCE_SUBMODULES: ${{ needs.gate.outputs.source-submodules }}
+          CODJIFLO_LOG_STREAM: ${{ needs.gate.outputs.visibility == 'public' && 'live' || 'withheld' }}
+      # Artifacts of this public repository are public: retain public reviews only.
       - name: Retain review result
         id: artifact
-        if: always()
+        if: always() && needs.gate.outputs.visibility == 'public'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -133,36 +145,55 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read
-      issues: write
-      pull-requests: read
     steps:
+      - name: Mint GitHub App installation token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.CODJIFLO_APP_ID }}
+          private-key: ${{ secrets.CODJIFLO_APP_PRIVATE_KEY }}
+          owner: ${{ needs.gate.outputs.owner }}
+          repositories: ${{ needs.gate.outputs.name }}
+          permission-pull-requests: write
+      - name: Read attempt start time
+        id: attempt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "started-at=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" --jq .run_started_at)" >> "$GITHUB_OUTPUT"
       - name: Report unsuccessful review job
         uses: actions/github-script@v7
         env:
           REVIEW_JOB_RESULT: ${{ needs.review.result }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_PR: ${{ needs.gate.outputs.number }}
+          ATTEMPT_STARTED_AT: ${{ steps.attempt.outputs.started-at }}
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ steps.app.outputs.token }}
           script: |
             // github-script@v7's toolkit context does not expose runAttempt.
             const runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT);
             if (!Number.isSafeInteger(runAttempt) || runAttempt < 1) {
               throw new Error('GITHUB_RUN_ATTEMPT must be a positive safe integer');
             }
+            if (Number.isNaN(Date.parse(process.env.ATTEMPT_STARTED_AT))) {
+              throw new Error('ATTEMPT_STARTED_AT must be a timestamp');
+            }
+            // The run lives in this repository; the PR lives in the reviewed one.
+            const [owner, repo] = process.env.TARGET_REPOSITORY.split('/');
+            const number = Number(process.env.TARGET_PR);
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const marker = `<!-- codjiflo-job-failure:${context.runId}:${runAttempt} -->`;
             const workflowMarker = `<!-- codjiflo-workflow:${context.runId}:${runAttempt} -->`;
             const reviews = await github.paginate(github.rest.pulls.listReviews, {
-              ...context.repo, pull_number: context.issue.number, per_page: 100,
+              owner, repo, pull_number: number, per_page: 100,
             });
             if (reviews.some(review => review.user?.type === 'Bot' &&
               ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'].includes(review.state) &&
               review.body?.includes(workflowMarker))) return;
-            const attempt = await github.rest.actions.getWorkflowRunAttempt({
-              ...context.repo, run_id: context.runId, attempt_number: runAttempt,
-            });
             const comments = await github.paginate(github.rest.issues.listComments, {
-              ...context.repo, issue_number: context.issue.number,
-              since: attempt.data.run_started_at, per_page: 100,
+              owner, repo, issue_number: number,
+              since: process.env.ATTEMPT_STARTED_AT, per_page: 100,
             });
             // An ordinary CLI/setup failure already has a useful diagnostic. If
             // the runner disappeared or its POST failed, this hosted job fills in.
@@ -172,7 +203,7 @@ jobs:
                 /Codjiflo Reviewer (?:failed;|preparation failed;)/.test(comment.body))
             ));
             if (!reported) await github.rest.issues.createComment({
-              ...context.repo,
-              issue_number: context.issue.number,
+              owner, repo,
+              issue_number: number,
               body: `Codjiflo Reviewer job ended with status **${process.env.REVIEW_JOB_RESULT}**. The review runner did not confirm a failure report for this attempt. A runner interruption can prevent logs and post-job steps from being uploaded. Check existing PR reviews before retrying: this notification does not establish whether a verdict was submitted. [Workflow logs](${runUrl})\n\n${marker}`,
             });

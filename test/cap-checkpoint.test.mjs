@@ -16,7 +16,7 @@ const published = f => f.state.posts.filter(post => post.path.endsWith('/reviews
 const ledger = body => JSON.parse(body.split('\n').find(line => line.startsWith('<!-- codjiflo-reviewer:v4 ')).slice('<!-- codjiflo-reviewer:v4 '.length, -' -->'.length));
 const scopeDiff = input => input.slice(input.indexOf('Review-scope unified diff follows:\n') + 'Review-scope unified diff follows:\n'.length, input.indexOf('Authoritative current PR file metadata'));
 
-for (const [preset, cap] of [['sol-medium', 10], ['sol-xhigh', 15]]) {
+for (const [preset, cap] of [['opus-medium', 10], ['opus-xhigh', 15]]) {
   test(`${preset}: only checkpoints below the original new-findings cap are incremental baselines`, () => {
     const head = 'a'.repeat(40);
     const base = 'b'.repeat(40);
@@ -101,9 +101,9 @@ test('a large old-origin carried ledger stays incremental and is never truncated
   const f = await fixture();
   try {
     const prior = Array.from({ length: 24 }, (_, index) => entry(f.base, { title: `Carried ${index}`, path: `unchanged-${index}.js` }));
-    f.state.reviews = [checkpoint(f.previous, f.base, prior, 'sol-medium')];
-    assert.equal(baseline(f.state.reviews, f.base, 'sol-medium').head, f.previous);
-    await f.run({ preset: 'sol-medium', providerEnv: { FIXTURE_RESULT: JSON.stringify({ verdict: 'REQUEST_CHANGES', summary: 'All carried evidence retained.', findings: [], resolutions: prior.map(item => ({ id: item.id, status: 'unresolved', reason: 'Still reproducible.' })) }) } });
+    f.state.reviews = [checkpoint(f.previous, f.base, prior, 'opus-medium')];
+    assert.equal(baseline(f.state.reviews, f.base, 'opus-medium').head, f.previous);
+    await f.run({ preset: 'opus-medium', providerEnv: { FIXTURE_RESULT: JSON.stringify({ verdict: 'REQUEST_CHANGES', summary: 'All carried evidence retained.', findings: [], resolutions: prior.map(item => ({ id: item.id, status: 'unresolved', reason: 'Still reproducible.' })) }) } });
     assert.deepEqual(ledger(published(f).body).findings, prior);
     assert.deepEqual(published(f).comments, []);
     const input = await readFile(f.capture, 'utf8');
@@ -121,7 +121,7 @@ test('a CRLF published checkpoint is reused without altering ledger strings or p
     const original = ledger(published(f).body).findings;
     f.state.reviews.at(-1).body = f.state.reviews.at(-1).body.replaceAll('\n', '\r\n');
     assert.deepEqual(outstandingFindings(f.state.reviews), original);
-    assert.equal(baseline(f.state.reviews, f.base, 'sol-xhigh').head, f.head);
+    assert.equal(baseline(f.state.reviews, f.base, 'opus-xhigh').head, f.head);
     const next = await f.advance({ 'a.js': 'new\nchanged CRLF round\n' });
     await f.run({ providerEnv: { FIXTURE_RESULT: JSON.stringify({ verdict: 'REQUEST_CHANGES', summary: 'Reconciled unchanged evidence.', findings: [], resolutions: original.map(item => ({ id: item.id, status: 'unresolved', reason: 'Still reproducible.' })) }) } });
     assert.deepEqual(ledger(published(f).body).findings, original);
@@ -131,7 +131,7 @@ test('a CRLF published checkpoint is reused without altering ledger strings or p
     assert.ok(!scopeDiff(input).includes('-old\n'));
     // A literal escaped CR in a path must not be globally normalized either.
     const unusual = entry(f.head, { path: 'literal\rpath.js', body: added.body });
-    const review = checkpoint(f.head, f.base, [unusual], 'sol-xhigh');
+    const review = checkpoint(f.head, f.base, [unusual], 'opus-xhigh');
     review.body += '\r';
     assert.deepEqual(outstandingFindings([review]), [unusual]);
   } finally { await f.close(); }
@@ -141,7 +141,7 @@ test('a CR inside a metadata marker remains invalid rather than being normalized
   const head = 'a'.repeat(40);
   const base = 'b'.repeat(40);
   const prior = entry(head);
-  const valid = checkpoint(head, base, [prior], 'sol-xhigh');
+  const valid = checkpoint(head, base, [prior], 'opus-xhigh');
   for (const body of [
     valid.body.replace(':v4 ', ':v\r4 '),
     valid.body.replace('"findings":', '"find\rings":'),
@@ -149,7 +149,7 @@ test('a CR inside a metadata marker remains invalid rather than being normalized
     `${valid.body}\r\r`,
   ]) {
     const reviews = [valid, { ...valid, body }];
-    assert.equal(baseline(reviews, base, 'sol-xhigh'), null);
+    assert.equal(baseline(reviews, base, 'opus-xhigh'), null);
     assert.deepEqual(outstandingFindings(reviews), []);
   }
 });

@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { PRESETS } from './commands.mjs';
 
+// Any well-formed preset name keeps a ledger or retained envelope valid:
+// findings of a retired preset still need reconciling.
+export const PRESET_NAME = /^[a-z0-9-]+$/;
 const MARKER = /^<!-- codjiflo-reviewer:v4 (\{[^\n]+\}) -->\r?$/;
 const SHA = /^[a-f0-9]{40}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -33,7 +35,7 @@ export function parseCheckpoint(prior) {
     if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join() !== 'base,findings,head,kickoffId,preset'
         || !Number.isSafeInteger(value.kickoffId) || value.kickoffId <= 0
         || typeof value.head !== 'string' || !SHA.test(value.head) || typeof value.base !== 'string' || !SHA.test(value.base) || value.head !== prior.commit_id
-        || typeof value.preset !== 'string' || !Object.hasOwn(PRESETS, value.preset) || !Array.isArray(value.findings)) return null;
+        || typeof value.preset !== 'string' || !PRESET_NAME.test(value.preset) || !Array.isArray(value.findings)) return null;
     const ids = new Set();
     for (const finding of value.findings) {
       if (!validFinding(finding) || Object.keys(finding).sort().join() !== [...FINDING_FIELDS, 'id', 'originHead'].sort().join()

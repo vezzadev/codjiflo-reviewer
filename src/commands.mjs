@@ -1,13 +1,11 @@
+export const COMMAND_SYNTAX = ['@codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental]', '@codjiflo <preset> [full|incremental]'];
 export const PRESETS = {
-  'sol-xhigh': { provider: 'openai-codex', model: 'openai-codex/gpt-6.1-sol', effort: 'high', level: 'xhigh' },
   'opus-xhigh': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'high', level: 'xhigh' },
-  'sol-medium': { provider: 'openai-codex', model: 'openai-codex/gpt-6.1-sol', effort: 'medium', level: 'high' },
   'opus-medium': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'medium', level: 'high' },
 };
 
 export function normalizePreset(value) {
   const name = value.toLowerCase();
-  if (name === 'codex') return 'sol-xhigh';
   if (name === 'claude') return 'opus-xhigh';
   return Object.hasOwn(PRESETS, name) ? name : null;
 }
@@ -62,7 +60,7 @@ export function parseCommand(body) {
     // Standalone command lines keep their existing grammar and error handling.
     if (prefix.trim() && suffix.split('\n\n', 1)[0].slice(rest.length).trim()) continue;
     const words = (first === 'review' ? rest : `${first}${rest}`).trim().split(/\s+/).filter(Boolean);
-    let preset = 'sol-xhigh';
+    let preset = 'opus-xhigh';
     let mode = 'incremental';
     const seen = new Set();
     let invalid = false;
@@ -81,7 +79,8 @@ export function parseCommand(body) {
     if (invalid) {
       // Prose mentions must match the complete grammar to count as commands.
       // Standalone commands retain actionable errors for malformed options.
-      if (!prefix.trim()) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [sol-xhigh|opus-xhigh|sol-medium|opus-medium|codex|claude] [full|incremental] or @codjiflo <preset> [full|incremental]`);
+      // The comment body stays out of the message: it is printed in public gate logs.
+      if (!prefix.trim()) throw new Error(`Invalid review command. Use ${COMMAND_SYNTAX.join(' or ')}`);
       continue;
     }
     return { preset, mode };
@@ -89,9 +88,22 @@ export function parseCommand(body) {
   return null;
 }
 
+// The comment is re-read from GitHub: dispatch inputs only locate it, so its
+// author and body never depend on the relay that reported the mention.
+export async function commentEvent(github, repo, commentId) {
+  const parts = (repo ?? '').split('/');
+  if (parts.length !== 2 || parts.some(part => !/^[\w.-]+$/.test(part) || /^\.+$/.test(part)) || !/^[1-9]\d*$/.test(commentId ?? '')) {
+    throw new Error('Valid --repo owner/repo and --comment ID required');
+  }
+  const comment = await github.request(`/repos/${repo}/issues/comments/${commentId}`);
+  const number = /\/issues\/([1-9]\d*)$/.exec(comment?.issue_url ?? '')?.[1];
+  if (!number) throw new Error('Comment response must identify its issue');
+  const issue = await github.request(`/repos/${repo}/issues/${number}`);
+  return { comment, issue, repository: { full_name: repo } };
+}
+
 export function eventDecision(event, approved) {
   if (!event.issue?.pull_request) return { reason: 'not-a-pr' };
-  if (event.action !== 'created') return { reason: 'not-a-command' };
   const author = event.comment?.user;
   if (author?.type === 'Bot' || /\[bot\]$/i.test(author?.login ?? '')) return { reason: 'bot-author' };
   // The original comment author, never the workflow rerunner, is authoritative.
