@@ -65,9 +65,13 @@ export function parseOmpReview(stdout) {
   // A rejected call beside or after the accepted one is a second review.
   const acceptedEnd = allEnds.find(event => event.isError === false);
   const acceptedStart = events.indexOf(allStarts.find(event => event.toolCallId === acceptedEnd?.toolCallId));
-  const seenBeforeAccepted = end => events.slice(events.indexOf(end) + 1, Math.max(acceptedStart, 0)).some(event => event.type === 'message_end' && event.message?.role === 'assistant');
-  const retried = new Set(allEnds.filter(event => event.isError === true && typeof event.toolCallId === 'string' && seenBeforeAccepted(event)).map(event => event.toolCallId));
-  const starts = allStarts.filter(event => !retried.has(event.toolCallId)), ends = allEnds.filter(event => !retried.has(event.toolCallId));
+  const seen = events.slice(0, Math.max(acceptedStart, 0)).findLastIndex(event => event.type === 'message_end' && event.message?.role === 'assistant');
+  // Events are classified by position, not by call ID alone: an ID reused
+  // after the accepted call must not hide a later attempt.
+  const early = event => events.indexOf(event) < seen;
+  const retriedIds = new Set(allEnds.filter(event => event.isError === true && typeof event.toolCallId === 'string' && early(event)).map(event => event.toolCallId));
+  const retried = event => early(event) && retriedIds.has(event.toolCallId);
+  const starts = allStarts.filter(event => !retried(event)), ends = allEnds.filter(event => !retried(event));
   if (starts.length !== 1 || ends.length !== 1 || typeof starts[0].toolCallId !== 'string' || !starts[0].toolCallId
       || ends[0].toolCallId !== starts[0].toolCallId || ends[0].isError !== false
       || events.indexOf(ends[0]) <= events.indexOf(starts[0]) || events.indexOf(ends[0]) >= terminalIndex
