@@ -69,7 +69,7 @@ test('model and tool content cannot start a log line with a workflow command', (
 test('secrets are redacted before clipping or JSON escaping can split or disguise them', () => {
   const secret = 'sec"ret\\value';
   let output = '';
-  const formatter = ompLogFormatter(text => { output += text; }, text => text.split(secret).join('[REDACTED]'));
+  const formatter = ompLogFormatter(text => { output += text; }, [secret]);
   for (const event of [
     { type: 'tool_execution_end', toolName: 'read', toolCallId: 't1', isError: false, result: { content: [{ type: 'text', text: 'x'.repeat(395) + secret }] } },
     { type: 'tool_execution_start', toolName: 'read', toolCallId: 't2', intent: 'i'.repeat(115) + secret, args: { path: secret } },
@@ -83,7 +83,7 @@ test('secrets are redacted before clipping or JSON escaping can split or disguis
 
 test('a secret spanning raw output lines is redacted', () => {
   let output = '';
-  const formatter = ompLogFormatter(text => { output += text; }, text => text.split('BEGIN\nKEY\nEND').join('[REDACTED]'));
+  const formatter = ompLogFormatter(text => { output += text; }, ['BEGIN\nKEY\nEND']);
   formatter.write('before BEGIN\nKEY\nEND after\n{"type":"agent_start"}\n');
   formatter.end();
   assert.equal(output, '  │ before [REDACTED] after\n── OMP agent started\n');
@@ -91,22 +91,22 @@ test('a secret spanning raw output lines is redacted', () => {
 
 test('a secret containing a blank line is redacted across raw output lines', () => {
   let output = '';
-  const formatter = ompLogFormatter(text => { output += text; }, text => text.split('A1\n\nB2').join('[REDACTED]'));
+  const formatter = ompLogFormatter(text => { output += text; }, ['A1\n\nB2']);
   formatter.write('\nx A1\n\nB2 y\n\n{"type":"agent_start"}\n');
   formatter.end();
   assert.equal(output, '  │ x [REDACTED] y\n── OMP agent started\n');
 });
 
-test('raw output reaches the log without waiting for the next event', async () => {
+test('a secret spanning many raw lines is redacted while earlier raw output streams', () => {
+  const secret = Array.from({ length: 300 }, (_, index) => `key line ${index}`).join('\n');
   let output = '';
-  const formatter = ompLogFormatter(text => { output += text; }, undefined, { rawIdleMs: 5, maxRawLines: 3 });
-  formatter.write('diagnostic before a stall\n');
-  assert.equal(output, '');
-  await new Promise(resolve => setTimeout(resolve, 50));
-  assert.equal(output, '  │ diagnostic before a stall\n');
-  formatter.write('a\nb\nc\n');
-  assert.equal(output, '  │ diagnostic before a stall\n  │ a\n  │ b\n  │ c\n');
+  const formatter = ompLogFormatter(text => { output += text; }, [secret]);
+  formatter.write(`${'diagnostic\n'.repeat(400)}`);
+  assert.match(output, /^( {2}│ diagnostic\n){10,}/);
+  formatter.write(`${secret}\n`);
   formatter.end();
+  assert.equal(output.includes('key line'), false);
+  assert.match(output, /\[REDACTED\]\n$/);
 });
 
 test('retries, notices and unknown events stay visible', () => {
@@ -118,14 +118,13 @@ test('retries, notices and unknown events stay visible', () => {
 });
 
 test('an event the renderer cannot handle neither throws nor corrupts the next line', () => {
-  const cyclic = () => { throw new Error('redaction failed'); };
+  const nested = '{"a":'.repeat(20000) + '1' + '}'.repeat(20000);
   let output = '';
-  let calls = 0;
-  const formatter = ompLogFormatter(text => { output += text; }, text => { if (++calls === 1) cyclic(); return text; });
-  formatter.write('{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first sec\\"ret"}]}}\n{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":5},{"type":"text","text":"second"}]}}\n');
+  const formatter = ompLogFormatter(text => { output += text; }, ['p"w']);
+  formatter.write(`{"type":"tool_execution_start","toolName":"read","intent":"k p\\"w","args":${nested}}\n{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":5},{"type":"text","text":"second"}]}}\n`);
   formatter.end();
-  assert.match(output, /^· event could not be rendered \(Error\)\n/);
-  assert.equal(output.includes('first'), false);
+  assert.match(output, /^· tool_execution_start event could not be rendered \(RangeError\)\n/);
+  assert.equal(output.includes('p\\"w'), false);
   assert.match(output, /thinking:\n {2}│ 5\nassistant:\n {2}│ second\n$/);
 });
 

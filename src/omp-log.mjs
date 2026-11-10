@@ -1,3 +1,5 @@
+import { secretRedactor } from './redaction.mjs';
+
 // Renders OMP's `--mode json` event stream as a readable transcript for the
 // process log. The raw stream stays the protocol input of parseOmpReview.
 //
@@ -90,36 +92,38 @@ const guard = lines => lines.flatMap(rendered => rendered.replaceAll('##[', '##\
 
 // Stream chunks need not align with event lines, and one event can span many
 // chunks: join the parts of a line only once it is complete.
-export function ompLogFormatter(write, redact = text => text, { rawIdleMs = 1000, maxRawLines = 200 } = {}) {
+export function ompLogFormatter(write, secrets = []) {
   let parts = [];
-  // Consecutive lines that are not events are redacted together: a secret
-  // may span lines. They are held only briefly, so a diagnostic printed
-  // before a stall still reaches the log.
-  let raw = [];
-  let idle;
   const print = lines => { for (const rendered of guard(lines)) write(`${rendered}\n`); };
-  const flushRaw = () => {
-    clearTimeout(idle);
-    if (raw.some(line => line.trim())) print(quote(redact(raw.join('\n'))));
-    raw = [];
-  };
-  const hold = line => {
-    raw.push(line);
-    clearTimeout(idle);
-    if (raw.length >= maxRawLines) { flushRaw(); return; }
-    idle = setTimeout(flushRaw, rawIdleMs);
-    idle.unref();
+  // Lines that are not events go through a stream redactor before they are
+  // split and prefixed: a secret may span lines. It holds back at most the
+  // longest secret's length, and is drained at the next event.
+  let rawText = '';
+  const printRaw = lines => print(lines.filter(line => line.trim()).flatMap(line => quote(line)));
+  const raw = secretRedactor(secrets, text => {
+    const lines = (rawText + text).split('\n');
+    rawText = lines.pop();
+    printRaw(lines);
+  });
+  const { redact } = raw;
+  let rawOpen = false;
+  const closeRaw = () => {
+    raw.end();
+    printRaw([rawText]);
+    rawText = '';
+    rawOpen = false;
   };
   const emit = line => {
     const event = line.trim() ? parse(line) : undefined;
     // A blank line may be part of a secret spanning raw lines.
-    if (!event) { if (line.trim() || raw.length) hold(line); return; }
-    flushRaw();
+    if (!event && (line.trim() || rawOpen)) { rawOpen = true; raw.write(`${line}\n`); }
+    if (!event) return;
+    closeRaw();
     // Rendering must not fail the review: the protocol is validated
     // elsewhere. The fallback carries no event content, which would be
     // JSON-escaped and so beyond redaction.
     let lines;
-    try { lines = eventLines(event, redact); } catch (error) { lines = [`· event could not be rendered (${error?.name})`]; }
+    try { lines = eventLines(event, redact); } catch (error) { lines = [`· ${clip(redact(event.type), 80)} event could not be rendered (${error instanceof Error ? error.name : 'error'})`]; }
     print(lines);
   };
   const take = () => { const line = parts.join(''); parts = []; return line; };
@@ -133,6 +137,6 @@ export function ompLogFormatter(write, redact = text => text, { rawIdleMs = 1000
       }
       if (start < chunk.length) parts.push(chunk.slice(start));
     },
-    end() { emit(take()); flushRaw(); },
+    end() { emit(take()); closeRaw(); },
   };
 }

@@ -168,7 +168,7 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
   const err = secretRedactor(secrets, text => { if (logStream === 'live') process.stderr.write(text); });
   // Withheld output is not rendered at all. The formatter redacts each value
   // before clipping; the stream redactor still covers what it writes.
-  const transcript = logStream === 'live' ? ompLogFormatter(text => out.write(text), out.redact) : undefined;
+  const transcript = logStream === 'live' ? ompLogFormatter(text => out.write(text), secrets) : undefined;
   let stdout;
   try {
     await Promise.all([...new Set(Object.values(runtimeEnv))].map(directory => mkdir(directory, { mode: 0o700 })));
