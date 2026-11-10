@@ -78,7 +78,8 @@ export function parseCommand(body) {
     if (invalid) {
       // Prose mentions must match the complete grammar to count as commands.
       // Standalone commands retain actionable errors for malformed options.
-      if (!prefix.trim()) throw new Error(`Invalid review command: ${body}. Use @codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental] or @codjiflo <preset> [full|incremental]`);
+      // The comment body stays out of the message: it is printed in public gate logs.
+      if (!prefix.trim()) throw new Error('Invalid review command. Use @codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental] or @codjiflo <preset> [full|incremental]');
       continue;
     }
     return { preset, mode };

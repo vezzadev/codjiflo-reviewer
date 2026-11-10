@@ -17,6 +17,15 @@ const entry = (head, overrides = {}) => ({ ...finding, id: randomUUID(), originH
 const marker = (head, base, findings, preset = 'opus-xhigh', kickoffId = 1) => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings, kickoffId })} -->`;
 const priorReview = (f, findings, overrides = {}) => ({ state: 'CHANGES_REQUESTED', commit_id: f.previous, body: marker(f.previous, f.base, findings), ...overrides });
 const posts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
+
+test('a checkpoint from a preset that no longer exists keeps its findings outstanding but is no incremental baseline', () => {
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const blocker = entry(head);
+  const reviews = [{ state: 'CHANGES_REQUESTED', commit_id: head, body: marker(head, base, [blocker], 'sol-xhigh') }];
+  assert.deepEqual(outstandingFindings(reviews), [blocker]);
+  assert.equal(baseline(reviews, base, 'opus-xhigh'), null);
+});
 const ledger = body => JSON.parse(/^<!-- codjiflo-reviewer:v4 (\{[^\n]+\}) -->$/.exec(body.split('\n').filter(line => line.startsWith('<!-- codjiflo-reviewer:v4 ')).at(-1))[1]);
 const resolution = (finding, status = 'unresolved', reason = 'The original failure still occurs.') => ({ id: finding.id, status, reason });
 const result = (resolutions, verdict = 'REQUEST_CHANGES', findings = []) => ({ verdict, summary: 'Review completed.', findings, resolutions });

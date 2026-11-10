@@ -18,14 +18,16 @@ function checkpointFallbackReason(checkpoint, base, preset) {
   const unavailable = 'no usable v4 review checkpoint';
   if (!checkpoint || !['APPROVED', 'CHANGES_REQUESTED'].includes(checkpoint.prior.state)) return unavailable;
   const { value } = checkpoint;
-  const cap = PRESETS[value.preset].level === 'xhigh' ? 15 : 10;
+  // A ledger from another (possibly retired) preset stays reconcilable but is never an incremental baseline.
+  if (value.base !== base || value.preset !== preset) return unavailable;
+  const cap = PRESETS[preset].level === 'xhigh' ? 15 : 10;
   let count = 0;
   for (const finding of value.findings) {
     // Same-head carried findings conservatively count too: capped analyses
     // cannot establish that the unchanged scope has no further findings.
     if (finding.originHead === value.head && ++count >= cap) return 'previous review reached the new-findings cap';
   }
-  return value.base === base && value.preset === preset ? null : unavailable;
+  return null;
 }
 
 export function baseline(reviews, base, preset) {
@@ -110,9 +112,9 @@ export async function review({ request, github, env = process.env, reviewer = ru
   const head = pr.head.sha;
   const base = pr.base.sha;
   const runUrl = workflowRunUrl(env);
-  // The workflow sets this from the gate's visibility decision: Actions logs of
-  // the public bot repository must not carry private repository content.
-  const logStream = env.CODJIFLO_LOG_STREAM === 'withheld' ? 'withheld' : 'live';
+  // Actions logs of the public bot repository must not carry private repository
+  // content: there, only the workflow's explicit public decision streams output.
+  const logStream = env.CODJIFLO_LOG_STREAM === 'live' || (env.GITHUB_ACTIONS !== 'true' && env.CODJIFLO_LOG_STREAM !== 'withheld') ? 'live' : 'withheld';
   const kickoff = await github.request(`${root}/issues/${request.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer starting **${request.preset}** (${request.mode}) at \`${head}\`, requested by @${request.requester}.${runUrl ? `\n\n[Live workflow logs](${runUrl})` : ''}` } });
   const kickoffId = kickoff?.id;
   if (!Number.isSafeInteger(kickoffId) || kickoffId <= 0) throw new Error('Kickoff comment response must include a positive safe-integer id');

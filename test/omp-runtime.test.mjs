@@ -137,16 +137,20 @@ test('trusted extension narrows active tools, blocks mutation and requires uniqu
   for (const name of ['write', 'edit', 'task', 'eval', 'manage_skill', 'mcp__external']) assert.equal(handlers.get('tool_call')({ toolName: name }).block, true);
   for (const name of REVIEW_TOOLS) assert.equal(handlers.get('tool_call')({ toolName: name }), undefined);
   assert.equal(handlers.get('session_stop')().decision, 'block');
-  // One failed provider request is continued once; a second consecutive failure
-  // ends the session, and a successful message in between restores the guard.
+  // A failed provider request gets one continuation however many internal
+  // retries it took; failing again ends the session. A completed message in
+  // between restores the guard.
   const failed = { message: { role: 'assistant', stopReason: 'error', errorMessage: 'model is not supported' } };
-  handlers.get('message_end')(failed);
+  for (let retry = 0; retry < 4; retry++) handlers.get('message_end')(failed);
   assert.equal(handlers.get('session_stop')().decision, 'block');
   handlers.get('message_end')({ message: { role: 'custom', customType: 'session-stop-continuation' } });
+  handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'stop' } });
+  assert.equal(handlers.get('session_stop')().decision, 'block');
+  for (let retry = 0; retry < 4; retry++) handlers.get('message_end')(failed);
+  assert.equal(handlers.get('session_stop')().decision, 'block');
   handlers.get('message_end')(failed);
   assert.equal(handlers.get('session_stop')(), undefined);
   handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'stop' } });
-  handlers.get('message_end')(failed);
   assert.equal(handlers.get('session_stop')().decision, 'block');
   assert.equal((await tool.execute()).details.accepted, true);
   await assert.rejects(tool.execute(), /only be submitted once/);

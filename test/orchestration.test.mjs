@@ -62,11 +62,11 @@ test('a mention by an unapproved author or without a command performs no review 
   });
 });
 
-test('OMP output reaches the logs unless the workflow withholds it', async t => {
-  for (const expected of ['withheld', 'live']) await t.test(expected, async () => {
+test('under Actions, OMP output reaches the logs only on an explicit live decision', async t => {
+  for (const [setting, expected] of [['live', 'live'], ['withheld', 'withheld'], ['', 'withheld'], ['public', 'withheld']]) await t.test(setting || 'unset', async () => {
     const f = await fixture();
     try {
-      const stdout = await f.run({ providerEnv: { CODJIFLO_LOG_STREAM: expected } });
+      const stdout = await f.run({ providerEnv: { GITHUB_ACTIONS: 'true', CODJIFLO_LOG_STREAM: setting } });
       assert.equal(stdout.includes('"type":"agent_start"'), expected === 'live');
       assert.equal(stdout.includes('OMP output withheld from logs'), expected === 'withheld');
       assert.equal(verdicts(f)[0].body.event, 'APPROVE');

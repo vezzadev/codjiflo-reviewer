@@ -14,9 +14,15 @@ const cli = fileURLToPath(new URL('../bin/codjiflo-reviewer.mjs', import.meta.ur
 async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body = '@codjiflo-reviewer review', approved = 'alice', pr = true, visibility = { private: false }, args } = {}) {
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-gate-'));
   const requests = [];
-  const server = createServer((request, response) => {
+  const comments = [];
+  const server = createServer(async (request, response) => {
     requests.push(`${request.method} ${request.url} ${request.headers.authorization}`);
     response.setHeader('Content-Type', 'application/json');
+    if (request.method === 'POST' && request.url === `/repos/${repo}/issues/2025/comments`) {
+      let posted = ''; for await (const chunk of request) posted += chunk;
+      comments.push(JSON.parse(posted).body);
+      return response.end('{"id":1}');
+    }
     const found = {
       [`/repos/${repo}/issues/comments/6451172747`]: { id: 6451172747, user: { login: author, type }, body, issue_url: `https://api.github.example/repos/${repo}/issues/2025` },
       [`/repos/${repo}/issues/2025`]: { number: 2025, ...(pr ? { pull_request: {} } : {}) },
@@ -37,7 +43,7 @@ async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body =
   });
   const read = path => readFile(path, 'utf8').catch(error => { if (error.code !== 'ENOENT') throw error; return ''; });
   return {
-    running, requests,
+    running, requests, comments,
     output: () => read(outputPath), summary: () => read(summaryPath),
     async close() { await running.catch(() => {}); await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },
   };
@@ -96,9 +102,11 @@ test('gate explains every decision in logs and the Actions summary without start
       else assert.equal(await g.running, `${line}\n`);
       assert.equal(await g.output(), `allowed=${allowed}\nprovider=${scenario.provider ?? 'none'}\n${allowed ? 'number=2025\nvisibility=public\nprepare-command=\nsource-submodules=[]\n' : ''}`);
       assert.equal(await g.summary(), `## Codjiflo gate\n\n<pre>${line}</pre>\n`);
-      // Denials never spend the repository lookup; nothing is ever written.
-      assert.equal(g.requests.length, allowed ? 3 : 2);
-      assert.ok(g.requests.every(request => request.startsWith('GET ') && request.endsWith(' Bearer fixture-token-not-real')));
+      // Denials never spend the repository lookup. Only an approved author's
+      // malformed command is answered on the PR, without echoing the comment.
+      assert.equal(g.requests.filter(request => request.startsWith('GET ')).length, allowed ? 3 : 2);
+      assert.ok(g.requests.every(request => request.endsWith(' Bearer fixture-token-not-real')));
+      assert.deepEqual(g.comments, scenario.fails ? ['Codjiflo Reviewer did not start: Invalid review command. Use @codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental] or @codjiflo <preset> [full|incremental]'] : []);
     } finally { await g.close(); }
   });
 });

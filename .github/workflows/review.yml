@@ -53,7 +53,7 @@ jobs:
           owner: ${{ steps.target.outputs.owner }}
           repositories: ${{ steps.target.outputs.name }}
           permission-issues: read
-          permission-pull-requests: read
+          permission-pull-requests: write
           permission-metadata: read
       - id: gate
         run: node bin/codjiflo-reviewer.mjs --gate --repo "$REPOSITORY" --comment "$COMMENT_ID"

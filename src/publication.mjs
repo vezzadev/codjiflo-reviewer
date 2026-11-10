@@ -22,7 +22,7 @@ function validate(envelope, env) {
   const { request, head, base, payload, analyzedCheckpoint } = envelope ?? {};
   if (envelope?.version !== 2 || !request ||
       !/^[\w.-]+\/[\w.-]+$/.test(request.repo) || !Number.isSafeInteger(request.number) || request.number < 1 ||
-      !Object.hasOwn(PRESETS, request.preset) || !['full', 'incremental'].includes(request.mode) ||
+      typeof request.preset !== 'string' || !/^[a-z0-9-]+$/.test(request.preset) || !['full', 'incremental'].includes(request.mode) ||
       !isApproved(request.requester, env.CODJIFLO_APPROVED_USERS) ||
       !/^[a-f0-9]{40}$/.test(head) || !/^[a-f0-9]{40}$/.test(base) ||
       !analyzedCheckpoint || typeof analyzedCheckpoint !== 'object' || Array.isArray(analyzedCheckpoint) ||

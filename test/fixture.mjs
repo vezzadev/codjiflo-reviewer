@@ -225,7 +225,7 @@ if (mode === 'fatal-exit') process.exit(1);
         timeoutMs,
         stream: streamOutput !== undefined,
         streamOutput,
-        env: { ...env, GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: fake, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
+        env: { ...env, GITHUB_ACTIONS: '', GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: fake, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
       });
     },
     async close() { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },

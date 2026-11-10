@@ -50,6 +50,8 @@ try {
       const event = await commentEvent(github, values.repo, values.comment);
       const decision = eventDecision(event, process.env.CODJIFLO_APPROVED_USERS);
       if (values.gate) await reportGate(event, decision, github);
+      // An approved author who mistyped a command gets the answer where they asked, not only in this run's log.
+      if (values.gate && decision.error) await github.request(`/repos/${values.repo}/issues/${event.issue.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer did not start: ${decision.error.message}` } });
       if (decision.error) throw decision.error;
       request = decision.request;
     } else {
