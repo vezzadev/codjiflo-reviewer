@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { schema } from './prompt.mjs';
 import { secretRedactor } from './redaction.mjs';
+import { ompLogFormatter } from './omp-log.mjs';
 import { MAX_INLINE_INPUT } from './input-budget.mjs';
 
 // Only protocol error fields are diagnostics; never publish raw model/tool
@@ -152,6 +153,8 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
   if (logStream === 'withheld') console.log('OMP output withheld from logs: the reviewed repository is private.');
   const out = secretRedactor(secrets, text => { if (logStream === 'live') process.stdout.write(text); });
   const err = secretRedactor(secrets, text => { if (logStream === 'live') process.stderr.write(text); });
+  // Redact after rendering: JSON escaping can hide a secret from the raw stream.
+  const transcript = ompLogFormatter(text => out.write(text));
   let stdout;
   try {
     await Promise.all([...new Set(Object.values(runtimeEnv))].map(directory => mkdir(directory, { mode: 0o700 })));
@@ -165,13 +168,14 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
       '--model', model, '--thinking', preset.effort, '--max-time', '45m',
       '--config', config, '--extension', fileURLToPath(new URL('./omp-review-extension.mjs', import.meta.url)),
     ], { cwd, env: { ...env, ...runtimeEnv }, input: prompt, stream: true,
-      streamOutput: { stdout: chunk => out.write(chunk), stderr: chunk => err.write(chunk) }, timeoutMs: 45 * 60 * 1000 });
+      streamOutput: { stdout: chunk => transcript.write(chunk), stderr: chunk => err.write(chunk) }, timeoutMs: 45 * 60 * 1000 });
   } catch (error) {
     const diagnostic = ompDiagnostics(error.stdout, out.redact);
     const status = error.termination === 'timeout' ? 'timed out' : error.termination === 'exit' ? `failed (exit ${error.exitCode})` : error.termination === 'signal' ? `failed (${error.signal})` : 'could not run';
     const logs = logStream === 'live' ? 'See process logs for details.' : 'OMP output was withheld from the logs; rerun the review locally for details.';
     throw new Error(`OMP review ${status}.${diagnostic ? `\n${diagnostic}` : ` ${logs}`}`);
   } finally {
+    transcript.end();
     out.end();
     err.end();
     await rm(scratch, { recursive: true, force: true });
