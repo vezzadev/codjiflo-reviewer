@@ -57,15 +57,23 @@ export function parseOmpReview(stdout) {
       || events.slice(terminalIndex + 1).some(event => ['agent_start', 'message_start', 'message_end', 'tool_execution_start', 'tool_execution_end'].includes(event.type))) {
     throw new Error('OMP review did not complete successfully (missing terminal agent_end or unsuccessful last assistant).');
   }
-  const starts = events.filter(event => event.type === 'tool_execution_start' && event.toolName === 'final_review');
-  const ends = events.filter(event => event.type === 'tool_execution_end' && event.toolName === 'final_review');
+  const calls = type => events.filter(event => event.type === type && event.toolName === 'final_review');
+  const allStarts = calls('tool_execution_start'), allEnds = calls('tool_execution_end');
+  // A call the tool rejected (unparseable or invalid arguments) captured
+  // nothing, so the model may correct it. Only attempts that finished before
+  // the accepted call are set aside: a later one means the model tried to
+  // replace a review that was already captured.
+  const accepted = allEnds.findIndex(event => event.isError === false);
+  const retried = new Set(allEnds.slice(0, Math.max(accepted, 0)).filter(event => event.isError === true && typeof event.toolCallId === 'string').map(event => event.toolCallId));
+  const starts = allStarts.filter(event => !retried.has(event.toolCallId)), ends = allEnds.filter(event => !retried.has(event.toolCallId));
   if (starts.length !== 1 || ends.length !== 1 || typeof starts[0].toolCallId !== 'string' || !starts[0].toolCallId
       || ends[0].toolCallId !== starts[0].toolCallId || ends[0].isError !== false
       || events.indexOf(ends[0]) <= events.indexOf(starts[0]) || events.indexOf(ends[0]) >= terminalIndex
+      || allStarts.some(event => retried.has(event.toolCallId) && events.indexOf(event) > events.indexOf(starts[0]))
       || !matchesSchema(starts[0].args, schema)) {
     // Counts only: with withheld logs this message is the sole diagnostic, and call arguments are review content.
-    const failed = ends.filter(event => event.isError !== false).length;
-    const detail = `${starts.length} started, ${ends.length} completed, ${failed} rejected${starts.length === 1 && ends.length === 1 && !failed ? ', arguments or ordering invalid' : ''}`;
+    const failed = allEnds.filter(event => event.isError !== false).length;
+    const detail = `${allStarts.length} started, ${allEnds.length} completed, ${failed} rejected${allStarts.length === 1 && allEnds.length === 1 && !failed ? ', arguments or ordering invalid' : ''}`;
     throw new Error(`OMP review failed: missing, duplicate, failed or malformed final_review result (final_review calls: ${detail}).`);
   }
   return starts[0].args;

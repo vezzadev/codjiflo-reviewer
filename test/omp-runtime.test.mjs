@@ -11,6 +11,10 @@ import { secretRedactor } from '../src/redaction.mjs';
 
 const runtimeNames = ['TMPDIR', 'TMP', 'TEMP', 'XDG_CACHE_HOME', 'UV_CACHE_DIR', 'UV_PROJECT_ENVIRONMENT', 'PYTHONPYCACHEPREFIX'];
 const result = { verdict: 'INCOMPLETE', summary: 'Required source unavailable.', findings: [], resolutions: [] };
+const rejected = id => [
+  { type: 'tool_execution_start', toolName: 'final_review', toolCallId: id, args: { __parseError: "Expected ',' or '}' in object" } },
+  { type: 'tool_execution_end', toolName: 'final_review', toolCallId: id, isError: true, result: { content: [{ type: 'text', text: 'Validation failed' }] } },
+];
 const events = () => [
   { type: 'tool_execution_start', toolName: 'final_review', toolCallId: 'review-1', args: structuredClone(result) },
   { type: 'tool_execution_end', toolName: 'final_review', toolCallId: 'review-1', isError: false, result: { details: { accepted: true } } },
@@ -97,11 +101,19 @@ test('OMP accepts recovered provider attempts, not failed terminal output', () =
   assert.deepEqual(parseOmpReview(encode(stream)), result);
 });
 
+test('OMP accepts a review submitted after rejected final_review attempts', () => {
+  assert.deepEqual(parseOmpReview(encode([...rejected('retry-1'), ...rejected('retry-2'), ...events()])), result);
+});
+
 for (const [name, mutate] of [
   ['missing result', value => value.splice(0, 2)],
   ['missing end', value => value.splice(1, 1)],
   ['duplicate result', value => value.splice(1, 0, structuredClone(value[0]))],
   ['duplicate end', value => value.splice(2, 0, structuredClone(value[1]))],
+  ['rejected resubmission after the accepted result', value => value.splice(2, 0, ...rejected('late'))],
+  ['rejected attempt overlapping the accepted call', value => value.splice(1, 0, ...rejected('overlap'))],
+  ['only rejected attempts', value => value.splice(0, 2, ...rejected('retry-1'))],
+  ['two accepted results', value => value.splice(2, 0, ...events().slice(0, 2).map(event => ({ ...event, toolCallId: 'review-2' })))],
   ['mismatched call', value => { value[1].toolCallId = 'other'; }],
   ['failed result', value => { value[1].isError = true; }],
   ['end before start', value => { [value[0], value[1]] = [value[1], value[0]]; }],
