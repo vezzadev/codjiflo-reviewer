@@ -67,7 +67,8 @@ test('under Actions, OMP output reaches the logs only on an explicit live decisi
     const f = await fixture();
     try {
       const stdout = await f.run({ providerEnv: { GITHUB_ACTIONS: 'true', CODJIFLO_LOG_STREAM: setting } });
-      assert.equal(stdout.includes('"type":"agent_start"'), expected === 'live');
+      assert.equal(stdout.includes('OMP agent started'), expected === 'live');
+      assert.equal(stdout.includes('"type":'), false);
       assert.equal(stdout.includes('OMP output withheld from logs'), expected === 'withheld');
       assert.equal(verdicts(f)[0].body.event, 'APPROVE');
     } finally { await f.close(); }
