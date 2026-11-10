@@ -1,3 +1,5 @@
+import { secretRedactor } from './redaction.mjs';
+
 // Renders OMP's `--mode json` event stream as a readable transcript for the
 // process log. The raw stream stays the protocol input of parseOmpReview.
 //
@@ -32,8 +34,8 @@ function redactDeep(value, redact) {
 function assistantLines(message, show) {
   const lines = [];
   for (const part of Array.isArray(message.content) ? message.content : []) {
-    if (part?.type === 'thinking' && show(part.thinking).trim()) lines.push('thinking:', ...quote(show(part.thinking)));
-    if (part?.type === 'text' && show(part.text).trim()) lines.push('assistant:', ...quote(show(part.text)));
+    const content = part?.type === 'thinking' ? show(part.thinking) : part?.type === 'text' ? show(part.text) : '';
+    if (content.trim()) lines.push(part.type === 'thinking' ? 'thinking:' : 'assistant:', ...quote(content));
   }
   if (typeof message.errorMessage === 'string') lines.push(`assistant error (${show(message.stopReason)}):`, ...quote(show(message.errorMessage)));
   return lines;
@@ -90,24 +92,38 @@ const guard = lines => lines.flatMap(rendered => rendered.replaceAll('##[', '##\
 
 // Stream chunks need not align with event lines, and one event can span many
 // chunks: join the parts of a line only once it is complete.
-export function ompLogFormatter(write, redact = text => text) {
+export function ompLogFormatter(write, secrets = []) {
   let parts = [];
-  // Consecutive lines that are not events are redacted together: a secret
-  // may span lines.
-  let raw = [];
   const print = lines => { for (const rendered of guard(lines)) write(`${rendered}\n`); };
-  const flushRaw = () => {
-    if (raw.length) print(quote(redact(raw.join('\n'))));
-    raw = [];
+  // Lines that are not events go through a stream redactor before they are
+  // split and prefixed: a secret may span lines. It holds back at most the
+  // longest secret's length, and is drained at the next event.
+  let rawText = '';
+  const printRaw = lines => print(lines.filter(line => line.trim()).flatMap(line => quote(line)));
+  const raw = secretRedactor(secrets, text => {
+    const lines = (rawText + text).split('\n');
+    rawText = lines.pop();
+    printRaw(lines);
+  });
+  const { redact } = raw;
+  let rawOpen = false;
+  const closeRaw = () => {
+    raw.end();
+    printRaw([rawText]);
+    rawText = '';
+    rawOpen = false;
   };
   const emit = line => {
-    if (!line.trim()) return;
-    const event = parse(line);
-    if (!event) { raw.push(line); return; }
-    flushRaw();
-    // Rendering must not fail the review: the protocol is validated elsewhere.
+    const event = line.trim() ? parse(line) : undefined;
+    // A blank line may be part of a secret spanning raw lines.
+    if (!event && (line.trim() || rawOpen)) { rawOpen = true; raw.write(`${line}\n`); }
+    if (!event) return;
+    closeRaw();
+    // Rendering must not fail the review: the protocol is validated
+    // elsewhere. The fallback carries no event content, which would be
+    // JSON-escaped and so beyond redaction.
     let lines;
-    try { lines = eventLines(event, redact); } catch { lines = quote(redact(line)); }
+    try { lines = eventLines(event, redact); } catch (error) { lines = [`· ${clip(redact(event.type), 80)} event could not be rendered (${error instanceof Error ? error.name : 'error'})`]; }
     print(lines);
   };
   const take = () => { const line = parts.join(''); parts = []; return line; };
@@ -121,6 +137,6 @@ export function ompLogFormatter(write, redact = text => text) {
       }
       if (start < chunk.length) parts.push(chunk.slice(start));
     },
-    end() { emit(take()); flushRaw(); },
+    end() { emit(take()); closeRaw(); },
   };
 }
