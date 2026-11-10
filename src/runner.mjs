@@ -63,7 +63,10 @@ export function parseOmpReview(stdout) {
       || ends[0].toolCallId !== starts[0].toolCallId || ends[0].isError !== false
       || events.indexOf(ends[0]) <= events.indexOf(starts[0]) || events.indexOf(ends[0]) >= terminalIndex
       || !matchesSchema(starts[0].args, schema)) {
-    throw new Error('OMP review failed: missing, duplicate, failed or malformed final_review result.');
+    // Counts only: with withheld logs this message is the sole diagnostic, and call arguments are review content.
+    const failed = ends.filter(event => event.isError !== false).length;
+    const detail = `${starts.length} started, ${ends.length} completed, ${failed} rejected${starts.length === 1 && ends.length === 1 && !failed ? ', arguments or ordering invalid' : ''}`;
+    throw new Error(`OMP review failed: missing, duplicate, failed or malformed final_review result (final_review calls: ${detail}).`);
   }
   return starts[0].args;
 }
