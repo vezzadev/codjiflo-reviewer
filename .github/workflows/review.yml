@@ -166,7 +166,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: echo "started-at=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" --jq .run_started_at)" >> "$GITHUB_OUTPUT"
+        run: gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" --jq '"started-at=\(.run_started_at)\ncreated-at=\(.created_at)"' >> "$GITHUB_OUTPUT"
       - name: Report unsuccessful review job
         uses: actions/github-script@v9
         env:
@@ -177,6 +177,7 @@ jobs:
           REDISPATCH_OF: ${{ inputs.redispatch-of }}
           WORKFLOW_REF: ${{ github.ref_name }}
           ATTEMPT_STARTED_AT: ${{ steps.attempt.outputs.started-at }}
+          RUN_CREATED_AT: ${{ steps.attempt.outputs.created-at }}
           ACTIONS_TOKEN: ${{ github.token }}
         with:
           github-token: ${{ steps.app.outputs.token }}
@@ -213,37 +214,55 @@ jobs:
                 /Codjiflo Reviewer (?:failed;|preparation failed;)/.test(comment.body))
             ));
             if (reported) return;
-            // The App token only reaches the reviewed repository; this run's jobs
-            // and dispatches live here.
-            const actions = getOctokit(process.env.ACTIONS_TOKEN);
-            const jobs = await actions.paginate(actions.rest.actions.listJobsForWorkflowRunAttempt, {
-              owner: context.repo.owner, repo: context.repo.repo,
-              run_id: context.runId, attempt_number: runAttempt, per_page: 100,
-            });
-            // A runner that vanishes mid-step leaves that step in_progress on a
-            // completed job; failures the runner observes conclude every step.
-            const runnerLost = process.env.REVIEW_JOB_RESULT === 'failure' && jobs.some(job =>
-              job.name === 'review' && job.steps?.some(step => step.status === 'in_progress'));
-            // One automatic retry: a retry whose runner is lost again only reports.
-            if (runnerLost && !process.env.REDISPATCH_OF) {
+            // Resolves 'queued' when this run's review is (or already was) retried.
+            const retryLostReview = async () => {
+              // The App token only reaches the reviewed repository; this run's
+              // jobs and dispatches live here.
+              const actions = getOctokit(process.env.ACTIONS_TOKEN);
+              const here = { owner: context.repo.owner, repo: context.repo.repo };
+              const jobs = await actions.paginate(actions.rest.actions.listJobsForWorkflowRunAttempt, {
+                ...here, run_id: context.runId, attempt_number: runAttempt, per_page: 100,
+              });
+              // A runner that vanishes mid-step leaves that step in_progress on a
+              // completed job; failures the runner observes conclude every step.
+              // The job has no `name:`, so the API names it by its id.
+              if (!jobs.some(job => job.name === 'review' && job.steps?.some(step => step.status === 'in_progress'))) return 'none';
+              // A newer mention supersedes this generation, and a retry joining the
+              // PR's concurrency group would replace that mention's pending run.
+              const mentions = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: number, per_page: 100,
+              });
+              if (mentions.some(comment => comment.id > Number(process.env.COMMENT_ID) &&
+                comment.user?.type !== 'Bot' && /@codjiflo/i.test(comment.body ?? ''))) return 'none';
+              // Once per run across reporter attempts: the retry's run-name names this run.
+              const runs = await actions.paginate(actions.rest.actions.listWorkflowRuns, {
+                ...here, workflow_id: 'review.yml', event: 'workflow_dispatch',
+                created: `>=${process.env.RUN_CREATED_AT}`, per_page: 100,
+              });
+              if (runs.some(run => run.display_title?.endsWith(`(retry of run ${context.runId})`))) return 'queued';
               await actions.rest.actions.createWorkflowDispatch({
-                owner: context.repo.owner, repo: context.repo.repo,
-                workflow_id: 'review.yml', ref: process.env.WORKFLOW_REF,
+                ...here, workflow_id: 'review.yml', ref: process.env.WORKFLOW_REF,
                 inputs: {
                   repository: process.env.TARGET_REPOSITORY,
                   'comment-id': process.env.COMMENT_ID,
                   'redispatch-of': String(context.runId),
                 },
               });
-              await github.rest.issues.createComment({
-                owner, repo,
-                issue_number: number,
-                body: `Codjiflo Reviewer lost its runner mid-review and found no verdict from this attempt. The review was queued again automatically (one retry); its result will follow. [Workflow logs](${runUrl})\n\n${marker}`,
+              return 'queued';
+            };
+            // Only a failure can be a lost runner; a retry that loses its runner only reports.
+            let retry = 'none';
+            if (process.env.REVIEW_JOB_RESULT === 'failure' && !process.env.REDISPATCH_OF) {
+              // The PR notice is this job's contract: a retry error must not suppress it.
+              retry = await retryLostReview().catch(error => {
+                core.warning(`Lost-runner retry skipped: ${error.message}`);
+                return 'none';
               });
-              return;
             }
             await github.rest.issues.createComment({
               owner, repo,
               issue_number: number,
-              body: `Codjiflo Reviewer job ended with status **${process.env.REVIEW_JOB_RESULT}**. The review runner did not confirm a failure report for this attempt. A runner interruption can prevent logs and post-job steps from being uploaded. Check existing PR reviews before retrying: this notification does not establish whether a verdict was submitted. [Workflow logs](${runUrl})\n\n${marker}`,
+              body: retry === 'queued'
+                ? `Codjiflo Reviewer lost its runner mid-review and found no verdict from this attempt. The review was queued again automatically (one retry); its result will follow. [Workflow logs](${runUrl})\n\n${marker}`
+                : `Codjiflo Reviewer job ended with status **${process.env.REVIEW_JOB_RESULT}**. The review runner did not confirm a failure report for this attempt. A runner interruption can prevent logs and post-job steps from being uploaded. Check existing PR reviews before retrying: this notification does not establish whether a verdict was submitted. [Workflow logs](${runUrl})\n\n${marker}`,
             });
