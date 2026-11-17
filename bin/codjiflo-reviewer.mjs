@@ -51,11 +51,17 @@ try {
       let decision = eventDecision(event, process.env.CODJIFLO_APPROVED_USERS);
       // Only the gate of a lost-runner retry looks for newer requests; ordinary mentions never wait on one.
       if (values.gate && process.env.CODJIFLO_REDISPATCH_OF && decision.request) {
-        // `since` filters on updated_at, which is never before created_at: every newer comment is kept.
-        // Fail open: the PR was told this retry is queued, and a superseded one is only withheld at publication.
-        const comments = await github.list(`/repos/${values.repo}/issues/${event.issue.number}/comments?since=${encodeURIComponent(event.comment.created_at)}`)
-          .catch(error => { console.warn(`::warning::Could not check for newer review requests; retrying anyway: ${error.message}`); return []; });
-        const newer = supersedingComment(event, comments, process.env.CODJIFLO_APPROVED_USERS);
+        // `since` filters on updated_at; a minute of slack keeps same-second and
+        // clock-edge comments, and the id comparison stays exact.
+        const since = new Date(Date.parse(event.comment.created_at) - 60_000).toISOString();
+        const lookup = await github.list(`/repos/${values.repo}/issues/${event.issue.number}/comments?since=${encodeURIComponent(since)}`)
+          .then(comments => ({ comments }), error => ({ error }));
+        // Fail closed: a retry admitted blind could replace a newer request pending in the PR's concurrency group.
+        if (lookup.error) {
+          console.error(`Could not check for newer review requests: ${lookup.error.message}`);
+          decision = { reason: 'superseded-check-failed' };
+        }
+        const newer = lookup.comments && supersedingComment(event, lookup.comments, process.env.CODJIFLO_APPROVED_USERS);
         if (newer) decision = { reason: `superseded-by-${newer.id}` };
       }
       if (values.gate) await reportGate(event, decision, github);
@@ -64,6 +70,11 @@ try {
       if (values.gate && decision.error) {
         await github.request(`/repos/${values.repo}/issues/${event.issue.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer did not start: invalid review command. Use ${COMMAND_SYNTAX.map(form => `\`${form}\``).join(' or ')}.` } })
           .catch(error => console.error(`Could not post the invalid-command reply: ${error.message}`));
+      }
+      // The PR was told this retry is queued; say why it is not running.
+      if (decision.reason === 'superseded-check-failed') {
+        await github.request(`/repos/${values.repo}/issues/${event.issue.number}/comments`, { method: 'POST', body: { body: 'Codjiflo Reviewer did not run the automatic retry: it could not check this PR for newer review requests. Re-request the review if it is still needed.' } })
+          .catch(error => console.error(`Could not post the skipped-retry notice: ${error.message}`));
       }
       if (decision.error) throw decision.error;
       request = decision.request;
