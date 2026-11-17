@@ -27,8 +27,8 @@ async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body =
       [`/repos/${repo}/issues/comments/6451172747`]: { id: 6451172747, created_at: '2026-11-17T03:20:00Z', user: { login: author, type }, body, issue_url: `https://api.github.example/repos/${repo}/issues/2025` },
       [`/repos/${repo}/issues/2025`]: { number: 2025, ...(pr ? { pull_request: {} } : {}) },
       [`/repos/${repo}`]: visibility,
-      // Only comments updated since the dispatched one can be newer; null answers 404.
-      [`/repos/${repo}/issues/2025/comments?since=2026-11-17T03%3A20%3A00Z&per_page=100&page=1`]: prComments,
+      // Lookups start a minute before the dispatched comment; null answers 404.
+      [`/repos/${repo}/issues/2025/comments?since=2026-11-17T03%3A19%3A00.000Z&per_page=100&page=1`]: prComments,
     }[request.url];
     if (!found) response.statusCode = 404;
     response.end(JSON.stringify(found ?? { message: 'Not Found' }));
@@ -124,19 +124,25 @@ test('a lost-runner retry gate yields only to a newer comment that would start a
     { id: 6451172803, user: { login: 'codjiflo[bot]', type: 'Bot' }, body: '@codjiflo opus-medium' },
   ];
   const newer = { id: 6451172900, user: user('ALICE'), body: 'Rebased. @codjiflo opus-medium' };
-  for (const [name, options, expected] of [
-    ['prose, quotes, strangers, bots and older commands', { redispatchOf: '44009512925', prComments: ignored }, 'allowed=true'],
-    ['a newer approved command', { redispatchOf: '44009512925', prComments: [...ignored, newer] }, 'allowed=false'],
-    ['an ordinary mention ignores newer commands', { prComments: [newer] }, 'allowed=true'],
-    // The PR was already told a retry is queued; a lookup failure must not drop it silently.
-    ['a failed newer-comment lookup lets the retry proceed', { redispatchOf: '44009512925', prComments: null }, 'allowed=true'],
+  const approved = 'reason=approved provider=anthropic preset=opus-xhigh mode=incremental';
+  for (const [name, options, reason, posted = []] of [
+    ['prose, quotes, strangers, bots and older commands', { redispatchOf: '44009512925', prComments: ignored }, approved],
+    ['a newer approved command', { redispatchOf: '44009512925', prComments: [...ignored, newer] }, 'reason=superseded-by-6451172900'],
+    ['an ordinary mention ignores newer commands', { prComments: [newer] }, approved],
+    // The PR was told a retry is queued. Admitting it blind could replace a newer
+    // pending request in the concurrency group, so it declines and says so.
+    ['a failed newer-comment lookup', { redispatchOf: '44009512925', prComments: null }, 'reason=superseded-check-failed', [
+      'Codjiflo Reviewer did not run the automatic retry: it could not check this PR for newer review requests. Re-request the review if it is still needed.',
+    ]],
   ]) await t.test(name, async () => {
     const g = await gate(options);
     try {
       const log = await g.running;
-      assert.equal((await g.output()).split('\n')[0], expected);
-      assert.equal(log.includes('reason=superseded-by-6451172900'), expected === 'allowed=false');
-      assert.equal(g.requests.some(request => request.includes('/issues/2025/comments')), Boolean(options.redispatchOf));
+      assert.equal((await g.output()).split('\n')[0], `allowed=${reason === approved}`);
+      assert.match(log, new RegExp(`allowed=${reason === approved} ${reason} `));
+      assert.deepEqual(g.comments, posted);
+      // One minute before the dispatched comment's created_at keeps same-second comments.
+      assert.equal(g.requests.some(request => request.includes('/issues/2025/comments?since=2026-11-17T03%3A19%3A00.000Z&')), Boolean(options.redispatchOf));
     } finally { await g.close(); }
   });
 });
