@@ -11,24 +11,31 @@ import { repositorySettings } from '../src/repositories.mjs';
 const cli = fileURLToPath(new URL('../bin/codjiflo-reviewer.mjs', import.meta.url));
 
 // Loopback GitHub serving the one comment the dispatch inputs point at.
-async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body = '@codjiflo-reviewer review', approved = 'alice', pr = true, visibility = { private: false }, args, redispatchOf = '', prComments = [] } = {}) {
+async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body = '@codjiflo-reviewer review', approved = 'alice', pr = true, visibility = { private: false }, args, redispatchOf = '', prComments = [], createdAt = '2026-11-17T03:20:00Z', lookupStatuses = [], postStatus = 200 } = {}) {
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-gate-'));
   const requests = [];
   const comments = [];
+  const failures = [...lookupStatuses];
   const server = createServer(async (request, response) => {
     requests.push(`${request.method} ${request.url} ${request.headers.authorization}`);
     response.setHeader('Content-Type', 'application/json');
+    const url = new URL(request.url, 'http://fixture');
     if (request.method === 'POST' && request.url === `/repos/${repo}/issues/2025/comments`) {
       let posted = ''; for await (const chunk of request) posted += chunk;
       comments.push(JSON.parse(posted).body);
+      response.statusCode = postStatus;
       return response.end('{"id":1}');
     }
+    // GitHub documents `since` as "updated after"; the fixture takes the strict reading.
+    if (url.pathname === `/repos/${repo}/issues/2025/comments` && prComments) {
+      if (failures.length) { response.statusCode = failures.shift(); return response.end('{"message":"Server Error"}'); }
+      const since = Date.parse(url.searchParams.get('since'));
+      return response.end(JSON.stringify(prComments.filter(comment => Date.parse(comment.updated_at ?? '2026-11-17T03:25:00Z') > since)));
+    }
     const found = {
-      [`/repos/${repo}/issues/comments/6451172747`]: { id: 6451172747, created_at: '2026-11-17T03:20:00Z', user: { login: author, type }, body, issue_url: `https://api.github.example/repos/${repo}/issues/2025` },
+      [`/repos/${repo}/issues/comments/6451172747`]: { id: 6451172747, created_at: createdAt, user: { login: author, type }, body, issue_url: `https://api.github.example/repos/${repo}/issues/2025` },
       [`/repos/${repo}/issues/2025`]: { number: 2025, ...(pr ? { pull_request: {} } : {}) },
       [`/repos/${repo}`]: visibility,
-      // Lookups start a minute before the dispatched comment; null answers 404.
-      [`/repos/${repo}/issues/2025/comments?since=2026-11-17T03%3A19%3A00.000Z&per_page=100&page=1`]: prComments,
     }[request.url];
     if (!found) response.statusCode = 404;
     response.end(JSON.stringify(found ?? { message: 'Not Found' }));
@@ -124,16 +131,22 @@ test('a lost-runner retry gate yields only to a newer comment that would start a
     { id: 6451172803, user: { login: 'codjiflo[bot]', type: 'Bot' }, body: '@codjiflo opus-medium' },
   ];
   const newer = { id: 6451172900, user: user('ALICE'), body: 'Rebased. @codjiflo opus-medium' };
+  // Posted in the dispatched comment's second: a `since` equal to its created_at would drop it.
+  const sameSecond = { ...newer, updated_at: '2026-11-17T03:20:00Z' };
   const approved = 'reason=approved provider=anthropic preset=opus-xhigh mode=incremental';
-  for (const [name, options, reason, posted = []] of [
-    ['prose, quotes, strangers, bots and older commands', { redispatchOf: '44009512925', prComments: ignored }, approved],
-    ['a newer approved command', { redispatchOf: '44009512925', prComments: [...ignored, newer] }, 'reason=superseded-by-6451172900'],
-    ['an ordinary mention ignores newer commands', { prComments: [newer] }, approved],
+  const retry = { redispatchOf: '44009512925' };
+  const notice = 'Codjiflo Reviewer did not run the automatic retry: it could not check this PR for newer review requests. Re-request the review if it is still needed.';
+  for (const [name, options, reason, lookups, posted = []] of [
+    ['prose, quotes, strangers, bots and older commands', { ...retry, prComments: ignored }, approved, 1],
+    ['a newer approved command', { ...retry, prComments: [...ignored, newer] }, 'reason=superseded-by-6451172900', 1],
+    ['a newer approved command from the same second', { ...retry, prComments: [sameSecond] }, 'reason=superseded-by-6451172900', 1],
+    ['an ordinary mention ignores newer commands', { prComments: [newer] }, approved, 0],
+    ['a transient lookup failure that recovers', { ...retry, prComments: [newer], lookupStatuses: [502] }, 'reason=superseded-by-6451172900', 2],
     // The PR was told a retry is queued. Admitting it blind could replace a newer
     // pending request in the concurrency group, so it declines and says so.
-    ['a failed newer-comment lookup', { redispatchOf: '44009512925', prComments: null }, 'reason=superseded-check-failed', [
-      'Codjiflo Reviewer did not run the automatic retry: it could not check this PR for newer review requests. Re-request the review if it is still needed.',
-    ]],
+    ['a lookup that keeps failing', { ...retry, prComments: [newer], lookupStatuses: [503, 503, 503] }, 'reason=superseded-check-failed', 3, [notice]],
+    ['a non-transient lookup failure', { ...retry, prComments: null }, 'reason=superseded-check-failed', 1, [notice]],
+    ['a dispatched comment without created_at', { ...retry, createdAt: null }, 'reason=superseded-check-failed', 0, [notice]],
   ]) await t.test(name, async () => {
     const g = await gate(options);
     try {
@@ -141,8 +154,14 @@ test('a lost-runner retry gate yields only to a newer comment that would start a
       assert.equal((await g.output()).split('\n')[0], `allowed=${reason === approved}`);
       assert.match(log, new RegExp(`allowed=${reason === approved} ${reason} `));
       assert.deepEqual(g.comments, posted);
-      // One minute before the dispatched comment's created_at keeps same-second comments.
-      assert.equal(g.requests.some(request => request.includes('/issues/2025/comments?since=2026-11-17T03%3A19%3A00.000Z&')), Boolean(options.redispatchOf));
+      assert.equal(g.requests.filter(request => request.startsWith('GET /repos/org/repo/issues/2025/comments?')).length, lookups);
+    } finally { await g.close(); }
+  });
+  await t.test('a skipped retry whose notice cannot be posted fails the gate', async () => {
+    const g = await gate({ ...retry, prComments: null, postStatus: 500 });
+    try {
+      await assert.rejects(g.running);
+      assert.deepEqual(g.comments, [notice]);
     } finally { await g.close(); }
   });
 });

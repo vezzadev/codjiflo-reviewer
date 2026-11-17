@@ -7,6 +7,21 @@ import { review } from '../src/review.mjs';
 import { publishReview, reportPublicationFailure } from '../src/publication.mjs';
 import { repositorySettings } from '../src/repositories.mjs';
 
+// Comments that may supersede a lost-runner retry. `since` filters on updated_at;
+// a minute of slack keeps same-second and clock-edge comments, and the caller's
+// id comparison stays exact. Transient failures get two more tries.
+async function newerCommentLookup(github, repo, event) {
+  const created = Date.parse(event.comment.created_at);
+  if (Number.isNaN(created)) return { error: new Error('the dispatched comment has no created_at') };
+  const path = `/repos/${repo}/issues/${event.issue.number}/comments?since=${encodeURIComponent(new Date(created - 60_000).toISOString())}`;
+  for (let attempt = 1; ; attempt++) {
+    const lookup = await github.list(path).then(comments => ({ comments }), error => ({ error }));
+    const transient = lookup.error && (!lookup.error.status || lookup.error.status === 429 || lookup.error.status >= 500);
+    if (!transient || attempt === 3) return lookup;
+    await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+  }
+}
+
 async function reportGate(event, decision, github) {
   const { request, reason } = decision;
   const provider = request ? PRESETS[request.preset].provider : 'none';
@@ -51,11 +66,7 @@ try {
       let decision = eventDecision(event, process.env.CODJIFLO_APPROVED_USERS);
       // Only the gate of a lost-runner retry looks for newer requests; ordinary mentions never wait on one.
       if (values.gate && process.env.CODJIFLO_REDISPATCH_OF && decision.request) {
-        // `since` filters on updated_at; a minute of slack keeps same-second and
-        // clock-edge comments, and the id comparison stays exact.
-        const since = new Date(Date.parse(event.comment.created_at) - 60_000).toISOString();
-        const lookup = await github.list(`/repos/${values.repo}/issues/${event.issue.number}/comments?since=${encodeURIComponent(since)}`)
-          .then(comments => ({ comments }), error => ({ error }));
+        const lookup = await newerCommentLookup(github, values.repo, event);
         // Fail closed: a retry admitted blind could replace a newer request pending in the PR's concurrency group.
         if (lookup.error) {
           console.error(`Could not check for newer review requests: ${lookup.error.message}`);
@@ -71,10 +82,10 @@ try {
         await github.request(`/repos/${values.repo}/issues/${event.issue.number}/comments`, { method: 'POST', body: { body: `Codjiflo Reviewer did not start: invalid review command. Use ${COMMAND_SYNTAX.map(form => `\`${form}\``).join(' or ')}.` } })
           .catch(error => console.error(`Could not post the invalid-command reply: ${error.message}`));
       }
-      // The PR was told this retry is queued; say why it is not running.
+      // The PR was told this retry is queued; say why it is not running. If even
+      // this fails, the gate fails so the dropped retry is not a green run.
       if (decision.reason === 'superseded-check-failed') {
-        await github.request(`/repos/${values.repo}/issues/${event.issue.number}/comments`, { method: 'POST', body: { body: 'Codjiflo Reviewer did not run the automatic retry: it could not check this PR for newer review requests. Re-request the review if it is still needed.' } })
-          .catch(error => console.error(`Could not post the skipped-retry notice: ${error.message}`));
+        await github.request(`/repos/${values.repo}/issues/${event.issue.number}/comments`, { method: 'POST', body: { body: 'Codjiflo Reviewer did not run the automatic retry: it could not check this PR for newer review requests. Re-request the review if it is still needed.' } });
       }
       if (decision.error) throw decision.error;
       request = decision.request;
