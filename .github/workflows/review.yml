@@ -218,7 +218,7 @@ jobs:
             ));
             if (reported) return;
             const retryMarker = `<!-- codjiflo-retry:${context.runId} -->`;
-            // 'queued': a fresh or still-pending retry; 'spent': this run's one retry already ran.
+            // 'queued': a fresh or still-pending retry; 'spent': this run's one retry was already used.
             const retryLostReview = async () => {
               // The App token only reaches the reviewed repository; this run's
               // jobs and dispatches live here.
@@ -264,7 +264,7 @@ jobs:
             const retryRun = retry.url ? ` [Retry run](${retry.url})` : '';
             const body = {
               queued: `Codjiflo Reviewer lost its runner mid-review and found no verdict from this attempt. The review was queued again automatically (one retry per run); its result will follow unless a newer review request supersedes it.${retryRun} [Workflow logs](${runUrl})\n\n${retryMarker}`,
-              spent: `Codjiflo Reviewer lost its runner mid-review and found no verdict from this attempt. This run's one automatic retry already ran; re-request the review if it is still needed.${retryRun} [Workflow logs](${runUrl})`,
+              spent: `Codjiflo Reviewer lost its runner mid-review and found no verdict from this attempt. This run's one automatic retry was already used, so none was queued now; re-request the review if no result arrives.${retryRun} [Workflow logs](${runUrl})`,
               none: `Codjiflo Reviewer job ended with status **${process.env.REVIEW_JOB_RESULT}**. The review runner did not confirm a failure report for this attempt. A runner interruption can prevent logs and post-job steps from being uploaded. Check existing PR reviews before retrying: this notification does not establish whether a verdict was submitted. [Workflow logs](${runUrl})`,
             }[retry.state];
             await github.rest.issues.createComment({

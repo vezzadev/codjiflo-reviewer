@@ -24,10 +24,11 @@ async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body =
       return response.end('{"id":1}');
     }
     const found = {
-      [`/repos/${repo}/issues/comments/6451172747`]: { id: 6451172747, user: { login: author, type }, body, issue_url: `https://api.github.example/repos/${repo}/issues/2025` },
+      [`/repos/${repo}/issues/comments/6451172747`]: { id: 6451172747, created_at: '2026-11-17T03:20:00Z', user: { login: author, type }, body, issue_url: `https://api.github.example/repos/${repo}/issues/2025` },
       [`/repos/${repo}/issues/2025`]: { number: 2025, ...(pr ? { pull_request: {} } : {}) },
       [`/repos/${repo}`]: visibility,
-      [`/repos/${repo}/issues/2025/comments?per_page=100&page=1`]: prComments,
+      // Only comments updated since the dispatched one can be newer; null answers 404.
+      [`/repos/${repo}/issues/2025/comments?since=2026-11-17T03%3A20%3A00Z&per_page=100&page=1`]: prComments,
     }[request.url];
     if (!found) response.statusCode = 404;
     response.end(JSON.stringify(found ?? { message: 'Not Found' }));
@@ -127,6 +128,8 @@ test('a lost-runner retry gate yields only to a newer comment that would start a
     ['prose, quotes, strangers, bots and older commands', { redispatchOf: '44009512925', prComments: ignored }, 'allowed=true'],
     ['a newer approved command', { redispatchOf: '44009512925', prComments: [...ignored, newer] }, 'allowed=false'],
     ['an ordinary mention ignores newer commands', { prComments: [newer] }, 'allowed=true'],
+    // The PR was already told a retry is queued; a lookup failure must not drop it silently.
+    ['a failed newer-comment lookup lets the retry proceed', { redispatchOf: '44009512925', prComments: null }, 'allowed=true'],
   ]) await t.test(name, async () => {
     const g = await gate(options);
     try {
