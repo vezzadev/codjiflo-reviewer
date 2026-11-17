@@ -8,7 +8,7 @@ const condition = reporter.split('\n').find(line => line.trim().startsWith('if:'
 const shouldReport = new Function('always', 'needs', `return ${condition};`);
 const script = reporter.split('          script: |\n')[1].split('\n').map(line => line.slice(12)).join('\n');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const execute = new AsyncFunction('github', 'context', 'process', script);
+const execute = new AsyncFunction('github', 'context', 'process', 'getOctokit', 'core', script);
 // The run lives in the bot repository; the PR lives in the reviewed one.
 const context = {
   serverUrl: 'https://github.example', repo: { owner: 'bot-owner', repo: 'bot-repo' }, runId: 40601533783,
@@ -16,10 +16,24 @@ const context = {
 const runUrl = `${context.serverUrl}/bot-owner/bot-repo/actions/runs/${context.runId}`;
 const marker = `<!-- codjiflo-workflow:${context.runId}:2 -->`;
 const bot = { type: 'Bot' };
+const concluded = [{ name: 'review', steps: [
+  { name: 'Review pull request', status: 'completed', conclusion: 'failure' },
+  { name: 'Retain review result', status: 'completed', conclusion: 'success' },
+] }];
+// Shape GitHub reported for job 133792911342 after its runner went away (issue #51).
+const lost = [{ name: 'review', steps: [
+  { name: 'Review pull request', status: 'in_progress', conclusion: null },
+  { name: 'Retain review result', status: 'pending', conclusion: null },
+] }, { name: 'report_failure', steps: [{ name: 'Report unsuccessful review job', status: 'in_progress', conclusion: null }] }];
 
-async function report({ comments = [], reviews = [], result = 'failure', attempt = '2' } = {}) {
+async function report({
+  comments = [], reviews = [], result = 'failure', attempt = '2', jobs = concluded, redispatchOf = '',
+  mentions = [], runs = [], failing = '',
+} = {}) {
   const posts = [];
   const reads = [];
+  const dispatches = [];
+  const warnings = [];
   const listComments = () => {};
   const listReviews = () => {};
   const github = {
@@ -34,6 +48,10 @@ async function report({ comments = [], reviews = [], result = 'failure', attempt
         return reviews;
       }
       assert.equal(method, listComments);
+      if (!request.since) {
+        assert.deepEqual(request, { owner: 'owner', repo: 'repo', issue_number: 1995, per_page: 100 });
+        return mentions;
+      }
       assert.deepEqual(request, {
         owner: 'owner', repo: 'repo', issue_number: 1995,
         since: '2026-10-29T01:00:00Z', per_page: 100,
@@ -41,19 +59,61 @@ async function report({ comments = [], reviews = [], result = 'failure', attempt
       return comments;
     },
   };
+  const fail = name => {
+    if (failing === name) throw new Error(`${name}: HTTP 422`);
+  };
+  const listJobsForWorkflowRunAttempt = () => {};
+  const listWorkflowRuns = () => {};
+  const getOctokit = token => {
+    assert.equal(token, 'actions-token');
+    return {
+      rest: { actions: {
+        listJobsForWorkflowRunAttempt,
+        listWorkflowRuns,
+        createWorkflowDispatch: async request => {
+          fail('createWorkflowDispatch');
+          // The comment must not claim a retry that GitHub refused.
+          assert.equal(posts.length, 0);
+          dispatches.push(request);
+        },
+      } },
+      paginate: async (method, request) => {
+        if (method === listWorkflowRuns) {
+          fail('listWorkflowRuns');
+          assert.deepEqual(request, {
+            owner: 'bot-owner', repo: 'bot-repo', workflow_id: 'review.yml', event: 'workflow_dispatch',
+            created: '>=2026-10-29T00:59:00Z', per_page: 100,
+          });
+          return runs;
+        }
+        assert.equal(method, listJobsForWorkflowRunAttempt);
+        fail('listJobsForWorkflowRunAttempt');
+        assert.deepEqual(request, {
+          owner: 'bot-owner', repo: 'bot-repo', run_id: 40601533783, attempt_number: Number(attempt), per_page: 100,
+        });
+        return jobs;
+      },
+    };
+  };
+  const core = { warning: message => { warnings.push(message); } };
   await execute(github, context, { env: {
     REVIEW_JOB_RESULT: result, GITHUB_RUN_ATTEMPT: attempt,
     TARGET_REPOSITORY: 'owner/repo', TARGET_PR: '1995', ATTEMPT_STARTED_AT: '2026-10-29T01:00:00Z',
-  } });
-  return { posts, reads };
+    RUN_CREATED_AT: '2026-10-29T00:59:00Z',
+    COMMENT_ID: '6936926881', REDISPATCH_OF: redispatchOf, WORKFLOW_REF: 'main', ACTIONS_TOKEN: 'actions-token',
+  } }, getOctokit, core);
+  return { posts, reads, dispatches, warnings };
 }
 
 test('terminal reporter runs independently on hosted runner after authorized failure/cancellation', () => {
   assert.match(reporter, /needs: \[gate, review\]/);
   assert.match(reporter, /runs-on: ubuntu-latest/);
-  assert.match(reporter, /actions: read/);
+  assert.match(reporter, /actions: write/);
   assert.equal(Object.hasOwn(context, 'runAttempt'), false);
   assert.doesNotMatch(reporter, /actions\/checkout|node bin\/|steps\.review/);
+  // The Actions API names a job without `name:` by its id; lost-runner detection matches it.
+  const reviewJob = workflow.slice(workflow.indexOf('\n  review:\n'), workflow.indexOf('\n  report_failure:\n'));
+  assert.doesNotMatch(reviewJob, /^ {4}(?:name|strategy):/m);
   for (const allowed of ['true', 'false', '']) {
     for (const result of ['failure', 'cancelled', 'success', 'skipped']) {
       assert.equal(shouldReport(() => true, { gate: { outputs: { allowed } }, review: { result } }),
@@ -155,3 +215,71 @@ test('an unread attempt start time fails before API requests instead of widening
     /ATTEMPT_STARTED_AT must be a timestamp/,
   );
 });
+
+test('a runner lost mid-review re-dispatches the same comment once before reporting the retry', async () => {
+  const { posts, dispatches } = await report({ jobs: lost });
+  assert.deepEqual(dispatches, [{
+    owner: 'bot-owner', repo: 'bot-repo', workflow_id: 'review.yml', ref: 'main',
+    inputs: { repository: 'owner/repo', 'comment-id': '6936926881', 'redispatch-of': '40601533783' },
+  }]);
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].body, /lost its runner mid-review/);
+  assert.ok(posts[0].body.includes(runUrl));
+  assert.match(posts[0].body, /codjiflo-job-failure:40601533783:2/);
+  // The posted notice marks this attempt handled, so a duplicate reporter pass cannot dispatch again.
+  const rerun = await report({ jobs: lost, comments: [{ user: bot, body: posts[0].body }] });
+  assert.deepEqual([rerun.posts, rerun.dispatches], [[], []]);
+});
+
+test('lost-runner retry is skipped when the attempt already published a verdict', async () => {
+  const { posts, dispatches } = await report({ jobs: lost, reviews: [{ user: bot, state: 'APPROVED', body: marker }] });
+  assert.deepEqual([posts, dispatches], [[], []]);
+});
+
+const human = { type: 'User' };
+for (const [label, options] of [
+  ['a retry whose runner is lost again', { jobs: lost, redispatchOf: '40601533700' }],
+  ['a failure the runner concluded', { jobs: concluded }],
+  ['a cancellation', { jobs: lost, result: 'cancelled' }],
+  ['a lost runner superseded by a newer mention', {
+    jobs: lost, mentions: [{ id: 6936926881, user: human, body: '@codjiflo review' }, { id: 6936926900, user: human, body: '@Codjiflo review full' }],
+  }],
+]) {
+  test(`${label} reports without re-dispatching`, async () => {
+    const { posts, dispatches, warnings } = await report(options);
+    assert.equal(dispatches.length, 0);
+    assert.deepEqual(warnings, []);
+    assert.equal(posts.length, 1);
+    assert.match(posts[0].body, /does not establish whether a verdict was submitted/);
+  });
+}
+
+test('older mentions, bot comments and non-mentions do not block the retry', async () => {
+  const { dispatches } = await report({ jobs: lost, mentions: [
+    { id: 6936926800, user: human, body: '@codjiflo review' },
+    { id: 6936926900, user: bot, body: 'Codjiflo Reviewer starting @codjiflo' },
+    { id: 6936926901, user: human, body: 'thanks!' },
+  ] });
+  assert.equal(dispatches.length, 1);
+});
+
+test('a later attempt of the run reports the existing retry instead of dispatching another', async () => {
+  const { posts, dispatches } = await report({ attempt: '3', jobs: lost, runs: [
+    { display_title: 'Review owner/repo comment 6936926881 (retry of run 40601533700)' },
+    { display_title: 'Review owner/repo comment 6936926881 (retry of run 40601533783)' },
+  ] });
+  assert.equal(dispatches.length, 0);
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].body, /queued again automatically/);
+  assert.match(posts[0].body, /codjiflo-job-failure:40601533783:3/);
+});
+
+for (const failing of ['listJobsForWorkflowRunAttempt', 'listWorkflowRuns', 'createWorkflowDispatch']) {
+  test(`a ${failing} error still posts the terminal notice`, async () => {
+    const { posts, dispatches, warnings } = await report({ jobs: lost, failing });
+    assert.equal(dispatches.length, 0);
+    assert.deepEqual(warnings, [`Lost-runner retry skipped: ${failing}: HTTP 422`]);
+    assert.equal(posts.length, 1);
+    assert.match(posts[0].body, /does not establish whether a verdict was submitted/);
+  });
+}
