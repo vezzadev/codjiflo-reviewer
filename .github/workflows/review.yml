@@ -67,6 +67,7 @@ jobs:
           COMMENT_ID: ${{ inputs.comment-id }}
           GITHUB_TOKEN: ${{ steps.app.outputs.token }}
           CODJIFLO_APPROVED_USERS: ${{ vars.CODJIFLO_APPROVED_USERS }}
+          CODJIFLO_REDISPATCH_OF: ${{ inputs.redispatch-of }}
   review:
     needs: gate
     if: needs.gate.outputs.allowed == 'true'
@@ -187,8 +188,8 @@ jobs:
             if (!Number.isSafeInteger(runAttempt) || runAttempt < 1) {
               throw new Error('GITHUB_RUN_ATTEMPT must be a positive safe integer');
             }
-            if (Number.isNaN(Date.parse(process.env.ATTEMPT_STARTED_AT))) {
-              throw new Error('ATTEMPT_STARTED_AT must be a timestamp');
+            for (const name of ['ATTEMPT_STARTED_AT', 'RUN_CREATED_AT']) {
+              if (Number.isNaN(Date.parse(process.env[name]))) throw new Error(`${name} must be a timestamp`);
             }
             // The run lives in this repository; the PR lives in the reviewed one.
             const [owner, repo] = process.env.TARGET_REPOSITORY.split('/');
@@ -202,19 +203,22 @@ jobs:
             if (reviews.some(review => review.user?.type === 'Bot' &&
               ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'].includes(review.state) &&
               review.body?.includes(workflowMarker))) return;
+            // Since run creation, not attempt start: retry notices of earlier attempts count too.
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: number,
-              since: process.env.ATTEMPT_STARTED_AT, per_page: 100,
+              since: process.env.RUN_CREATED_AT, per_page: 100,
             });
+            const attemptStartedAt = Date.parse(process.env.ATTEMPT_STARTED_AT);
             // An ordinary CLI/setup failure already has a useful diagnostic. If
             // the runner disappeared or its POST failed, this hosted job fills in.
-            const reported = comments.some(comment => comment.user?.type === 'Bot' && (
+            const reported = comments.some(comment => comment.user?.type === 'Bot' && Date.parse(comment.created_at) >= attemptStartedAt && (
               comment.body?.includes(marker) ||
               (comment.body?.includes(`[Workflow logs](${runUrl})`) &&
                 /Codjiflo Reviewer (?:failed;|preparation failed;)/.test(comment.body))
             ));
             if (reported) return;
-            // Resolves 'queued' when this run's review is (or already was) retried.
+            const retryMarker = `<!-- codjiflo-retry:${context.runId} -->`;
+            // 'queued': a fresh or still-pending retry; 'spent': this run's one retry already ran.
             const retryLostReview = async () => {
               // The App token only reaches the reviewed repository; this run's
               // jobs and dispatches live here.
@@ -226,20 +230,18 @@ jobs:
               // A runner that vanishes mid-step leaves that step in_progress on a
               // completed job; failures the runner observes conclude every step.
               // The job has no `name:`, so the API names it by its id.
-              if (!jobs.some(job => job.name === 'review' && job.steps?.some(step => step.status === 'in_progress'))) return 'none';
-              // A newer mention supersedes this generation, and a retry joining the
-              // PR's concurrency group would replace that mention's pending run.
-              const mentions = await github.paginate(github.rest.issues.listComments, {
-                owner, repo, issue_number: number, per_page: 100,
-              });
-              if (mentions.some(comment => comment.id > Number(process.env.COMMENT_ID) &&
-                comment.user?.type !== 'Bot' && /@codjiflo/i.test(comment.body ?? ''))) return 'none';
-              // Once per run across reporter attempts: the retry's run-name names this run.
+              if (!jobs.some(job => job.name === 'review' && job.steps?.some(step => step.status === 'in_progress'))) return { state: 'none' };
+              // Once per run across attempts. An earlier attempt's retry was created
+              // before this attempt started; its run-name names this run.
               const runs = await actions.paginate(actions.rest.actions.listWorkflowRuns, {
                 ...here, workflow_id: 'review.yml', event: 'workflow_dispatch',
-                created: `>=${process.env.RUN_CREATED_AT}`, per_page: 100,
+                created: `${process.env.RUN_CREATED_AT}..${process.env.ATTEMPT_STARTED_AT}`, per_page: 100,
               });
-              if (runs.some(run => run.display_title?.endsWith(`(retry of run ${context.runId})`))) return 'queued';
+              const earlier = runs.find(run => run.display_title?.endsWith(`(retry of run ${context.runId})`));
+              if (earlier) return { state: earlier.status === 'completed' ? 'spent' : 'queued', url: earlier.html_url };
+              if (comments.some(comment => comment.user?.type === 'Bot' && comment.body?.includes(retryMarker))) return { state: 'spent' };
+              // A newer review request supersedes this generation; the retry's gate
+              // checks that with the command grammar before joining the PR's queue.
               await actions.rest.actions.createWorkflowDispatch({
                 ...here, workflow_id: 'review.yml', ref: process.env.WORKFLOW_REF,
                 inputs: {
@@ -248,21 +250,25 @@ jobs:
                   'redispatch-of': String(context.runId),
                 },
               });
-              return 'queued';
+              return { state: 'queued' };
             };
             // Only a failure can be a lost runner; a retry that loses its runner only reports.
-            let retry = 'none';
+            let retry = { state: 'none' };
             if (process.env.REVIEW_JOB_RESULT === 'failure' && !process.env.REDISPATCH_OF) {
               // The PR notice is this job's contract: a retry error must not suppress it.
               retry = await retryLostReview().catch(error => {
                 core.warning(`Lost-runner retry skipped: ${error.message}`);
-                return 'none';
+                return { state: 'none' };
               });
             }
+            const retryRun = retry.url ? ` [Retry run](${retry.url})` : '';
+            const body = {
+              queued: `Codjiflo Reviewer lost its runner mid-review and found no verdict from this attempt. The review was queued again automatically (one retry per run); its result will follow unless a newer review request supersedes it.${retryRun} [Workflow logs](${runUrl})\n\n${retryMarker}`,
+              spent: `Codjiflo Reviewer lost its runner mid-review and found no verdict from this attempt. This run's one automatic retry already ran; re-request the review if it is still needed.${retryRun} [Workflow logs](${runUrl})`,
+              none: `Codjiflo Reviewer job ended with status **${process.env.REVIEW_JOB_RESULT}**. The review runner did not confirm a failure report for this attempt. A runner interruption can prevent logs and post-job steps from being uploaded. Check existing PR reviews before retrying: this notification does not establish whether a verdict was submitted. [Workflow logs](${runUrl})`,
+            }[retry.state];
             await github.rest.issues.createComment({
               owner, repo,
               issue_number: number,
-              body: retry === 'queued'
-                ? `Codjiflo Reviewer lost its runner mid-review and found no verdict from this attempt. The review was queued again automatically (one retry); its result will follow. [Workflow logs](${runUrl})\n\n${marker}`
-                : `Codjiflo Reviewer job ended with status **${process.env.REVIEW_JOB_RESULT}**. The review runner did not confirm a failure report for this attempt. A runner interruption can prevent logs and post-job steps from being uploaded. Check existing PR reviews before retrying: this notification does not establish whether a verdict was submitted. [Workflow logs](${runUrl})\n\n${marker}`,
+              body: `${body}\n\n${marker}`,
             });

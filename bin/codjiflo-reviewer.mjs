@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile, appendFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
-import { COMMAND_SYNTAX, commentEvent, eventDecision, isApproved, normalizePreset, PRESETS } from '../src/commands.mjs';
+import { COMMAND_SYNTAX, commentEvent, eventDecision, isApproved, normalizePreset, PRESETS, supersedingComment } from '../src/commands.mjs';
 import { GitHub } from '../src/github.mjs';
 import { review } from '../src/review.mjs';
 import { publishReview, reportPublicationFailure } from '../src/publication.mjs';
@@ -48,7 +48,13 @@ try {
     if (values.comment) {
       if (values.pr || values.requester || values.preset || values.full) throw new Error('--comment cannot be combined with local review options');
       const event = await commentEvent(github, values.repo, values.comment);
-      const decision = eventDecision(event, process.env.CODJIFLO_APPROVED_USERS);
+      let decision = eventDecision(event, process.env.CODJIFLO_APPROVED_USERS);
+      // Only the gate of a lost-runner retry looks for newer requests; ordinary mentions never wait on one.
+      if (values.gate && process.env.CODJIFLO_REDISPATCH_OF && decision.request) {
+        const comments = await github.list(`/repos/${values.repo}/issues/${event.issue.number}/comments`);
+        const newer = supersedingComment(event, comments, process.env.CODJIFLO_APPROVED_USERS);
+        if (newer) decision = { reason: `superseded-by-${newer.id}` };
+      }
       if (values.gate) await reportGate(event, decision, github);
       // An approved author who mistyped a command gets the answer where they asked, not only in this run's log.
       // Best effort: the gate must still fail with the command error. Inline code keeps the syntax from mentioning anyone.

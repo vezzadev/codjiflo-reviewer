@@ -118,3 +118,10 @@ export function eventDecision(event, approved) {
   return { reason: 'approved', request: { ...command, repo: event.repository.full_name, number: event.issue.number, requester: author.login } };
 }
 
+// A lost-runner retry re-runs an older generation. A later comment that would
+// itself start a review supersedes it; prose mentions and denied authors do not.
+export function supersedingComment(event, comments, approved) {
+  return comments.find(comment => comment.id > event.comment.id &&
+    eventDecision({ ...event, comment }, approved).reason === 'approved') ?? null;
+}
+

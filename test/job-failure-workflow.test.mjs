@@ -28,7 +28,7 @@ const lost = [{ name: 'review', steps: [
 
 async function report({
   comments = [], reviews = [], result = 'failure', attempt = '2', jobs = concluded, redispatchOf = '',
-  mentions = [], runs = [], failing = '',
+  runs = [], failing = '',
 } = {}) {
   const posts = [];
   const reads = [];
@@ -48,15 +48,12 @@ async function report({
         return reviews;
       }
       assert.equal(method, listComments);
-      if (!request.since) {
-        assert.deepEqual(request, { owner: 'owner', repo: 'repo', issue_number: 1995, per_page: 100 });
-        return mentions;
-      }
       assert.deepEqual(request, {
         owner: 'owner', repo: 'repo', issue_number: 1995,
-        since: '2026-10-29T01:00:00Z', per_page: 100,
+        since: '2026-10-29T00:59:00Z', per_page: 100,
       });
-      return comments;
+      // Fixtures without a timestamp were posted during this attempt.
+      return comments.map(comment => ({ created_at: '2026-10-29T01:05:00Z', ...comment }));
     },
   };
   const fail = name => {
@@ -82,7 +79,7 @@ async function report({
           fail('listWorkflowRuns');
           assert.deepEqual(request, {
             owner: 'bot-owner', repo: 'bot-repo', workflow_id: 'review.yml', event: 'workflow_dispatch',
-            created: '>=2026-10-29T00:59:00Z', per_page: 100,
+            created: '2026-10-29T00:59:00Z..2026-10-29T01:00:00Z', per_page: 100,
           });
           return runs;
         }
@@ -134,7 +131,7 @@ for (const result of ['failure', 'cancelled']) {
     assert.match(posts[0].body, /codjiflo-job-failure:40601533783:2/);
     assert.deepEqual(reads, [
       { owner: 'owner', repo: 'repo', pull_number: 1995, per_page: 100 },
-      { owner: 'owner', repo: 'repo', issue_number: 1995, since: '2026-10-29T01:00:00Z', per_page: 100 },
+      { owner: 'owner', repo: 'repo', issue_number: 1995, since: '2026-10-29T00:59:00Z', per_page: 100 },
     ]);
   });
 }
@@ -206,14 +203,24 @@ for (const attempt of [undefined, '', '0', '-1', '1.5', 'not-an-attempt', '90071
   });
 }
 
-test('an unread attempt start time fails before API requests instead of widening reconciliation', async () => {
-  const github = new Proxy({}, {
-    get() { assert.fail('a missing start time must fail before accessing the GitHub client'); },
+for (const name of ['ATTEMPT_STARTED_AT', 'RUN_CREATED_AT']) {
+  test(`an unread ${name} fails before API requests instead of widening reconciliation`, async () => {
+    const github = new Proxy({}, {
+      get() { assert.fail('a missing timestamp must fail before accessing the GitHub client'); },
+    });
+    const env = {
+      REVIEW_JOB_RESULT: 'failure', GITHUB_RUN_ATTEMPT: '2', TARGET_REPOSITORY: 'owner/repo', TARGET_PR: '1995',
+      ATTEMPT_STARTED_AT: '2026-10-29T01:00:00Z', RUN_CREATED_AT: '2026-10-29T00:59:00Z', [name]: '',
+    };
+    await assert.rejects(execute(github, context, { env }), new RegExp(`${name} must be a timestamp`));
   });
-  await assert.rejects(
-    execute(github, context, { env: { REVIEW_JOB_RESULT: 'failure', GITHUB_RUN_ATTEMPT: '2', TARGET_REPOSITORY: 'owner/repo', TARGET_PR: '1995', ATTEMPT_STARTED_AT: '' } }),
-    /ATTEMPT_STARTED_AT must be a timestamp/,
-  );
+}
+
+test('failure comments from earlier attempts do not suppress this attempt notice', async () => {
+  const { posts } = await report({ comments: [
+    { user: bot, created_at: '2026-10-29T00:59:30Z', body: `Codjiflo Reviewer failed; [Workflow logs](${runUrl})` },
+  ] });
+  assert.equal(posts.length, 1);
 });
 
 test('a runner lost mid-review re-dispatches the same comment once before reporting the retry', async () => {
@@ -226,6 +233,7 @@ test('a runner lost mid-review re-dispatches the same comment once before report
   assert.match(posts[0].body, /lost its runner mid-review/);
   assert.ok(posts[0].body.includes(runUrl));
   assert.match(posts[0].body, /codjiflo-job-failure:40601533783:2/);
+  assert.match(posts[0].body, /codjiflo-retry:40601533783/);
   // The posted notice marks this attempt handled, so a duplicate reporter pass cannot dispatch again.
   const rerun = await report({ jobs: lost, comments: [{ user: bot, body: posts[0].body }] });
   assert.deepEqual([rerun.posts, rerun.dispatches], [[], []]);
@@ -236,14 +244,10 @@ test('lost-runner retry is skipped when the attempt already published a verdict'
   assert.deepEqual([posts, dispatches], [[], []]);
 });
 
-const human = { type: 'User' };
 for (const [label, options] of [
   ['a retry whose runner is lost again', { jobs: lost, redispatchOf: '40601533700' }],
   ['a failure the runner concluded', { jobs: concluded }],
   ['a cancellation', { jobs: lost, result: 'cancelled' }],
-  ['a lost runner superseded by a newer mention', {
-    jobs: lost, mentions: [{ id: 6936926881, user: human, body: '@codjiflo review' }, { id: 6936926900, user: human, body: '@Codjiflo review full' }],
-  }],
 ]) {
   test(`${label} reports without re-dispatching`, async () => {
     const { posts, dispatches, warnings } = await report(options);
@@ -254,25 +258,43 @@ for (const [label, options] of [
   });
 }
 
-test('older mentions, bot comments and non-mentions do not block the retry', async () => {
-  const { dispatches } = await report({ jobs: lost, mentions: [
-    { id: 6936926800, user: human, body: '@codjiflo review' },
-    { id: 6936926900, user: bot, body: 'Codjiflo Reviewer starting @codjiflo' },
-    { id: 6936926901, user: human, body: 'thanks!' },
+test("another run's retry does not count as this run's", async () => {
+  const { dispatches } = await report({ jobs: lost, runs: [
+    { status: 'queued', display_title: 'Review owner/repo comment 6936926881 (retry of run 40601533700)' },
+    { status: 'queued', display_title: 'Review owner/repo comment 6936926882 (retry of run 406015337830)' },
   ] });
   assert.equal(dispatches.length, 1);
 });
 
-test('a later attempt of the run reports the existing retry instead of dispatching another', async () => {
+const retryUrl = 'https://github.example/bot-owner/bot-repo/actions/runs/40601533900';
+test('a later attempt points at the still-pending retry instead of dispatching another', async () => {
   const { posts, dispatches } = await report({ attempt: '3', jobs: lost, runs: [
-    { display_title: 'Review owner/repo comment 6936926881 (retry of run 40601533700)' },
-    { display_title: 'Review owner/repo comment 6936926881 (retry of run 40601533783)' },
+    { status: 'queued', html_url: retryUrl, display_title: 'Review owner/repo comment 6936926881 (retry of run 40601533783)' },
   ] });
   assert.equal(dispatches.length, 0);
   assert.equal(posts.length, 1);
   assert.match(posts[0].body, /queued again automatically/);
+  assert.ok(posts[0].body.includes(`[Retry run](${retryUrl})`));
   assert.match(posts[0].body, /codjiflo-job-failure:40601533783:3/);
 });
+
+for (const [label, options] of [
+  ['a completed retry run', { runs: [
+    { status: 'completed', html_url: retryUrl, display_title: 'Review owner/repo comment 6936926881 (retry of run 40601533783)' },
+  ] }],
+  // The dispatch run list is capped; the earlier attempt's notice still records the retry.
+  ['an earlier retry notice', { comments: [
+    { user: bot, created_at: '2026-10-29T00:59:30Z', body: '<!-- codjiflo-retry:40601533783 -->\n\n<!-- codjiflo-job-failure:40601533783:2 -->' },
+  ] }],
+]) {
+  test(`a later attempt after ${label} does not promise another result`, async () => {
+    const { posts, dispatches } = await report({ attempt: '3', jobs: lost, ...options });
+    assert.equal(dispatches.length, 0);
+    assert.equal(posts.length, 1);
+    assert.match(posts[0].body, /one automatic retry already ran/);
+    assert.doesNotMatch(posts[0].body, /will follow|codjiflo-retry:/);
+  });
+}
 
 for (const failing of ['listJobsForWorkflowRunAttempt', 'listWorkflowRuns', 'createWorkflowDispatch']) {
   test(`a ${failing} error still posts the terminal notice`, async () => {
