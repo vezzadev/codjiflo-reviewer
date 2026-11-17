@@ -51,7 +51,10 @@ try {
       let decision = eventDecision(event, process.env.CODJIFLO_APPROVED_USERS);
       // Only the gate of a lost-runner retry looks for newer requests; ordinary mentions never wait on one.
       if (values.gate && process.env.CODJIFLO_REDISPATCH_OF && decision.request) {
-        const comments = await github.list(`/repos/${values.repo}/issues/${event.issue.number}/comments`);
+        // `since` filters on updated_at, which is never before created_at: every newer comment is kept.
+        // Fail open: the PR was told this retry is queued, and a superseded one is only withheld at publication.
+        const comments = await github.list(`/repos/${values.repo}/issues/${event.issue.number}/comments?since=${encodeURIComponent(event.comment.created_at)}`)
+          .catch(error => { console.warn(`::warning::Could not check for newer review requests; retrying anyway: ${error.message}`); return []; });
         const newer = supersedingComment(event, comments, process.env.CODJIFLO_APPROVED_USERS);
         if (newer) decision = { reason: `superseded-by-${newer.id}` };
       }

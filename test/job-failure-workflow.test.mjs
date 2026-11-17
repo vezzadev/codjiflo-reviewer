@@ -291,7 +291,7 @@ for (const [label, options] of [
     const { posts, dispatches } = await report({ attempt: '3', jobs: lost, ...options });
     assert.equal(dispatches.length, 0);
     assert.equal(posts.length, 1);
-    assert.match(posts[0].body, /one automatic retry already ran/);
+    assert.match(posts[0].body, /one automatic retry was already used, so none was queued now/);
     assert.doesNotMatch(posts[0].body, /will follow|codjiflo-retry:/);
   });
 }
