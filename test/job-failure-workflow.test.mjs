@@ -8,7 +8,7 @@ const condition = reporter.split('\n').find(line => line.trim().startsWith('if:'
 const shouldReport = new Function('always', 'needs', `return ${condition};`);
 const script = reporter.split('          script: |\n')[1].split('\n').map(line => line.slice(12)).join('\n');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const execute = new AsyncFunction('github', 'context', 'process', script);
+const execute = new AsyncFunction('github', 'context', 'process', 'getOctokit', script);
 // The run lives in the bot repository; the PR lives in the reviewed one.
 const context = {
   serverUrl: 'https://github.example', repo: { owner: 'bot-owner', repo: 'bot-repo' }, runId: 40601533783,
@@ -16,10 +16,22 @@ const context = {
 const runUrl = `${context.serverUrl}/bot-owner/bot-repo/actions/runs/${context.runId}`;
 const marker = `<!-- codjiflo-workflow:${context.runId}:2 -->`;
 const bot = { type: 'Bot' };
+const concluded = [{ name: 'review', steps: [
+  { name: 'Review pull request', status: 'completed', conclusion: 'failure' },
+  { name: 'Retain review result', status: 'completed', conclusion: 'success' },
+] }];
+// Shape GitHub reported for job 133792911342 after its runner went away (issue #51).
+const lost = [{ name: 'review', steps: [
+  { name: 'Review pull request', status: 'in_progress', conclusion: null },
+  { name: 'Retain review result', status: 'pending', conclusion: null },
+] }, { name: 'report_failure', steps: [{ name: 'Report unsuccessful review job', status: 'in_progress', conclusion: null }] }];
 
-async function report({ comments = [], reviews = [], result = 'failure', attempt = '2' } = {}) {
+async function report({
+  comments = [], reviews = [], result = 'failure', attempt = '2', jobs = concluded, redispatchOf = '',
+} = {}) {
   const posts = [];
   const reads = [];
+  const dispatches = [];
   const listComments = () => {};
   const listReviews = () => {};
   const github = {
@@ -41,17 +53,39 @@ async function report({ comments = [], reviews = [], result = 'failure', attempt
       return comments;
     },
   };
+  const listJobsForWorkflowRunAttempt = () => {};
+  const getOctokit = token => {
+    assert.equal(token, 'actions-token');
+    return {
+      rest: { actions: {
+        listJobsForWorkflowRunAttempt,
+        createWorkflowDispatch: async request => {
+          // The comment must not claim a retry that GitHub refused.
+          assert.equal(posts.length, 0);
+          dispatches.push(request);
+        },
+      } },
+      paginate: async (method, request) => {
+        assert.equal(method, listJobsForWorkflowRunAttempt);
+        assert.deepEqual(request, {
+          owner: 'bot-owner', repo: 'bot-repo', run_id: 40601533783, attempt_number: Number(attempt), per_page: 100,
+        });
+        return jobs;
+      },
+    };
+  };
   await execute(github, context, { env: {
     REVIEW_JOB_RESULT: result, GITHUB_RUN_ATTEMPT: attempt,
     TARGET_REPOSITORY: 'owner/repo', TARGET_PR: '1995', ATTEMPT_STARTED_AT: '2026-10-29T01:00:00Z',
-  } });
-  return { posts, reads };
+    COMMENT_ID: '6936926881', REDISPATCH_OF: redispatchOf, WORKFLOW_REF: 'main', ACTIONS_TOKEN: 'actions-token',
+  } }, getOctokit);
+  return { posts, reads, dispatches };
 }
 
 test('terminal reporter runs independently on hosted runner after authorized failure/cancellation', () => {
   assert.match(reporter, /needs: \[gate, review\]/);
   assert.match(reporter, /runs-on: ubuntu-latest/);
-  assert.match(reporter, /actions: read/);
+  assert.match(reporter, /actions: write/);
   assert.equal(Object.hasOwn(context, 'runAttempt'), false);
   assert.doesNotMatch(reporter, /actions\/checkout|node bin\/|steps\.review/);
   for (const allowed of ['true', 'false', '']) {
@@ -155,3 +189,36 @@ test('an unread attempt start time fails before API requests instead of widening
     /ATTEMPT_STARTED_AT must be a timestamp/,
   );
 });
+
+test('a runner lost mid-review re-dispatches the same comment once before reporting the retry', async () => {
+  const { posts, dispatches } = await report({ jobs: lost });
+  assert.deepEqual(dispatches, [{
+    owner: 'bot-owner', repo: 'bot-repo', workflow_id: 'review.yml', ref: 'main',
+    inputs: { repository: 'owner/repo', 'comment-id': '6936926881', 'redispatch-of': '40601533783' },
+  }]);
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].body, /lost its runner mid-review/);
+  assert.ok(posts[0].body.includes(runUrl));
+  assert.match(posts[0].body, /codjiflo-job-failure:40601533783:2/);
+  // The posted notice marks this attempt handled, so a duplicate reporter pass cannot dispatch again.
+  const rerun = await report({ jobs: lost, comments: [{ user: bot, body: posts[0].body }] });
+  assert.deepEqual([rerun.posts, rerun.dispatches], [[], []]);
+});
+
+test('lost-runner retry is skipped when the attempt already published a verdict', async () => {
+  const { posts, dispatches } = await report({ jobs: lost, reviews: [{ user: bot, state: 'APPROVED', body: marker }] });
+  assert.deepEqual([posts, dispatches], [[], []]);
+});
+
+for (const [label, options] of [
+  ['a retry whose runner is lost again', { jobs: lost, redispatchOf: '40601533700' }],
+  ['a failure the runner concluded', { jobs: concluded }],
+  ['a cancellation', { jobs: lost, result: 'cancelled' }],
+]) {
+  test(`${label} reports without re-dispatching`, async () => {
+    const { posts, dispatches } = await report(options);
+    assert.equal(dispatches.length, 0);
+    assert.equal(posts.length, 1);
+    assert.match(posts[0].body, /does not establish whether a verdict was submitted/);
+  });
+}

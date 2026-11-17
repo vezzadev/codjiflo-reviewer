@@ -1,5 +1,5 @@
 name: Codjiflo Reviewer
-run-name: Review ${{ inputs.repository }} comment ${{ inputs.comment-id }}
+run-name: Review ${{ inputs.repository }} comment ${{ inputs.comment-id }}${{ inputs.redispatch-of && format(' (retry of run {0})', inputs.redispatch-of) || '' }}
 # The webhook relay dispatches one run per mention in any repository the App
 # is installed on. Inputs only locate the comment; the gate re-reads it.
 on:
@@ -13,6 +13,11 @@ on:
         description: Issue comment ID of the review mention
         type: string
         required: true
+      redispatch-of:
+        description: Run ID whose review runner was lost; set only by the automatic retry
+        type: string
+        required: false
+        default: ''
 permissions:
   actions: read
   contents: read
@@ -98,7 +103,7 @@ jobs:
         run: ${{ needs.gate.outputs.prepare-command }}
       - name: Report preparation failure
         if: failure() && steps.prepare.outcome == 'failure'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           TARGET_PR: ${{ needs.gate.outputs.number }}
@@ -144,7 +149,8 @@ jobs:
     if: always() && needs.gate.outputs.allowed == 'true' && (needs.review.result == 'failure' || needs.review.result == 'cancelled')
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      # Read this attempt's job steps; dispatch one retry after a lost runner.
+      actions: write
     steps:
       - name: Mint GitHub App installation token
         id: app
@@ -162,16 +168,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: echo "started-at=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" --jq .run_started_at)" >> "$GITHUB_OUTPUT"
       - name: Report unsuccessful review job
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           REVIEW_JOB_RESULT: ${{ needs.review.result }}
           TARGET_REPOSITORY: ${{ inputs.repository }}
           TARGET_PR: ${{ needs.gate.outputs.number }}
+          COMMENT_ID: ${{ inputs.comment-id }}
+          REDISPATCH_OF: ${{ inputs.redispatch-of }}
+          WORKFLOW_REF: ${{ github.ref_name }}
           ATTEMPT_STARTED_AT: ${{ steps.attempt.outputs.started-at }}
+          ACTIONS_TOKEN: ${{ github.token }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
-            // github-script@v7's toolkit context does not expose runAttempt.
+            // Read the attempt from the environment; the toolkit context does not expose it.
             const runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT);
             if (!Number.isSafeInteger(runAttempt) || runAttempt < 1) {
               throw new Error('GITHUB_RUN_ATTEMPT must be a positive safe integer');
@@ -202,7 +212,37 @@ jobs:
               (comment.body?.includes(`[Workflow logs](${runUrl})`) &&
                 /Codjiflo Reviewer (?:failed;|preparation failed;)/.test(comment.body))
             ));
-            if (!reported) await github.rest.issues.createComment({
+            if (reported) return;
+            // The App token only reaches the reviewed repository; this run's jobs
+            // and dispatches live here.
+            const actions = getOctokit(process.env.ACTIONS_TOKEN);
+            const jobs = await actions.paginate(actions.rest.actions.listJobsForWorkflowRunAttempt, {
+              owner: context.repo.owner, repo: context.repo.repo,
+              run_id: context.runId, attempt_number: runAttempt, per_page: 100,
+            });
+            // A runner that vanishes mid-step leaves that step in_progress on a
+            // completed job; failures the runner observes conclude every step.
+            const runnerLost = process.env.REVIEW_JOB_RESULT === 'failure' && jobs.some(job =>
+              job.name === 'review' && job.steps?.some(step => step.status === 'in_progress'));
+            // One automatic retry: a retry whose runner is lost again only reports.
+            if (runnerLost && !process.env.REDISPATCH_OF) {
+              await actions.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner, repo: context.repo.repo,
+                workflow_id: 'review.yml', ref: process.env.WORKFLOW_REF,
+                inputs: {
+                  repository: process.env.TARGET_REPOSITORY,
+                  'comment-id': process.env.COMMENT_ID,
+                  'redispatch-of': String(context.runId),
+                },
+              });
+              await github.rest.issues.createComment({
+                owner, repo,
+                issue_number: number,
+                body: `Codjiflo Reviewer lost its runner mid-review and found no verdict from this attempt. The review was queued again automatically (one retry); its result will follow. [Workflow logs](${runUrl})\n\n${marker}`,
+              });
+              return;
+            }
+            await github.rest.issues.createComment({
               owner, repo,
               issue_number: number,
               body: `Codjiflo Reviewer job ended with status **${process.env.REVIEW_JOB_RESULT}**. The review runner did not confirm a failure report for this attempt. A runner interruption can prevent logs and post-job steps from being uploaded. Check existing PR reviews before retrying: this notification does not establish whether a verdict was submitted. [Workflow logs](${runUrl})\n\n${marker}`,
