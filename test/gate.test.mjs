@@ -11,7 +11,7 @@ import { repositorySettings } from '../src/repositories.mjs';
 const cli = fileURLToPath(new URL('../bin/codjiflo-reviewer.mjs', import.meta.url));
 
 // Loopback GitHub serving the one comment the dispatch inputs point at.
-async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body = '@codjiflo-reviewer review', approved = 'alice', pr = true, visibility = { private: false }, args } = {}) {
+async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body = '@codjiflo-reviewer review', approved = 'alice', pr = true, visibility = { private: false }, args, redispatchOf = '', prComments = [] } = {}) {
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-gate-'));
   const requests = [];
   const comments = [];
@@ -27,6 +27,7 @@ async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body =
       [`/repos/${repo}/issues/comments/6451172747`]: { id: 6451172747, user: { login: author, type }, body, issue_url: `https://api.github.example/repos/${repo}/issues/2025` },
       [`/repos/${repo}/issues/2025`]: { number: 2025, ...(pr ? { pull_request: {} } : {}) },
       [`/repos/${repo}`]: visibility,
+      [`/repos/${repo}/issues/2025/comments?per_page=100&page=1`]: prComments,
     }[request.url];
     if (!found) response.statusCode = 404;
     response.end(JSON.stringify(found ?? { message: 'Not Found' }));
@@ -38,7 +39,7 @@ async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body =
     env: {
       ...process.env, GITHUB_OUTPUT: outputPath, GITHUB_STEP_SUMMARY: summaryPath,
       GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`, GITHUB_TOKEN: 'fixture-token-not-real', GH_TOKEN: '',
-      CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: '/nonexistent-reviewer',
+      CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: '/nonexistent-reviewer', CODJIFLO_REDISPATCH_OF: redispatchOf,
     },
   });
   const read = path => readFile(path, 'utf8').catch(error => { if (error.code !== 'ENOENT') throw error; return ''; });
@@ -107,6 +108,32 @@ test('gate explains every decision in logs and the Actions summary without start
       assert.equal(g.requests.filter(request => request.startsWith('GET ')).length, allowed ? 3 : 2);
       assert.ok(g.requests.every(request => request.endsWith(' Bearer fixture-token-not-real')));
       assert.deepEqual(g.comments, scenario.fails ? ['Codjiflo Reviewer did not start: invalid review command. Use `@codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental]` or `@codjiflo <preset> [full|incremental]`.'] : []);
+    } finally { await g.close(); }
+  });
+});
+
+test('a lost-runner retry gate yields only to a newer comment that would start a review', async t => {
+  const user = login => ({ login, type: 'User' });
+  const older = { id: 6451172700, user: user('alice'), body: '@codjiflo review full' };
+  const ignored = [
+    older,
+    { id: 6451172800, user: user('alice'), body: 'Is @codjiflo stuck?' },
+    { id: 6451172801, user: user('alice'), body: '> @codjiflo opus-medium' },
+    { id: 6451172802, user: user('stranger'), body: '@codjiflo opus-medium' },
+    { id: 6451172803, user: { login: 'codjiflo[bot]', type: 'Bot' }, body: '@codjiflo opus-medium' },
+  ];
+  const newer = { id: 6451172900, user: user('ALICE'), body: 'Rebased. @codjiflo opus-medium' };
+  for (const [name, options, expected] of [
+    ['prose, quotes, strangers, bots and older commands', { redispatchOf: '44009512925', prComments: ignored }, 'allowed=true'],
+    ['a newer approved command', { redispatchOf: '44009512925', prComments: [...ignored, newer] }, 'allowed=false'],
+    ['an ordinary mention ignores newer commands', { prComments: [newer] }, 'allowed=true'],
+  ]) await t.test(name, async () => {
+    const g = await gate(options);
+    try {
+      const log = await g.running;
+      assert.equal((await g.output()).split('\n')[0], expected);
+      assert.equal(log.includes('reason=superseded-by-6451172900'), expected === 'allowed=false');
+      assert.equal(g.requests.some(request => request.includes('/issues/2025/comments')), Boolean(options.redispatchOf));
     } finally { await g.close(); }
   });
 });
