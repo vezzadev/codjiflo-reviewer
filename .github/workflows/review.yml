@@ -74,7 +74,7 @@ jobs:
     runs-on: codjiflo-reviewer
     concurrency:
       group: codjiflo-${{ inputs.repository }}-${{ needs.gate.outputs.number }}
-      cancel-in-progress: false
+      cancel-in-progress: true
     timeout-minutes: 55
     steps:
       # The bot implementation is this repository's revision, never the PR branch.
