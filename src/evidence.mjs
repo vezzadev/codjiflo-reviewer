@@ -1,5 +1,6 @@
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { presetRunner } from './commands.mjs';
 import { prompt } from './prompt.mjs';
 import { MAX_INLINE_INPUT, MAX_EVIDENCE_READ_BYTES } from './input-budget.mjs';
 
@@ -43,10 +44,10 @@ function scopeFiles(numstat) {
   return files;
 }
 
-export async function reviewInput({ preset, options, temp, cwd, git }) {
-  const promptOptions = { runner: preset?.runner ?? 'omp', ...options };
+export async function prepareReviewInput({ preset, options, temp, cwd, git }) {
+  const promptOptions = { runner: presetRunner(preset), ...options };
   const inline = prompt(promptOptions);
-  if (inline.length <= MAX_INLINE_INPUT) return inline;
+  if (inline.length <= MAX_INLINE_INPUT) return { prompt: inline, evidenceDir: undefined };
   // Methodology is never hidden behind evidence reads. Refuse an oversized
   // custom recipe before invoking the provider, rather than truncate it.
   if (prompt({ ...promptOptions, diff: '', currentDiff: '', priorFindings: [] }).length > MAX_INLINE_INPUT - 16000) {
@@ -124,5 +125,9 @@ export async function reviewInput({ preset, options, temp, cwd, git }) {
   const evidence = { directory, scopeFiles: scope.length, apiFiles: records.length, inventoryBytes: Buffer.byteLength(index), scopeBytes: byte, apiBytes: Buffer.byteLength(patches), priorFindingCount: (options.priorFindings ?? []).length, priorFindingBytes: Buffer.byteLength(priorFindings) };
   const input = prompt({ ...promptOptions, evidence });
   if (input.length > MAX_INLINE_INPUT) throw new Error('Navigable review prompt exceeds inline budget; no instructions or scope were truncated');
-  return input;
+  return { prompt: input, evidenceDir: directory };
+}
+
+export async function reviewInput(args) {
+  return (await prepareReviewInput(args)).prompt;
 }

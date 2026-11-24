@@ -10,7 +10,7 @@ import { fixture } from './fixture.mjs';
 // Opt-in: consumes real OMP quota and normal shared OMP credentials. GitHub
 // publication is real HTTP to the fixture's loopback server, never github.com.
 const preset = normalizePreset(process.argv[2] || 'opus-medium');
-assert.ok(preset && Object.hasOwn(PRESETS, preset), 'Choose a supported reviewer preset');
+assert.ok(preset && PRESETS[preset]?.runner === 'omp', 'Choose an OMP reviewer preset (opus-xhigh, opus-medium, or claude)');
 const proof = await mkdtemp(join(tmpdir(), 'codjiflo-omp-native-proof-'));
 const source = join(proof, 'source-proof.mjs');
 const nonce = randomUUID();

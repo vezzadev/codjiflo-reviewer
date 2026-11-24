@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { presetRunner } from './commands.mjs';
 import { schema } from './prompt.mjs';
-import { secretRedactor } from './redaction.mjs';
+import { envSecrets, secretRedactor } from './redaction.mjs';
 import { ompLogFormatter } from './omp-log.mjs';
 import { agyLogFormatter } from './agy-log.mjs';
 import { MAX_INLINE_INPUT } from './input-budget.mjs';
@@ -114,7 +116,8 @@ export function parseAgyReview(stdout) {
   const terminal = results[0];
   const terminalIndex = terminal ? events.indexOf(terminal) : -1;
   const result = terminal?.result;
-  const badFinish = result?.finished_reason !== undefined && !['stop', 'success'].includes(result.finished_reason);
+  const badFinish = result?.finished_reason != null && result.finished_reason !== ''
+    && !['stop', 'success'].includes(String(result.finished_reason).toLowerCase());
   if (results.length !== 1 || !result || typeof result !== 'object' || Array.isArray(result)
       || result.status !== 'SUCCESS' || result.error || badFinish
       || events.slice(terminalIndex + 1).some(event => ['init', 'step_update', 'result'].includes(event.event))) {
@@ -200,28 +203,27 @@ export async function runProcess(command, args, { cwd, env = process.env, input,
   });
 }
 
-async function stagedEvidenceDir(prompt, parent) {
-  for (const line of prompt.split('\n')) {
-    if (!line.startsWith('Navigable review evidence manifest: ')) continue;
-    let directory;
-    try { directory = JSON.parse(line.slice('Navigable review evidence manifest: '.length))?.directory; }
-    catch { continue; }
-    if (typeof directory !== 'string' || !directory) continue;
-    try {
-      const resolved = await realpath(directory);
-      if (dirname(resolved) === parent && basename(resolved).startsWith('review-evidence-')) return resolved;
-    } catch { continue; }
+async function validateEvidenceDir(evidenceDir, parent) {
+  if (evidenceDir === undefined) return undefined;
+  if (typeof evidenceDir !== 'string' || !evidenceDir) {
+    throw new Error('Staged evidence directory must be a non-empty path inside the review temp directory');
   }
-  return undefined;
+  const resolved = await realpath(evidenceDir);
+  if (dirname(resolved) !== parent || !basename(resolved).startsWith('review-evidence-')) {
+    throw new Error('Staged evidence directory must be a direct review-evidence-* child of the review temp directory');
+  }
+  return resolved;
 }
 
-async function cleanupAgyConversations(stdout, home) {
+async function cleanupAgyConversations(stdout, env) {
+  const home = env?.HOME || env?.USERPROFILE || homedir();
   if (typeof home !== 'string' || !home || typeof stdout !== 'string' || !stdout) return;
   const ids = new Set();
   for (const line of stdout.split('\n')) {
+    if (!line.includes('"conversation_id"')) continue;
     let event;
     try { event = JSON.parse(line); } catch { continue; }
-    for (const candidate of [event?.conversation_id, event?.result?.conversation_id]) {
+    for (const candidate of [event?.conversation_id, event?.step_update?.conversation_id, event?.result?.conversation_id]) {
       if (typeof candidate === 'string' && CONVERSATION_UUID.test(candidate)) ids.add(candidate);
     }
   }
@@ -236,11 +238,11 @@ async function cleanupAgyConversations(stdout, home) {
   ]));
 }
 
-function runtimeScratchEnv(scratch) {
+function runtimeScratchEnv(base) {
   return {
-    TMPDIR: join(scratch, 'tmp'), TMP: join(scratch, 'tmp'), TEMP: join(scratch, 'tmp'),
-    XDG_CACHE_HOME: join(scratch, 'cache'), UV_CACHE_DIR: join(scratch, 'uv-cache'),
-    UV_PROJECT_ENVIRONMENT: join(scratch, 'venv'), PYTHONPYCACHEPREFIX: join(scratch, 'pycache'),
+    TMPDIR: join(base, 'tmp'), TMP: join(base, 'tmp'), TEMP: join(base, 'tmp'),
+    XDG_CACHE_HOME: join(base, 'cache'), UV_CACHE_DIR: join(base, 'uv-cache'),
+    UV_PROJECT_ENVIRONMENT: join(base, 'venv'), PYTHONPYCACHEPREFIX: join(base, 'pycache'),
   };
 }
 
@@ -251,21 +253,26 @@ function failureStatus(error) {
     : 'could not run';
 }
 
-async function runAgyReviewer({ preset, prompt, cwd, parent, env, logStream }) {
+async function runAgyReviewer({ preset, prompt, evidenceDir, cwd, parent, env, logStream }) {
   const model = env.CODJIFLO_NEON_MODEL || preset.model;
   if (preset.provider !== 'antigravity' || typeof model !== 'string'
       || !AGY_MODEL_SLUG.test(model) || AGY_EFFORT_SUFFIX.test(model)) {
     throw new Error('Antigravity review model must be a base Antigravity model slug without provider prefix or effort suffix');
   }
+  const verifiedEvidence = await validateEvidenceDir(evidenceDir, parent);
   const scratch = await mkdtemp(join(parent, 'review-runtime-'));
-  const runtimeEnv = runtimeScratchEnv(scratch);
-  const secrets = Object.entries(env).filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY|AUTHORIZATION/i.test(name)).map(([, value]) => value);
+  // Isolate writable tool caches/temp dirs from the ephemeral schema/settings files,
+  // and pass workScratch via --add-dir so --sandbox mounts it writable even when temp is outside /tmp.
+  const workScratch = join(scratch, 'work');
+  const runtimeEnv = runtimeScratchEnv(workScratch);
+  const secrets = envSecrets(env);
   if (logStream === 'withheld') console.log('Antigravity output withheld from logs: the reviewed repository is private.');
   const out = secretRedactor(secrets, text => { if (logStream === 'live') process.stdout.write(text); });
   const err = secretRedactor(secrets, text => { if (logStream === 'live') process.stderr.write(text); });
   const transcript = logStream === 'live' ? agyLogFormatter(text => out.write(text), secrets) : undefined;
   let stdout = '';
   try {
+    await mkdir(workScratch, { mode: 0o700 });
     await Promise.all([...new Set(Object.values(runtimeEnv))].map(directory => mkdir(directory, { mode: 0o700 })));
     const schemaPath = join(scratch, 'schema.json');
     const settingsPath = join(scratch, 'settings.json');
@@ -273,7 +280,6 @@ async function runAgyReviewer({ preset, prompt, cwd, parent, env, logStream }) {
       writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600 }),
       writeFile(settingsPath, JSON.stringify(AGY_REVIEW_SETTINGS), { mode: 0o600 }),
     ]);
-    const evidenceDir = await stagedEvidenceDir(prompt, parent);
     const input = `${JSON.stringify({ event: 'user', message: { content: prompt } })}\n`;
     // Do not override HOME or copy credentials: agy owns its signed-in Google
     // account session and token refresh. Ephemeral settings and schema stay in scratch.
@@ -282,7 +288,8 @@ async function runAgyReviewer({ preset, prompt, cwd, parent, env, logStream }) {
       '--model', model, '--effort', preset.effort,
       '--json-schema', schemaPath, '--settings', settingsPath,
       '--disable-slash-commands', '--sandbox', '--print-timeout', '45m',
-      ...(evidenceDir ? ['--add-dir', evidenceDir] : []),
+      '--add-dir', workScratch,
+      ...(verifiedEvidence ? ['--add-dir', verifiedEvidence] : []),
     ], { cwd, env: { ...env, ...runtimeEnv }, input, stream: true,
       streamOutput: { stdout: chunk => transcript?.write(chunk), stderr: chunk => err.write(chunk) }, timeoutMs: 45 * 60 * 1000 });
   } catch (error) {
@@ -294,7 +301,7 @@ async function runAgyReviewer({ preset, prompt, cwd, parent, env, logStream }) {
     transcript?.end();
     out.end();
     err.end();
-    await cleanupAgyConversations(stdout, env.HOME);
+    await cleanupAgyConversations(stdout, env);
     await rm(scratch, { recursive: true, force: true });
   }
   try { return parseAgyReview(stdout); }
@@ -304,15 +311,15 @@ async function runAgyReviewer({ preset, prompt, cwd, parent, env, logStream }) {
   }
 }
 
-export async function runReviewer({ preset, prompt, cwd, temp, env = process.env, logStream = 'live' }) {
+export async function runReviewer({ preset, prompt, evidenceDir, cwd, temp, env = process.env, logStream = 'live' }) {
   if (prompt.length > MAX_INLINE_INPUT) throw new Error('Review input exceeds inline budget; structured evidence preparation is required');
   const parent = await realpath(temp), checkout = await realpath(cwd);
   const fromCheckout = relative(checkout, parent);
   if (fromCheckout === '' || (fromCheckout !== '..' && !fromCheckout.startsWith('..' + sep) && !isAbsolute(fromCheckout))) {
     throw new Error('Reviewer runtime scratch must be outside the checkout');
   }
-  if (preset.runner === 'agy' || preset.provider === 'antigravity') {
-    return runAgyReviewer({ preset, prompt, cwd, parent, env, logStream });
+  if (presetRunner(preset) === 'agy') {
+    return runAgyReviewer({ preset, prompt, evidenceDir, cwd, parent, env, logStream });
   }
   const model = env.CODJIFLO_OPUS_MODEL || preset.model;
   if (preset.provider !== 'anthropic' || !model.startsWith(`${preset.provider}/`) || !model.slice(preset.provider.length + 1)) {
@@ -320,7 +327,7 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
   }
   const scratch = await mkdtemp(join(parent, 'review-runtime-'));
   const runtimeEnv = runtimeScratchEnv(scratch);
-  const secrets = Object.entries(env).filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY|AUTHORIZATION/i.test(name)).map(([, value]) => value);
+  const secrets = envSecrets(env);
   if (logStream === 'withheld') console.log('OMP output withheld from logs: the reviewed repository is private.');
   const out = secretRedactor(secrets, text => { if (logStream === 'live') process.stdout.write(text); });
   const err = secretRedactor(secrets, text => { if (logStream === 'live') process.stderr.write(text); });

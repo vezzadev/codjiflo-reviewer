@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { agyLogFormatter } from '../src/agy-log.mjs';
 
-function render(events, chunkSize = Infinity) {
+function render(events, chunkSize = Infinity, secrets = []) {
   let output = '';
-  const formatter = agyLogFormatter(text => { output += text; });
+  const formatter = agyLogFormatter(text => { output += text; }, secrets);
   const stream = events.map(event => typeof event === 'string' ? event : JSON.stringify(event)).join('\n') + '\n';
   for (let index = 0; index < stream.length; index += chunkSize) formatter.write(stream.slice(index, index + chunkSize));
   formatter.end();
@@ -17,13 +17,14 @@ const session = [
   { event: 'step_update', step_update: { step_index: 1, state: 'ACTIVE', step_type: 'agent_response', text_delta: 'Looking' } },
   { event: 'step_update', step_update: { step_index: 1, state: 'DONE', step_type: 'agent_response', text_delta: '\nnow.' } },
   { event: 'step_update', step_update: { step_index: 2, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { name: 'run_command', parameters: { CommandLine: 'ls -la' } } } },
+  { event: 'step_update', step_update: { step_index: 2, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { name: 'run_command', parameters: { CommandLine: 'ls -la' } } } },
   { event: 'step_update', step_update: { step_index: 2, state: 'DONE', step_type: 'tool', tool_name: 'run_command', tool_info: { name: 'run_command', parameters: { CommandLine: 'ls -la' }, output: 'a.js\nb.js\n' } } },
   { event: 'step_update', step_update: { step_index: 3, state: 'DONE', step_type: 'tool', tool_name: 'read_file', tool_info: { name: 'read_file', parameters: { Path: 'a.js' }, output: '1 lines' } } },
   { event: 'step_update', step_update: { step_index: 4, state: 'DONE', step_type: 'finish' } },
   { event: 'result', result: { conversation_id: 'c1', status: 'SUCCESS', num_turns: 1, structured_output: { verdict: 'REQUEST_CHANGES', summary: 'One defect.', findings: [{ path: 'a.js', line: 3, priority: 'P1', disposition: 'blocking', title: 'Off by one' }], resolutions: [] }, usage: { input_tokens: 5, output_tokens: 7, thinking_tokens: 3, cache_read_tokens: 11 } } },
 ];
 
-test('AGY events render as a transcript merging deltas and omitting prompt echo', () => {
+test('AGY events render as a transcript merging deltas, deduplicating ACTIVE tool headers, and omitting prompt echo', () => {
   assert.equal(render(session), [
     '── AGY agent started (gemini-4-neon-high)',
     'assistant:',
@@ -50,6 +51,20 @@ test('rendering does not depend on stream chunk boundaries', () => {
   assert.equal(render(session, 7), render(session));
 });
 
+test('non-DONE terminal tool states, missing step_index, and incomplete buffered responses are rendered safely', () => {
+  const output = render([
+    { event: 'step_update', step_update: { step_index: 1, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'false' } } } },
+    { event: 'step_update', step_update: { step_index: 1, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'false' }, error: { code: 42, detail: 'boom' } } } },
+    { event: 'step_update', step_update: { state: 'ACTIVE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'a.js' } } } },
+    { event: 'step_update', step_update: { state: 'DONE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'b.js' }, output: 'ok' } } },
+    { event: 'step_update', step_update: { step_index: 9, state: 'ACTIVE', step_type: 'agent_response', text_delta: 'partial thought before abort' } },
+  ]);
+  assert.match(output, /✗ failed run_command\n  │ \{"code":42,"detail":"boom"\}/);
+  assert.match(output, /"Path":"a\.js"/);
+  assert.match(output, /"Path":"b\.js"/);
+  assert.match(output, /assistant:\n  │ partial thought before abort\n$/);
+});
+
 test('model and tool content cannot start a log line with a workflow command', () => {
   const output = render([
     '::add-mask::raw ##[add-mask]raw',
@@ -63,17 +78,19 @@ test('model and tool content cannot start a log line with a workflow command', (
   assert.match(output, /✗ failed run_command/);
 });
 
-test('secrets are redacted before clipping or JSON escaping can split or disguise them', () => {
+test('secrets are redacted before clipping, truncation, or JSON escaping in values, keys, and structured errors', () => {
   const secret = 'sec"ret\\value';
-  let output = '';
-  const formatter = agyLogFormatter(text => { output += text; }, [secret]);
-  for (const event of [
-    { event: 'step_update', step_update: { step_index: 1, state: 'DONE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: secret }, output: 'x'.repeat(395) + secret } } },
-  ]) formatter.write(JSON.stringify(event) + '\n');
-  formatter.write(`not json ${secret}\n`);
-  formatter.end();
+  const output = render([
+    { event: 'step_update', step_update: { step_index: 1, state: 'DONE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: secret, [secret]: 'v' }, output: 'x'.repeat(395) + secret } } },
+    { event: 'step_update', step_update: { step_index: 2, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: {}, error: { code: 'E', [secret]: secret } } } },
+    { event: 'step_update', step_update: { step_index: 3, state: 'ACTIVE', step_type: 'agent_response', text_delta: 'a'.repeat(65530) + secret.slice(0, 6) } },
+    { event: 'step_update', step_update: { step_index: 3, state: 'DONE', step_type: 'agent_response', text_delta: secret.slice(6) + ' tail' } },
+    `not json ${secret}`,
+  ], Infinity, [secret]);
   for (const fragment of ['sec"', 'sec\\"', 'ret', 'value']) assert.equal(output.includes(fragment), false, fragment);
   assert.match(output, /"Path":"\[REDACTED\]"/);
+  assert.match(output, /"\[REDACTED\]":"v"/);
+  assert.match(output, /"\[REDACTED\]":"\[REDACTED\]"/);
   assert.match(output, /not json \[REDACTED\]/);
 });
 
