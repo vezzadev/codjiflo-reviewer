@@ -1,13 +1,14 @@
 const CREDENTIAL_ENV_NAME = /TOKEN|SECRET|PASSWORD|API_KEY|AUTHORIZATION/i;
-const CONFIG_ENV_SUFFIX = /_(?:STORAGE|PATH|DIR|FILE|MODE|ENABLED|DISABLED|TIMEOUT|URL|HOST|PORT|COUNT|LIMIT)$/i;
-const FLAG_LITERAL = /^(?:0|1|true|false|yes|no|on|off)$/i;
+const CONFIG_ENV_SUFFIX = /_(?:TOKENS|STORAGE|PATH|DIR|FILE|MODE|ENABLED|DISABLED|TIMEOUT|URL|HOST|PORT|COUNT|LIMIT|TTL|RETRIES|LENGTH|TYPE|FORMAT|VERSION|HEADER|NAME)$/i;
+const NON_CREDENTIAL_LITERAL = /^(?:\d+|true|false|yes|no|on|off)$/i;
 
 // Harvest likely credential values from an environment map while skipping
-// non-secret configuration/flag variables (for example AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1).
+// non-secret configuration/flag variables (for example AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1
+// or CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000).
 export function envSecrets(env = {}) {
   return Object.entries(env)
-    .filter(([name, value]) => typeof value === 'string' && value.length > 0
-      && CREDENTIAL_ENV_NAME.test(name) && !CONFIG_ENV_SUFFIX.test(name) && !FLAG_LITERAL.test(value))
+    .filter(([name, value]) => typeof value === 'string' && value.length >= 4
+      && CREDENTIAL_ENV_NAME.test(name) && !CONFIG_ENV_SUFFIX.test(name) && !NON_CREDENTIAL_LITERAL.test(value))
     .map(([, value]) => value);
 }
 

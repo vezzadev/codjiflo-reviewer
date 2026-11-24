@@ -10,7 +10,7 @@ import { ompLogFormatter } from './omp-log.mjs';
 import { agyLogFormatter } from './agy-log.mjs';
 import { MAX_INLINE_INPUT } from './input-budget.mjs';
 
-const CONVERSATION_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const CONVERSATION_ID_FIELD = /"conversation_id"\s*:\s*"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"/gi;
 const AGY_MODEL_SLUG = /^[a-z0-9][a-z0-9._-]*$/i;
 const AGY_EFFORT_SUFFIX = /-(?:low|medium|high|xhigh|max)$/i;
 
@@ -117,7 +117,7 @@ export function parseAgyReview(stdout) {
   const terminalIndex = terminal ? events.indexOf(terminal) : -1;
   const result = terminal?.result;
   const badFinish = result?.finished_reason != null && result.finished_reason !== ''
-    && !['stop', 'success'].includes(String(result.finished_reason).toLowerCase());
+    && (typeof result.finished_reason !== 'string' || !['stop', 'success'].includes(result.finished_reason.toLowerCase()));
   if (results.length !== 1 || !result || typeof result !== 'object' || Array.isArray(result)
       || result.status !== 'SUCCESS' || result.error || badFinish
       || events.slice(terminalIndex + 1).some(event => ['init', 'step_update', 'result'].includes(event.event))) {
@@ -216,17 +216,13 @@ async function validateEvidenceDir(evidenceDir, parent) {
 }
 
 async function cleanupAgyConversations(stdout, env) {
-  const home = env?.HOME || env?.USERPROFILE || homedir();
-  if (typeof home !== 'string' || !home || typeof stdout !== 'string' || !stdout) return;
+  if (typeof stdout !== 'string' || !stdout) return;
+  let home;
+  try { home = env?.HOME || env?.USERPROFILE || homedir(); }
+  catch { return; }
+  if (typeof home !== 'string' || !home) return;
   const ids = new Set();
-  for (const line of stdout.split('\n')) {
-    if (!line.includes('"conversation_id"')) continue;
-    let event;
-    try { event = JSON.parse(line); } catch { continue; }
-    for (const candidate of [event?.conversation_id, event?.step_update?.conversation_id, event?.result?.conversation_id]) {
-      if (typeof candidate === 'string' && CONVERSATION_UUID.test(candidate)) ids.add(candidate);
-    }
-  }
+  for (const match of stdout.matchAll(CONVERSATION_ID_FIELD)) ids.add(match[1]);
   if (!ids.size) return;
   const root = join(home, '.gemini', 'antigravity-cli');
   await Promise.all([...ids].flatMap(id => [
@@ -301,7 +297,7 @@ async function runAgyReviewer({ preset, prompt, evidenceDir, cwd, parent, env, l
     transcript?.end();
     out.end();
     err.end();
-    await cleanupAgyConversations(stdout, env);
+    await cleanupAgyConversations(stdout, env).catch(() => {});
     await rm(scratch, { recursive: true, force: true });
   }
   try { return parseAgyReview(stdout); }

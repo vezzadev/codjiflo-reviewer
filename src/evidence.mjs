@@ -44,7 +44,7 @@ function scopeFiles(numstat) {
   return files;
 }
 
-export async function prepareReviewInput({ preset, options, temp, cwd, git }) {
+export async function reviewInput({ preset, options, temp, cwd, git }) {
   const promptOptions = { runner: presetRunner(preset), ...options };
   const inline = prompt(promptOptions);
   if (inline.length <= MAX_INLINE_INPUT) return { prompt: inline, evidenceDir: undefined };
@@ -126,8 +126,4 @@ export async function prepareReviewInput({ preset, options, temp, cwd, git }) {
   const input = prompt({ ...promptOptions, evidence });
   if (input.length > MAX_INLINE_INPUT) throw new Error('Navigable review prompt exceeds inline budget; no instructions or scope were truncated');
   return { prompt: input, evidenceDir: directory };
-}
-
-export async function reviewInput(args) {
-  return (await prepareReviewInput(args)).prompt;
 }

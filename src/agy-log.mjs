@@ -7,6 +7,7 @@ import { MAX_ARGS, MAX_LINE, MAX_RESULT_LINES, clip, ndjsonLogFormatter, quote, 
 const MAX_STEP_TEXT = 65536;
 const IGNORED_STEP_TYPES = new Set(['user_input', 'checkpoint', 'finish']);
 const TERMINAL_STATES = new Set(['DONE', 'ERROR', 'CANCELED', 'CANCELLED', 'FAILED', 'INTERRUPTED']);
+const UNINDEXED = Symbol('unindexed');
 
 function toolStartLines(step, show, redact) {
   const info = step.tool_info && typeof step.tool_info === 'object' ? step.tool_info : {};
@@ -23,9 +24,11 @@ function toolEndLines(step, show, redact) {
   const name = step.tool_name ?? info.name ?? 'tool';
   const hasError = Boolean(info.error) || (typeof step.state === 'string' && step.state !== 'DONE');
   const output = info.error
-    ? (typeof info.error?.message === 'string'
-      ? show(info.error.message)
-      : JSON.stringify(redactDeep(info.error, redact)))
+    ? (typeof info.error === 'string'
+      ? show(info.error)
+      : typeof info.error?.message === 'string' && info.error.message.trim()
+        ? show(info.error.message)
+        : JSON.stringify(redactDeep(info.error, redact)))
     : (typeof info.output === 'string' ? show(info.output) : '');
   return [`  ${hasError ? '✗ failed' : '✓'} ${show(name)}`, ...(output.trim() ? quote(output, MAX_RESULT_LINES) : [])];
 }
@@ -50,12 +53,6 @@ function resultLines(result, show) {
   return lines;
 }
 
-function parse(line) {
-  let event;
-  try { event = JSON.parse(line); } catch { return undefined; }
-  return event && typeof event === 'object' && !Array.isArray(event) && typeof event.event === 'string' ? event : undefined;
-}
-
 function createStepBuffer(secrets) {
   let text = '';
   let truncated = false;
@@ -69,9 +66,9 @@ function createStepBuffer(secrets) {
     }
   });
   return {
-    write(delta) { if (delta) redactor.write(delta); },
+    write(delta) { if (delta && !truncated) redactor.write(delta); },
     flush() {
-      redactor.end();
+      if (!truncated) redactor.end();
       const output = truncated ? `${text}… (truncated)` : text;
       text = '';
       truncated = false;
@@ -83,13 +80,16 @@ function createStepBuffer(secrets) {
 export function agyLogFormatter(write, secrets = []) {
   const stepBuffers = new Map();
   const startedTools = new Set();
+  const flushKey = key => {
+    const buffer = stepBuffers.get(key);
+    if (!buffer) return [];
+    stepBuffers.delete(key);
+    const rendered = buffer.flush();
+    return rendered.trim() ? ['assistant:', ...quote(rendered)] : [];
+  };
   const flushBufferedResponses = () => {
     const lines = [];
-    for (const [key, buffer] of stepBuffers) {
-      stepBuffers.delete(key);
-      const rendered = buffer.flush();
-      if (rendered.trim()) lines.push('assistant:', ...quote(rendered));
-    }
+    for (const key of [...stepBuffers.keys()]) lines.push(...flushKey(key));
     return lines;
   };
   const stepLines = (step, { show, redact }) => {
@@ -99,39 +99,33 @@ export function agyLogFormatter(write, secrets = []) {
     const state = typeof step.state === 'string' ? step.state : '';
     const terminal = TERMINAL_STATES.has(state);
     if (step.step_type === 'agent_response') {
+      const key = hasIndex ? index : UNINDEXED;
       const delta = typeof step.text_delta === 'string' ? step.text_delta : '';
-      if (!hasIndex) {
-        const rendered = show(delta);
-        return rendered.trim() ? ['assistant:', ...quote(rendered)] : [];
-      }
-      let buffer = stepBuffers.get(index);
+      let buffer = stepBuffers.get(key);
       if (!buffer && delta) {
         buffer = createStepBuffer(secrets);
-        stepBuffers.set(index, buffer);
+        stepBuffers.set(key, buffer);
       }
       if (buffer && delta) buffer.write(delta);
-      if (!terminal) return [];
-      stepBuffers.delete(index);
-      const rendered = buffer ? buffer.flush() : '';
-      return rendered.trim() ? ['assistant:', ...quote(rendered)] : [];
+      return terminal ? flushKey(key) : [];
     }
+    const prefix = flushKey(UNINDEXED);
     if (step.step_type === 'tool') {
-      const hasError = Boolean(step.tool_info?.error);
-      if (state === 'ACTIVE' && !hasError) {
-        if (hasIndex && startedTools.has(index)) return [];
+      if (state === 'ACTIVE') {
+        if (hasIndex && startedTools.has(index)) return prefix;
         if (hasIndex) startedTools.add(index);
-        return toolStartLines(step, show, redact);
+        return [...prefix, ...toolStartLines(step, show, redact)];
       }
-      if (terminal || hasError) {
+      if (terminal) {
         const alreadyStarted = hasIndex && startedTools.has(index);
         if (hasIndex) startedTools.delete(index);
         const lines = alreadyStarted ? [] : toolStartLines(step, show, redact);
-        return [...lines, ...toolEndLines(step, show, redact)];
+        return [...prefix, ...lines, ...toolEndLines(step, show, redact)];
       }
-      return [];
+      return prefix;
     }
     const { step_type: type, ...detail } = step;
-    return [`· step:${show(type)} ${clip(JSON.stringify(redactDeep(detail, redact)), MAX_ARGS)}`];
+    return [...prefix, `· step:${show(type)} ${clip(JSON.stringify(redactDeep(detail, redact)), MAX_ARGS)}`];
   };
   const eventLines = (event, helpers) => {
     const { show, redact } = helpers;
@@ -147,8 +141,7 @@ export function agyLogFormatter(write, secrets = []) {
     return [`· ${show(type)} ${clip(JSON.stringify(redactDeep(detail, redact)), MAX_ARGS)}`];
   };
   return ndjsonLogFormatter(write, secrets, {
-    parse,
-    eventType: event => event.event,
+    typeKey: 'event',
     render: eventLines,
     onEnd: flushBufferedResponses,
   });

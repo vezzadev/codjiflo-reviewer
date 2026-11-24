@@ -5,7 +5,7 @@ import { join, dirname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runReviewer, parseAgyReview, AGY_REVIEW_SETTINGS } from '../src/runner.mjs';
 import { PRESETS, presetRunner } from '../src/commands.mjs';
-import { prepareReviewInput } from '../src/evidence.mjs';
+import { reviewInput } from '../src/evidence.mjs';
 import { envSecrets } from '../src/redaction.mjs';
 import { schema } from '../src/prompt.mjs';
 import { validateResult } from '../src/review.mjs';
@@ -134,9 +134,15 @@ test('Antigravity accepts explicit validated evidenceDir without scraping prompt
   } finally { await rm(f.temp, { recursive: true, force: true }); }
 });
 
-test('envSecrets excludes non-credential flags like AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 while redacting real tokens', () => {
+test('envSecrets excludes non-credential flags and numeric configs while redacting real tokens', () => {
   const secrets = envSecrets({
     AGY_CLI_FORCE_FILE_TOKEN_STORAGE: '1',
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: '32000',
+    MAX_THINKING_TOKENS: '10000',
+    TOKEN_RETRIES: '3',
+    PASSWORD_MIN_LENGTH: '8',
+    OAUTH_TOKEN_TYPE: 'Bearer',
+    SHORT_SECRET: 'abc',
     SOME_TOKEN_MODE: 'strict',
     SOME_SECRET_PATH: '/var/run/secret',
     MY_TOKEN_ENABLED: 'true',
@@ -150,7 +156,7 @@ test('envSecrets excludes non-credential flags like AGY_CLI_FORCE_FILE_TOKEN_STO
 test('presetRunner keeps evidence prompt and runner dispatch consistent when runner is omitted', async () => {
   const providerOnly = { provider: 'antigravity', model: 'gemini-4-neon', effort: 'high', level: 'xhigh' };
   assert.equal(presetRunner(providerOnly), 'agy');
-  const prepared = await prepareReviewInput({
+  const prepared = await reviewInput({
     preset: providerOnly,
     options: { level: 'xhigh', mode: 'full', base: 'a', head: 'b', scope: 'a', diff: 'small', currentDiff: '[]' },
     git: () => { throw new Error('Unexpected git query'); },
@@ -222,6 +228,7 @@ for (const [name, mutate] of [
   ['result error field', value => { value.at(-1).result.error = 'provider error'; }],
   ['bad finished_reason', value => { value.at(-1).result.finished_reason = 'max_tokens'; }],
   ['bad uppercase finished_reason', value => { value.at(-1).result.finished_reason = 'MAX_TOKENS'; }],
+  ['array finished_reason', value => { value.at(-1).result.finished_reason = ['stop']; }],
   ['missing structured_output', value => { delete value.at(-1).result.structured_output; }],
   ['extra output field', value => { value.at(-1).result.structured_output.extra = true; }],
   ['invalid finding', value => { value.at(-1).result.structured_output.findings = [{ path: 'a' }]; }],

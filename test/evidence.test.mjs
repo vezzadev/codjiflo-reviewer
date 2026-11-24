@@ -88,7 +88,7 @@ test('unprocessed large scope returns INCOMPLETE for every preset without publis
 
 test('small OMP prompts are unchanged and require no evidence query', async () => {
   const options = { level: 'xhigh', mode: 'full', base: 'a', head: 'b', scope: 'a', diff: 'small', currentDiff: '[]' };
-  assert.equal(await reviewInput({ options, git: () => { throw new Error('Unexpected git query'); } }), prompt(options));
+  assert.deepEqual(await reviewInput({ options, git: () => { throw new Error('Unexpected git query'); } }), { prompt: prompt(options), evidenceDir: undefined });
 });
 
 test('range inventory preserves escaped rename paths, binary files, UTF-8 and late-file evidence', async () => {
@@ -101,7 +101,7 @@ test('range inventory preserves escaped rename paths, binary files, UTF-8 and la
   const last = 'diff --git a/last b/last\nBinary files differ\n';
   const options = { level: 'xhigh', mode: 'incremental', base: 'a', head: 'b', scope: 'c', diff: first + last, currentDiff: JSON.stringify([{ filename, previous_filename: previous, patch: '@@ -1 +1 @@\n-old\n+new' }, { filename: 'last', patch: null }]), customInstructions: 'Inspect complete scope with custom methodology.' };
   try {
-    const input = await reviewInput({ options, temp, cwd, git: async args => {
+    const { prompt: input } = await reviewInput({ options, temp, cwd, git: async args => {
       assert.ok(args.includes('-z'));
       assert.deepEqual(args.slice(-3), ['c', 'b', '--']);
       return `1\t1\t\0${previous}\0${filename}\0-\t-\tlast\0`;
@@ -141,7 +141,7 @@ test('incremental consumers retrieve joined scope and API ranges while retaining
     { filename: 'current-name', previous_filename: 'old-name', patch: '@@ -1 +1 @@\n-before\n+after' },
   ];
   try {
-    const input = await reviewInput({
+    const { prompt: input } = await reviewInput({
       temp, cwd: join(temp, 'repository'),
       options: { level: 'xhigh', mode: 'incremental', base: 'a', scope: 'c', head: 'b', diff: first + last, currentDiff: JSON.stringify(api) },
       git: async () => '1\t1\tscope-only\0' + '1\t1\t\0old-name\0current-name\0',
@@ -213,7 +213,7 @@ test('rename disagreements retain primary joins and expose alternate API anchor 
       ? `1\t1\t\0${file.previous_filename}\0${file.filename}\0`
       : `1\t1\t${file.filename}\0`).join('');
     try {
-      const input = await reviewInput({
+      const { prompt: input } = await reviewInput({
         temp, cwd: join(temp, 'repository'),
         options: { level: 'xhigh', mode: 'incremental', base: 'base', scope: 'previous', head: 'head', diff, currentDiff: JSON.stringify(variant.api) },
         git: async () => numstat,
@@ -556,7 +556,7 @@ test('real Git type changes and non-LF content preserve complete consumer-visibl
           assert.equal(posts.filter(post => post.path.endsWith('/reviews')).length, 0);
         } else {
           const queries = [];
-          const input = await reviewInput({ temp, cwd, git: args => {
+          const { prompt: input } = await reviewInput({ temp, cwd, git: args => {
             queries.push(args);
             return git(args);
           }, options: { level: 'xhigh', mode: 'full', base, head, scope: base, diff, currentDiff: '[]' } });
@@ -601,7 +601,7 @@ test('real Git colliding rename headers remain separate alongside type changes',
       const diff = await git([...diffArgs, base, head, '--']);
       assert.equal(diff.split('\n').filter(line => line === 'diff --git a/x b/y b/z').length, 2, 'distinct renames produce identical headers');
       let queries = 0;
-      const input = await reviewInput({
+      const { prompt: input } = await reviewInput({
         temp, cwd,
         options: { level: 'xhigh', mode: 'full', base, scope: base, head, diff, currentDiff: '[]' },
         git: args => { queries++; return git(args); },
@@ -654,7 +654,7 @@ test('empty incremental scope remains navigable when only current PR evidence is
   const temp = await mkdtemp(join(tmpdir(), 'codjiflo-empty-scope-'));
   const api = [{ filename: 'earlier-change', patch: 'x'.repeat(MAX_INLINE_INPUT) }];
   try {
-    const input = await reviewInput({
+    const { prompt: input } = await reviewInput({
       temp, cwd: join(temp, 'repository'),
       options: { level: 'xhigh', mode: 'incremental', base: 'base', head: 'head', scope: 'head', diff: '', currentDiff: JSON.stringify(api) },
       git: async () => '',
@@ -766,7 +766,7 @@ test('a 3000-file inventory stays navigable without inflating the initial prompt
     currentDiff: JSON.stringify(names.map(filename => ({ filename, patch: null }))),
   };
   try {
-    const input = await reviewInput({ options, temp, cwd: join(temp, 'repository'), git: async () => names.map(name => `0\t0\t${name}\0`).join('') });
+    const { prompt: input } = await reviewInput({ options, temp, cwd: join(temp, 'repository'), git: async () => names.map(name => `0\t0\t${name}\0`).join('') });
     const manifest = manifestOf(input);
     assert.ok(input.length < 16000);
     assert.equal(manifest.scopeFiles, 3000);

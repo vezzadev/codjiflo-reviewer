@@ -31,9 +31,15 @@ export function redactDeep(value, redact) {
 // Fields placed on a header line may carry line terminators of their own.
 const guard = lines => lines.flatMap(rendered => rendered.replaceAll('##[', '##\u200b[').split(LINE_BREAK).map((part, index) => index ? `  │ ${part}` : part));
 
+function parseEvent(line, typeKey) {
+  let event;
+  try { event = JSON.parse(line); } catch { return undefined; }
+  return event && typeof event === 'object' && !Array.isArray(event) && typeof event[typeKey] === 'string' ? event : undefined;
+}
+
 // Stream chunks need not align with event lines, and one event can span many
 // chunks: join the parts of a line only once it is complete.
-export function ndjsonLogFormatter(write, secrets = [], { parse, eventType, render, onEnd }) {
+export function ndjsonLogFormatter(write, secrets = [], { typeKey, render, onEnd }) {
   let parts = [];
   const print = lines => { for (const rendered of guard(lines)) write(`${rendered}\n`); };
   // Lines that are not events go through a stream redactor before they are
@@ -47,7 +53,9 @@ export function ndjsonLogFormatter(write, secrets = [], { parse, eventType, rend
     printRaw(lines);
   });
   const { redact } = raw;
-  const show = value => typeof value === 'string' ? redact(value) : value === undefined ? '' : redact(String(JSON.stringify(value)));
+  const show = value => typeof value === 'string'
+    ? redact(value)
+    : value === undefined ? '' : redact(String(JSON.stringify(redactDeep(value, redact))));
   let rawOpen = false;
   const closeRaw = () => {
     raw.end();
@@ -56,7 +64,7 @@ export function ndjsonLogFormatter(write, secrets = [], { parse, eventType, rend
     rawOpen = false;
   };
   const emit = line => {
-    const event = line.trim() ? parse(line) : undefined;
+    const event = line.trim() ? parseEvent(line, typeKey) : undefined;
     // A blank line may be part of a secret spanning raw lines.
     if (!event && (line.trim() || rawOpen)) { rawOpen = true; raw.write(`${line}\n`); }
     if (!event) return;
@@ -66,7 +74,7 @@ export function ndjsonLogFormatter(write, secrets = [], { parse, eventType, rend
     // JSON-escaped and so beyond redaction.
     let lines;
     try { lines = render(event, { show, redact }); }
-    catch (error) { lines = [`· ${clip(redact(eventType(event)), 80)} event could not be rendered (${error instanceof Error ? error.name : 'error'})`]; }
+    catch (error) { lines = [`· ${clip(redact(event[typeKey]), 80)} event could not be rendered (${error instanceof Error ? error.name : 'error'})`]; }
     print(lines);
   };
   const take = () => { const line = parts.join(''); parts = []; return line; };

@@ -51,15 +51,18 @@ test('rendering does not depend on stream chunk boundaries', () => {
   assert.equal(render(session, 7), render(session));
 });
 
-test('non-DONE terminal tool states, missing step_index, and incomplete buffered responses are rendered safely', () => {
+test('non-DONE terminal tool states, string/empty errors, active tool errors, missing step_index, and incomplete buffered responses are rendered safely', () => {
   const output = render([
-    { event: 'step_update', step_update: { step_index: 1, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'false' } } } },
-    { event: 'step_update', step_update: { step_index: 1, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'false' }, error: { code: 42, detail: 'boom' } } } },
+    { event: 'step_update', step_update: { step_index: 1, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'false' }, error: 'transient' } } },
+    { event: 'step_update', step_update: { step_index: 1, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'false' }, error: { code: 42, message: '  ' } } } },
+    { event: 'step_update', step_update: { step_index: 5, state: 'ERROR', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'x' }, error: 'permission denied\nsee policy' } } },
     { event: 'step_update', step_update: { state: 'ACTIVE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'a.js' } } } },
     { event: 'step_update', step_update: { state: 'DONE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'b.js' }, output: 'ok' } } },
     { event: 'step_update', step_update: { step_index: 9, state: 'ACTIVE', step_type: 'agent_response', text_delta: 'partial thought before abort' } },
   ]);
-  assert.match(output, /✗ failed run_command\n  │ \{"code":42,"detail":"boom"\}/);
+  assert.equal(output.match(/▶ run_command/g)?.length, 1);
+  assert.match(output, /✗ failed run_command\n  │ \{"code":42,"message":"  "\}/);
+  assert.match(output, /✗ failed read_file\n  │ permission denied\n  │ see policy/);
   assert.match(output, /"Path":"a\.js"/);
   assert.match(output, /"Path":"b\.js"/);
   assert.match(output, /assistant:\n  │ partial thought before abort\n$/);
@@ -78,19 +81,24 @@ test('model and tool content cannot start a log line with a workflow command', (
   assert.match(output, /✗ failed run_command/);
 });
 
-test('secrets are redacted before clipping, truncation, or JSON escaping in values, keys, and structured errors', () => {
+test('secrets are redacted before clipping, truncation, or JSON escaping in values, keys, structured errors, non-string show fields, and unindexed deltas', () => {
   const secret = 'sec"ret\\value';
   const output = render([
     { event: 'step_update', step_update: { step_index: 1, state: 'DONE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: secret, [secret]: 'v' }, output: 'x'.repeat(395) + secret } } },
     { event: 'step_update', step_update: { step_index: 2, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: {}, error: { code: 'E', [secret]: secret } } } },
     { event: 'step_update', step_update: { step_index: 3, state: 'ACTIVE', step_type: 'agent_response', text_delta: 'a'.repeat(65530) + secret.slice(0, 6) } },
     { event: 'step_update', step_update: { step_index: 3, state: 'DONE', step_type: 'agent_response', text_delta: secret.slice(6) + ' tail' } },
+    { event: 'step_update', step_update: { state: 'ACTIVE', step_type: 'agent_response', text_delta: 'unindexed ' + secret.slice(0, 5) } },
+    { event: 'step_update', step_update: { state: 'DONE', step_type: 'agent_response', text_delta: secret.slice(5) + ' end' } },
+    { event: 'result', result: { status: 'SUCCESS', structured_output: { verdict: 'APPROVE', summary: { nested: secret }, findings: [] } } },
     `not json ${secret}`,
   ], Infinity, [secret]);
   for (const fragment of ['sec"', 'sec\\"', 'ret', 'value']) assert.equal(output.includes(fragment), false, fragment);
   assert.match(output, /"Path":"\[REDACTED\]"/);
   assert.match(output, /"\[REDACTED\]":"v"/);
   assert.match(output, /"\[REDACTED\]":"\[REDACTED\]"/);
+  assert.match(output, /unindexed \[REDACTED\] end/);
+  assert.match(output, /\{"nested":"\[REDACTED\]"\}/);
   assert.match(output, /not json \[REDACTED\]/);
 });
 

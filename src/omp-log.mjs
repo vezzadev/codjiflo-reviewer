@@ -55,12 +55,6 @@ function eventLines(event, { show, redact }) {
   return [`· ${show(type)} ${clip(JSON.stringify(redactDeep(detail, redact)), MAX_ARGS)}`];
 }
 
-function parse(line) {
-  let event;
-  try { event = JSON.parse(line); } catch { return undefined; }
-  return event && typeof event === 'object' && !Array.isArray(event) && typeof event.type === 'string' ? event : undefined;
-}
-
 export function ompLogFormatter(write, secrets = []) {
-  return ndjsonLogFormatter(write, secrets, { parse, eventType: event => event.type, render: eventLines });
+  return ndjsonLogFormatter(write, secrets, { typeKey: 'type', render: eventLines });
 }
