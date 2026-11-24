@@ -16,7 +16,7 @@ const published = f => f.state.posts.filter(post => post.path.endsWith('/reviews
 const ledger = body => JSON.parse(body.split('\n').find(line => line.startsWith('<!-- codjiflo-reviewer:v4 ')).slice('<!-- codjiflo-reviewer:v4 '.length, -' -->'.length));
 const scopeDiff = input => input.slice(input.indexOf('Review-scope unified diff follows:\n') + 'Review-scope unified diff follows:\n'.length, input.indexOf('Authoritative current PR file metadata'));
 
-for (const [preset, cap] of [['opus-medium', 10], ['opus-xhigh', 15]]) {
+for (const [preset, cap] of [['neon-medium', 10], ['neon-xhigh', 15], ['opus-medium', 10], ['opus-xhigh', 15]]) {
   test(`${preset}: only checkpoints below the original new-findings cap are incremental baselines`, () => {
     const head = 'a'.repeat(40);
     const base = 'b'.repeat(40);
@@ -121,7 +121,7 @@ test('a CRLF published checkpoint is reused without altering ledger strings or p
     const original = ledger(published(f).body).findings;
     f.state.reviews.at(-1).body = f.state.reviews.at(-1).body.replaceAll('\n', '\r\n');
     assert.deepEqual(outstandingFindings(f.state.reviews), original);
-    assert.equal(baseline(f.state.reviews, f.base, 'opus-xhigh').head, f.head);
+    assert.equal(baseline(f.state.reviews, f.base, 'neon-xhigh').head, f.head);
     const next = await f.advance({ 'a.js': 'new\nchanged CRLF round\n' });
     await f.run({ providerEnv: { FIXTURE_RESULT: JSON.stringify({ verdict: 'REQUEST_CHANGES', summary: 'Reconciled unchanged evidence.', findings: [], resolutions: original.map(item => ({ id: item.id, status: 'unresolved', reason: 'Still reproducible.' })) }) } });
     assert.deepEqual(ledger(published(f).body).findings, original);

@@ -3,34 +3,38 @@
 
 # Codjiflo Reviewer
 
-A mention-triggered GitHub PR reviewer for trusted self-hosters. One deployment serves every repository its GitHub App is installed on: repositories need no workflow, variable, secret, or runner of their own. Requires Node.js 22+, Git, and Oh My Pi (`omp`) with access to the selected model. All presets run through OMP; there is no standalone reviewer CLI, SDK adapter, or Codjiflo credential pool. No multi-tenant infrastructure.
+A mention-triggered GitHub PR reviewer for trusted self-hosters. One deployment serves every repository its GitHub App is installed on: repositories need no workflow, variable, secret, or runner of their own. Requires Node.js 22+, Git, and either Google Antigravity CLI (`agy`, for the default `neon-*` presets) or Oh My Pi (`omp`, for `opus-*` presets) with access to the selected model. No Codjiflo credential pool or multi-tenant infrastructure.
 
 Comment on an open PR:
 
 ```text
 @codjiflo-reviewer review
-@codjiflo-reviewer review opus-xhigh full
-@codjiflo-reviewer review opus-medium
-@codjiflo-reviewer review claude full
+@codjiflo-reviewer review neon-xhigh full
+@codjiflo-reviewer review neon-medium
+@codjiflo-reviewer review neon full
+@codjiflo neon
+@codjiflo neon full
+@codjiflo neon-medium incremental
 @codjiflo claude
-@codjiflo claude full
 @codjiflo opus-medium incremental
 ```
 
-`@codjiflo` and `@codjiflo-reviewer` are both accepted. An explicit command mention may appear after ordinary prose (for example, `Owner authorized option (A). @codjiflo claude`), but the command and all its options must stay on the same line. Use `@codjiflo review [preset] [full|incremental]` or the shorthand `@codjiflo <preset> [full|incremental]`. Explicit `review` defaults to `opus-xhigh` when no preset is supplied; shorthand requires a known canonical preset or alias immediately after the mention. Commands, presets, aliases, and modes are case-insensitive. After `review`, options are optional and order-independent; both forms allow at most one preset and one mode, and duplicate arguments are rejected. Only newly created issue comments trigger work; editing an existing comment does not.
+`@codjiflo` and `@codjiflo-reviewer` are both accepted. An explicit command mention may appear after ordinary prose (for example, `Owner authorized option (A). @codjiflo neon`), but the command and all its options must stay on the same line. Use `@codjiflo review [preset] [full|incremental]` or the shorthand `@codjiflo <preset> [full|incremental]`. Explicit `review` defaults to `neon-xhigh` when no preset is supplied; shorthand requires a known canonical preset or alias immediately after the mention. Commands, presets, aliases, and modes are case-insensitive. After `review`, options are optional and order-independent; both forms allow at most one preset and one mode, and duplicate arguments are rejected. Only newly created issue comments trigger work; editing an existing comment does not.
 
 Bare mentions, casual mentions such as `Thanks @codjiflo for reviewing`, `Could @codjiflo review this?`, or `Thanks @codjiflo claude did great`, unknown shorthand profiles, and commands inside Markdown blockquotes, fenced or indented code blocks, or inline code do not trigger a review. A mention after ordinary prose triggers only if the rest of its line matches the complete command syntax and ends the paragraph: put a blank line before any following prose. A soft line break does not finish an after-prose command, so wrapping `Thanks to @codjiflo claude` onto a following `for the review` line remains inert. An earlier casual mention does not hide a valid standalone command on a later line. A standalone command (the mention starts its line, optionally preceded by whitespace) beginning with `review` or a known profile rejects unknown or duplicate options rather than ignoring them. Inline code before a mention still counts as a nonempty prefix, so `` `x` @codjiflo review turbo `` is ignored rather than reported as an invalid standalone command. For example, `@codjiflo turbo` is ignored, while standalone `@codjiflo review turbo` and `@codjiflo claude turbo` are invalid. Both forms require the same approved original comment author; bot-authored comments never trigger reviews.
 
 ## Presets
 
-| Preset | Provider/model default | Model effort | Default e-code-review recipe |
+| Preset | Backend / model default | Model effort | Default e-code-review recipe |
 | --- | --- | --- | --- |
-| `opus-xhigh` (default; alias `claude`) | OMP `anthropic/claude-opus-5-5` | high | xhigh |
+| `neon-xhigh` (default; alias `neon`) | Antigravity CLI (`agy`) `gemini-4-neon` | high | xhigh |
+| `neon-medium` | Antigravity CLI (`agy`) `gemini-4-neon` | medium | high |
+| `opus-xhigh` (alias `claude`) | OMP `anthropic/claude-opus-5-5` | high | xhigh |
 | `opus-medium` | OMP `anthropic/claude-opus-5-5` | medium | high |
 
-Preset names and aliases are case-insensitive in mentions and local `--preset` arguments. Aliases resolve to their canonical preset before kickoff, review publication, and baseline selection; they do not add extra presets. An alias and its canonical name still count as two preset arguments and are rejected together in a mention. `opus-high` has been replaced by `opus-xhigh`; the old name is no longer accepted. Model effort remains `high`, and the medium preset is unchanged. Historical reviews marked with the old name do not match the new preset, so the next review falls back to full scope.
+Preset names and aliases are case-insensitive in mentions and local `--preset` arguments. Aliases resolve to their canonical preset before kickoff, review publication, and baseline selection; they do not add extra presets. An alias and its canonical name still count as two preset arguments and are rejected together in a mention. `opus-high` has been replaced by `opus-xhigh`; the old name is no longer accepted. Historical reviews marked with another preset do not match the new preset, so the next review falls back to full scope while still reconciling the outstanding findings ledger.
 
-`CODJIFLO_OPUS_MODEL` overrides the model ID for every preset. Overrides must be fully provider-qualified as `anthropic/…`. Configure a model available through your normal OMP installation; there is no Codjiflo cross-provider fallback. The `claude` name is a command alias, not an executable selection.
+`CODJIFLO_NEON_MODEL` overrides the Antigravity base model slug for `neon-*` presets (without provider prefix or effort suffix, for example `gemini-4-neon` or `gemini-4-carbon`; the preset supplies `--effort`). `CODJIFLO_OPUS_MODEL` overrides the OMP model ID for `opus-*` presets and must be fully provider-qualified as `anthropic/…`. Configure a model available through your normal `agy` or `omp` installation; there is no Codjiflo cross-provider fallback. The `neon` and `claude` names are command aliases, not executable selections.
 
 When `.codjiflo/code-review/PROMPT.md` is absent, the default high and xhigh methodology uses eight/ten sequential independent angles (no subagent fanout), deduplication without verification, severity ordering, a gap sweep for xhigh, and caps of ten/fifteen new findings. Outstanding findings from earlier rounds are reassessed separately and do not consume that cap. These instructions are adapted from the e-code-review skill and embedded in the reviewer; no skill installation is required on the runner. Structured JSON/native GitHub reviews replace ReportFindings. See `src/prompt.mjs` for the complete instructions.
 
@@ -72,7 +76,7 @@ Runs, logs, and artifacts of this public repository are public. For a reviewed r
 
 1. Fork or copy this repository. Set Actions variable **`CODJIFLO_APPROVED_USERS`** to comma-, whitespace-, or newline-separated GitHub logins, for example `alice,bob`. Matching is exact and case-insensitive. **Unset/empty means nobody is approved.** Repository ownership, association, collaborator status and write permission do not override this list.
 2. Create a GitHub App with repository permissions **Contents: read**, **Issues: read**, **Pull requests: read/write**, and **Actions: read/write** (the relay starts the workflow with it), subscribed to **Issue comment**. Set Actions variable `CODJIFLO_APP_ID` and secret `CODJIFLO_APP_PRIVATE_KEY`. Install the App on this repository and on every repository to review.
-3. Register trusted Linux self-hosted Actions runners with this repository under the label `codjiflo-reviewer`. Install Git, Node 22+, and current `omp` on its PATH. Configure and authenticate OMP **as the runner OS user** using OMP's normal setup and account pool. Do not copy CLI credentials into Codjiflo, this repository, or Actions artifacts.
+3. Register trusted Linux self-hosted Actions runners with this repository under the label `codjiflo-reviewer`. Install Git, Node 22+, and `agy` (for `neon-*` presets) and/or `omp` (for `opus-*` presets) on its PATH. Authenticate `agy` (for example with an interactive Google AI Ultra login as the runner OS user) and/or configure OMP **as the runner OS user**. Do not copy CLI credentials into Codjiflo, this repository, or Actions artifacts.
 4. Deploy the relay and point the App's webhook at it:
 
    ```sh
@@ -86,7 +90,7 @@ Runs, logs, and artifacts of this public repository are public. For a reviewed r
    WebCrypto imports PKCS#8 only, hence the conversion of GitHub's PKCS#1 key. The relay mints a token restricted to `actions: write` on the dispatch repository; it never touches reviewed repositories.
 5. Post an allowed mention on an open PR in any installed repository.
 
-Optional Actions variable `CODJIFLO_OPUS_MODEL` overrides the presets' provider-qualified OMP model.
+Optional Actions variables `CODJIFLO_NEON_MODEL` and `CODJIFLO_OPUS_MODEL` override the default model for `neon-*` and `opus-*` presets, respectively.
 
 ### GitHub identity and permissions
 
@@ -96,11 +100,11 @@ OMP authentication is independent of the GitHub token. Subscription/API access, 
 
 OMP work has one 45-minute limit; the review job has a 55-minute limit, below the GitHub App token's one-hour lifetime. Timeouts stop OMP and enter the normal failure-reporting path. After an authorized review job fails or is cancelled, a separate `ubuntu-latest` job reports its terminal status on the reviewed PR even if the self-hosted runner disappeared before uploading logs or running cleanup. It mints its own App token, not runner credentials, and submits no review verdict. It suppresses duplicate notices when a bot already posted a failure comment during the same run attempt or a native review carries that attempt's workflow marker. When the runner vanished mid-step (GitHub marks the job failed about ten minutes later and leaves a step `in_progress`) and no verdict from that attempt exists, the reporter dispatches `review.yml` again for the same comment, once per run: the retry's run name ends `(retry of run <id>)` and its PR notice carries a retry marker, so a later attempt of the original run links the pending retry or says the retry was already used instead of dispatching another. The retry's gate declines with `reason=superseded-by-<comment id>` when a newer comment on the PR would itself start a review (same command grammar and allowlist; prose mentions do not count). That lookup retries 5xx, 429 and network errors twice; if it still fails, the gate declines with `reason=superseded-check-failed` and says so on the PR (the gate fails if even that notice cannot be posted): a retry admitted blind could replace a newer request waiting in the PR's concurrency group. A retry that loses its runner too only reports. Any Actions API error during the reporter's check skips the retry, never the notice. GitHub declaring a runner lost does not prove its worker process died; if a suspended host resumes, the abandoned review can still publish alongside the retry, and two differing checkpoints for one generation leave the next incremental review without a baseline. Reporting still requires GitHub-hosted runner availability and API write access; force-cancelling the entire workflow can also stop its reporter. Keep the self-hosted machine running (including WSL for WSL-hosted runners: `wsl --shutdown` or a WSL restart drops every in-flight review); the retry does not restore a stopped runner or clean its temporary checkout. Workflow steps use `actions/github-script@v9`, which runs on Node 24 and needs self-hosted runners at v2.327.1 or later.
 
-### OMP authentication and account selection
+### Reviewer authentication and account selection
 
-OMP owns provider authentication, refresh, automatic quota-aware account selection, and its configured account pool. Codjiflo invokes the ordinary `omp` installation with the selected provider/model and does not pin an account, extract OAuth tokens, copy credentials from standalone CLIs, rotate API keys, or maintain quota/cooldown state. An exhausted account in a standalone Claude CLI does not establish that OMP's configured account pool is exhausted.
+`agy` (Antigravity CLI) owns its signed-in Google account session (such as a Google AI Ultra account) and token refresh under the runner OS user; `agy` uses one signed-in account per OS user. OMP owns provider authentication, refresh, automatic quota-aware account selection, and its configured account pool for `opus-*` presets. Codjiflo invokes the ordinary `agy` or `omp` installation with the selected model and effort and does not extract OAuth tokens, copy credentials, rotate API keys, or maintain quota/cooldown state. An exhausted account in one CLI does not establish that another backend is exhausted.
 
-Configure accounts through your normal OMP authentication workflow under the runner OS user. Ensure that user's service environment can find `omp` and its normal configuration. No Codjiflo API-key setup command, routing-state file, SDK installation, or credential migration is required. Existing obsolete Codjiflo pool files are not read. OMP account availability does not guarantee a model will finish a review: unsuccessful or incomplete runs still publish no verdict.
+Configure accounts through your normal `agy` / `omp` authentication workflow under the runner OS user. Ensure that user's service environment can find `agy` / `omp` and their normal configuration. On headless Linux runners where a desktop keyring is unavailable, `agy` uses file token storage (or set `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1`). No Codjiflo API-key setup command, routing-state file, SDK installation, or credential migration is required. Existing obsolete Codjiflo pool files are not read. Account availability does not guarantee a model will finish a review: unsuccessful or incomplete runs still publish no verdict.
 
 ### Per-repository settings
 
@@ -183,8 +187,8 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 | --- | --- |
 | `--repo owner/repo --comment ID` | Workflow path: re-reads the comment, authorizes its author, and reviews as that comment requests |
 | `--repo owner/repo --comment ID --gate` | Authorization/command check only; logs its decision and writes an Actions summary, sets `allowed` and `provider` in `GITHUB_OUTPUT`, plus `number`, `visibility`, `prepare-command`, and `source-submodules` for accepted requests; read-only API calls, no provider calls |
-| `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `opus-xhigh` incremental; still requires allowlist |
-| `--preset PRESET` | Select one of the two canonical presets or the `claude` alias |
+| `--repo owner/repo --pr N --requester login` | Trusted local invocation, default `neon-xhigh` incremental; still requires allowlist |
+| `--preset PRESET` | Select one of the four canonical presets (`neon-xhigh`, `neon-medium`, `opus-xhigh`, `opus-medium`) or aliases (`neon`, `claude`) |
 | `--full` | Full review in local invocation |
 | `--output FILE` | Retain the validated publication payload outside temporary review worktrees |
 | `--publish FILE` | Reconcile/retry a retained review without invoking OMP |
@@ -192,11 +196,11 @@ node bin/codjiflo-reviewer.mjs --repo owner/repo --pr 123 --requester your-login
 
 Local `--requester` is an operator assertion, not remote authentication. Do not expose this CLI as an unauthenticated service. Comment-based runs always use the fetched comment's author instead.
 
-Other environment: `GH_TOKEN` is a fallback for `GITHUB_TOKEN`; `GITHUB_API_URL` supports GitHub Enterprise/the fixture server; PR metadata supplies its clone URL. `CODJIFLO_OMP_BIN` overrides the reviewer OMP executable path (also used by fixtures). `CODJIFLO_DOCS_CODEX_BIN` independently overrides Codex for the optional documentation helper only. `GITHUB_RUN_ID`, `GITHUB_REPOSITORY`, and `GITHUB_SERVER_URL` build kickoff links to the run in the repository hosting the workflow.
+Other environment: `GH_TOKEN` is a fallback for `GITHUB_TOKEN`; `GITHUB_API_URL` supports GitHub Enterprise/the fixture server; PR metadata supplies its clone URL. `CODJIFLO_AGY_BIN` and `CODJIFLO_OMP_BIN` override the reviewer `agy` and `omp` executable paths (also used by fixtures). `CODJIFLO_DOCS_CODEX_BIN` independently overrides Codex for the optional documentation helper only. `GITHUB_RUN_ID`, `GITHUB_REPOSITORY`, and `GITHUB_SERVER_URL` build kickoff links to the run in the repository hosting the workflow.
 
 The disposable checkout and reviewer receive a copied environment without caller repository selectors (`GIT_DIR`, `GIT_WORK_TREE`, index/object/common-directory overrides, namespaces, discovery ceilings, and related Git-local variables), inherited pathspec modes (`GIT_ICASE_PATHSPECS`, `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS`, and `GIT_LITERAL_PATHSPECS`), or command-level config overrides (`GIT_CONFIG`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, and indexed `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`). Selector names are matched case-insensitively. This keeps Git inspection pinned to the fetched PR rather than a caller's checkout and prevents inherited pathspec magic from breaking current-head repository-instruction lookup. Git installation, TLS, and authentication transport settings such as `GIT_EXEC_PATH`, `GIT_SSL_CAINFO`, and `GIT_SSH_COMMAND` remain available. Normal trusted host Git configuration still applies, including operator selectors `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, and `GIT_CONFIG_NOSYSTEM`; this is not a universal Git-configuration sandbox. The orchestrator adds its GitHub authorization header only to its own Git commands. The reviewer receives neither that header nor inherited `GITHUB_TOKEN`/`GH_TOKEN` variables (including mixed-case spellings), while provider API credentials remain available. Publication retains the orchestrator's GitHub credentials.
 
-Every preset invokes OMP in print/JSON mode with the selected model and thinking effort, no persistent session, and a trusted Codjiflo extension exposing `final_review`. Codjiflo limits active reviewer tools to `read`, `grep`, `glob`, `find`, `bash`, and `final_review`, and disables normal extension/skill/rule loading for the invocation. Tool selection and extension hooks are **policy controls, not an OS sandbox**: in particular, allowed Bash commands can write files, access the network, and access runner-user secrets. The review-only prompt does not make arbitrary PR contents safe. Use only trusted PR authors and contents on a trusted runner. Temporary runtime scratch/cache paths are outside the checkout and staged evidence and are cleaned up with the invocation.
+`neon-*` presets invoke `agy` in streaming JSON mode (`--input-format stream-json --output-format stream-json`) with `--model`, `--effort`, `--json-schema`, `--disable-slash-commands`, `--sandbox`, `--print-timeout 45m`, ephemeral `--settings` (denying `write_file(*)`, `read_url(*)`, `execute_url(*)`, and `mcp(*)` while allowing `read_file(*)` and `command(*)`), and `--add-dir` for staged navigable evidence when present. Per-run conversation files written by `agy` under `~/.gemini/antigravity-cli/` are cleaned up when the invocation finishes. `opus-*` presets invoke OMP in print/JSON mode with the selected model and thinking effort, no persistent session, and a trusted Codjiflo extension exposing `final_review`. Codjiflo limits active OMP reviewer tools to `read`, `grep`, `glob`, `find`, `bash`, and `final_review`, and disables normal extension/skill/rule loading for the invocation. Tool selection, permissions, and extension hooks are **policy controls, not an OS sandbox**: in particular, allowed shell commands can access runner-user secrets (and `agy` does not disable workspace `.agents/` or global hooks/rules outside `--disable-slash-commands`). The review-only prompt does not make arbitrary PR contents safe. Use only trusted PR authors and contents on a trusted runner. Temporary runtime scratch/cache paths are outside the checkout and staged evidence and are cleaned up with the invocation.
 
 Prompts up to 512 Ki UTF-16 code units are unchanged and sent inline; preparation and execution share the same budget constant. Larger reviews keep the **complete methodology and output/validation rules in the initial prompt**, while staging structured evidence outside the PR-controlled checkout: `review-scope.diff`, authoritative current-PR `pr-patches.json`, and a JSON-lines inventory with per-file additions/deletions, rename metadata, and exact UTF-8 byte ranges in the staged text. Each scope record carries its `scope` range and, when its current filename matches the current PR API response, its primary `api` range and `anchors` value (`"inline"` for valid inline anchors, `"none"` otherwise). Alternate API records connected through current or previous filenames are retained in `apiRelated`, each with its API filename, optional previous filename, range, and the same `anchors` enum. These alternates support location mapping when Git and GitHub detect renames differently, including LEFT anchors; the selected API record's current filename is always the publication path. API-only files retain standalone records without `scope`. A small manifest names these files and gives total counts/sizes; it does not embed an unbounded filename list. The reviewer enumerates the inventory and processes **every scope file and hunk incrementally**, retaining a compact coverage ledger and API ranges across bounded batches and applying the full methodology. Current-PR API records are consulted directly by retained range for anchor mapping, without repeated inventory scans or obligatory duplicate-diff ingestion. Evidence-mode instructions name the staged files rather than referring to absent inline patches; small inline prompts retain their shape.
 
@@ -228,9 +232,10 @@ The smoke runs the **real entry point and orchestration**, native fetch against 
 
 Fixture executables prove adapter behavior, not real OMP authentication, account selection, model analysis, or OS isolation. Live acceptance requires the installed OMP and actual model to consume evidence and produce the structured verdict; a fixture payload or copied CLI options alone is not that proof.
 
-Opt-in native smokes exercise the installed OMP and actual models:
+Opt-in native smokes exercise the installed `agy` / `omp` and actual models:
 
 ```sh
+node test/agy-native-smoke.mjs neon-medium
 node test/omp-native-smoke.mjs opus-medium
 node test/omp-incremental-native-smoke.mjs opus-medium
 ```

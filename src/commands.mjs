@@ -1,11 +1,15 @@
-export const COMMAND_SYNTAX = ['@codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental]', '@codjiflo <preset> [full|incremental]'];
+export const DEFAULT_PRESET = 'neon-xhigh';
+export const COMMAND_SYNTAX = ['@codjiflo review [neon-xhigh|neon-medium|neon|opus-xhigh|opus-medium|claude] [full|incremental]', '@codjiflo <preset> [full|incremental]'];
 export const PRESETS = {
-  'opus-xhigh': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'high', level: 'xhigh' },
-  'opus-medium': { provider: 'anthropic', model: 'anthropic/claude-opus-5-5', effort: 'medium', level: 'high' },
+  'neon-xhigh': { provider: 'antigravity', runner: 'agy', model: 'gemini-4-neon', effort: 'high', level: 'xhigh' },
+  'neon-medium': { provider: 'antigravity', runner: 'agy', model: 'gemini-4-neon', effort: 'medium', level: 'high' },
+  'opus-xhigh': { provider: 'anthropic', runner: 'omp', model: 'anthropic/claude-opus-5-5', effort: 'high', level: 'xhigh' },
+  'opus-medium': { provider: 'anthropic', runner: 'omp', model: 'anthropic/claude-opus-5-5', effort: 'medium', level: 'high' },
 };
 
 export function normalizePreset(value) {
   const name = value.toLowerCase();
+  if (name === 'neon') return 'neon-xhigh';
   if (name === 'claude') return 'opus-xhigh';
   return Object.hasOwn(PRESETS, name) ? name : null;
 }
@@ -60,7 +64,7 @@ export function parseCommand(body) {
     // Standalone command lines keep their existing grammar and error handling.
     if (prefix.trim() && suffix.split('\n\n', 1)[0].slice(rest.length).trim()) continue;
     const words = (first === 'review' ? rest : `${first}${rest}`).trim().split(/\s+/).filter(Boolean);
-    let preset = 'opus-xhigh';
+    let preset = DEFAULT_PRESET;
     let mode = 'incremental';
     const seen = new Set();
     let invalid = false;

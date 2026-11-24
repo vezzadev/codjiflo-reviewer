@@ -49,7 +49,7 @@ console.log(events.map(event => JSON.stringify(event)).join('\\n'));
   return { temp, cwd, capture, env, run: (preset = PRESETS['opus-xhigh']) => runReviewer({ preset, prompt: 'Review completely or submit INCOMPLETE.', cwd, temp, env }) };
 }
 
-for (const name of Object.keys(PRESETS)) test(`OMP ${name} uses shared auth, explicit model, private scratch and cleanup`, async () => {
+for (const name of Object.keys(PRESETS).filter(name => PRESETS[name].runner === 'omp')) test(`OMP ${name} uses shared auth, explicit model, private scratch and cleanup`, async () => {
   const f = await setup();
   try {
     const originalEnv = { ...f.env };

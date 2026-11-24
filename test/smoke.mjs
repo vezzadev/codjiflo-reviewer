@@ -5,8 +5,8 @@ import { runProcess } from '../src/runner.mjs';
 import { fixture } from './fixture.mjs';
 
 // No remote writes, credentials or real provider account required. This launches
-// the actual entry point, git checkout/fetch, native-fetch HTTP client and OMP adapter.
-for (const [preset, canonical] of [['claude', 'opus-xhigh'], ['opus-medium', 'opus-medium']]) {
+// the actual entry point, git checkout/fetch, native-fetch HTTP client and both reviewer adapters.
+for (const [preset, canonical, runner] of [['neon', 'neon-xhigh', 'agy'], ['neon-medium', 'neon-medium', 'agy'], ['claude', 'opus-xhigh', 'omp'], ['opus-medium', 'opus-medium', 'omp']]) {
  for (const headPrompt of [undefined, 'Review café parsing and résumé handling.\nCheck cancellation paths.', '']) {
   const f = await fixture({ headPrompt });
   try {
@@ -22,7 +22,9 @@ for (const [preset, canonical] of [['claude', 'opus-xhigh'], ['opus-medium', 'op
     assert.ok(review.body.includes(`"preset":"${canonical}"`));
     assert.ok(f.state.posts[0].body.body.includes(`starting **${canonical}**`));
     const captured = await readFile(f.capture, 'utf8');
-    assert.equal(await readFile(f.capture + '.stdin', 'utf8'), captured);
+    const rawStdin = await readFile(f.capture + '.stdin', 'utf8');
+    if (runner === 'agy') assert.deepEqual(JSON.parse(rawStdin.trim()), { event: 'user', message: { content: captured } });
+    else assert.equal(rawStdin, captured);
     if (headPrompt === undefined) {
       assert.ok(!captured.includes('Repository review instructions'));
     } else {
@@ -77,7 +79,7 @@ for (const mode of ['approve', 'findings']) {
     const recover = () => runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', path], {
       env: {
         ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
-        CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed',
+        CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed', CODJIFLO_AGY_BIN: '/no-provider-needed',
       },
     });
     await recover();

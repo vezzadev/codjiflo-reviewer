@@ -34,7 +34,7 @@ function assertNestedGitScenarios(tap) {
 test('every preset keeps full and incremental methodology inline with complete navigable evidence', async () => {
   const f = await fixture({ newLine: 'é🙂漢'.repeat(300000) });
   try {
-    for (const [preset, canonical] of [['claude', 'opus-xhigh'], ['opus-medium', 'opus-medium']]) for (const full of [true, false]) {
+    for (const [preset, canonical] of [['neon', 'neon-xhigh'], ['neon-medium', 'neon-medium'], ['claude', 'opus-xhigh'], ['opus-medium', 'opus-medium']]) for (const full of [true, false]) {
       f.state.reviews = full ? [] : [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: canonical, findings: [], kickoffId: 1 })} -->` }];
       await f.run({ full, preset });
       const input = await readFile(f.capture, 'utf8');
@@ -64,8 +64,8 @@ test('every preset keeps full and incremental methodology inline with complete n
   } finally { await f.close(); }
 });
 
-test('oversized custom methodology fails closed for every preset before OMP invocation or publication', async t => {
-  for (const preset of ['claude', 'opus-medium']) await t.test(preset, async () => {
+test('oversized custom methodology fails closed for every preset before reviewer invocation or publication', async t => {
+  for (const preset of ['neon', 'neon-medium', 'claude', 'opus-medium']) await t.test(preset, async () => {
     const f = await fixture({ headPrompt: 'Inspect café 🙂 cancellation.\n'.repeat(45000) });
     try {
       await assert.rejects(f.run({ preset, full: true }));
@@ -77,7 +77,7 @@ test('oversized custom methodology fails closed for every preset before OMP invo
 });
 
 test('unprocessed large scope returns INCOMPLETE for every preset without publishing a defect verdict', async t => {
-  for (const preset of ['claude', 'opus-medium']) await t.test(preset, async () => {
+  for (const preset of ['neon', 'neon-medium', 'claude', 'opus-medium']) await t.test(preset, async () => {
     const f = await fixture({ newLine: 'x'.repeat(600000) });
     try {
       await assert.rejects(f.run({ preset, mode: 'incomplete-input', full: true }));
@@ -278,7 +278,7 @@ test('hostile Git pathspec modes preserve current-head prompt authority and oper
     try {
       await writeFile(join(f.repo, '.codjiflo', 'code-review', 'PROMPT.md'), 'UNCOMMITTED-SOURCE-INSTRUCTIONS\n');
       await writeFile(f.env.GIT_CONFIG_GLOBAL, '[codjiflo]\npathspecfixture = operator-config-survives\n');
-      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'opus-xhigh', findings: [], kickoffId: 1 })} -->` }];
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'neon-xhigh', findings: [], kickoffId: 1 })} -->` }];
       const transport = {
         GIT_SSH_COMMAND: 'ssh -oBatchMode=yes',
         GIT_SSL_CAINFO: f.env.GIT_CONFIG_GLOBAL,
@@ -695,57 +695,66 @@ test('unbounded inventory records and inconsistent scope indices fail closed', a
   } finally { await rm(temp, { recursive: true, force: true }); }
 });
 
-test('OMP invalid, missing, failed, aborted or truncated completion cannot publish valid-looking results', async t => {
-  for (const preset of ['claude', 'opus-medium']) for (const mode of [
+test('invalid, missing, failed, aborted or truncated completion cannot publish valid-looking results', async t => {
+  for (const preset of ['neon', 'neon-medium', 'claude', 'opus-medium']) for (const mode of [
     'malformed', 'missing-result', 'duplicate-result', 'missing-tool-end', 'mismatched-tool-end',
     'error-result', 'fatal-error', 'fatal-exit', 'missing-completion', 'aborted', 'length', 'truncated',
-  ]) await t.test(`${preset}: ${mode}`, async () => {
+  ]) {
+    if (preset.startsWith('neon') && ['missing-tool-end', 'mismatched-tool-end'].includes(mode)) continue;
+    await t.test(`${preset}: ${mode}`, async () => {
+      const f = await fixture();
+      try {
+        await assert.rejects(f.run({ mode, preset }));
+        assert.equal(verdicts(f).length, 0);
+        assert.match(f.state.posts.at(-1).body.body, /failed/);
+      } finally { await f.close(); }
+    });
+  }
+});
+
+test('nonzero reviewer CLI posts only redacted protocol diagnostics, never tool/model output or stderr', async t => {
+  for (const [preset, label] of [['neon-xhigh', 'Antigravity'], ['opus-xhigh', 'OMP']]) await t.test(preset, async () => {
     const f = await fixture();
     try {
-      await assert.rejects(f.run({ mode, preset }));
+      await assert.rejects(f.run({ preset, mode: 'fatal-exit', providerEnv: { OPENAI_API_KEY: 'fixture-provider-token-not-real' } }), error => {
+        assert.match(error.stdout, /HOST-TOOL-SECRET-do-not-publish/);
+        assert.match(error.stdout, /PRIVATE-MODEL-TEXT-do-not-publish/);
+        assert.match(error.message, /STDERR-HOST-SECRET-do-not-publish/);
+        return true;
+      });
       assert.equal(verdicts(f).length, 0);
-      assert.match(f.state.posts.at(-1).body.body, /failed/);
+      const body = f.state.posts.at(-1).body.body;
+      assert.match(body, new RegExp(`${label} review failed \\(exit 1\\)`));
+      assert.match(body, /Fixture safe terminal diagnostic token=\[REDACTED\]/);
+      assert.doesNotMatch(body, /HOST-TOOL-SECRET|PRIVATE-MODEL-TEXT|ERROR-EXTRA-SECRET|STDERR-HOST-SECRET|fixture-provider-token-not-real|verbose CLI stderr/);
     } finally { await f.close(); }
   });
 });
 
-test('nonzero OMP CLI posts only redacted protocol diagnostics, never tool/model output or stderr', async () => {
-  const f = await fixture();
-  try {
-    await assert.rejects(f.run({ mode: 'fatal-exit', providerEnv: { OPENAI_API_KEY: 'fixture-provider-token-not-real' } }), error => {
-      assert.match(error.stdout, /HOST-TOOL-SECRET-do-not-publish/);
-      assert.match(error.stdout, /PRIVATE-MODEL-TEXT-do-not-publish/);
-      assert.match(error.message, /STDERR-HOST-SECRET-do-not-publish/);
-      return true;
-    });
-    assert.equal(verdicts(f).length, 0);
-    const body = f.state.posts.at(-1).body.body;
-    assert.match(body, /OMP review failed \(exit 1\)/);
-    assert.match(body, /Fixture safe terminal diagnostic token=\[REDACTED\]/);
-    assert.doesNotMatch(body, /HOST-TOOL-SECRET|PRIVATE-MODEL-TEXT|ERROR-EXTRA-SECRET|STDERR-HOST-SECRET|fixture-provider-token-not-real|verbose CLI stderr/);
-  } finally { await f.close(); }
+test('nonzero reviewer CLI without protocol diagnostics uses a safe fixed fallback', async t => {
+  for (const [preset, label] of [['neon-xhigh', 'Antigravity'], ['opus-xhigh', 'OMP']]) await t.test(preset, async () => {
+    const f = await fixture();
+    try {
+      await assert.rejects(f.run({ preset, mode: 'raw-exit' }));
+      assert.equal(verdicts(f).length, 0);
+      const body = f.state.posts.at(-1).body.body;
+      assert.match(body, new RegExp(`${label} review failed \\(exit 7\\)\\. See process logs for details`));
+      assert.doesNotMatch(body, /RAW-STDOUT-SECRET|STDERR-HOST-SECRET/);
+    } finally { await f.close(); }
+  });
 });
 
-test('nonzero OMP CLI without protocol diagnostics uses a safe fixed fallback', async () => {
-  const f = await fixture();
-  try {
-    await assert.rejects(f.run({ mode: 'raw-exit' }));
-    assert.equal(verdicts(f).length, 0);
-    const body = f.state.posts.at(-1).body.body;
-    assert.match(body, /OMP review failed \(exit 7\)\. See process logs for details/);
-    assert.doesNotMatch(body, /RAW-STDOUT-SECRET|STDERR-HOST-SECRET/);
-  } finally { await f.close(); }
-});
-
-test('non-JSON OMP stdout fails closed even with completion and a valid result', async () => {
-  const f = await fixture();
-  try {
-    await assert.rejects(f.run({ mode: 'non-json-completed' }));
-    assert.equal(verdicts(f).length, 0);
-    const body = f.state.posts.at(-1).body.body;
-    assert.match(body, /invalid JSONL protocol output/);
-    assert.doesNotMatch(body, /BANNER-SECRET/);
-  } finally { await f.close(); }
+test('non-JSON reviewer stdout fails closed even with completion and a valid result', async t => {
+  for (const preset of ['neon-xhigh', 'opus-xhigh']) await t.test(preset, async () => {
+    const f = await fixture();
+    try {
+      await assert.rejects(f.run({ preset, mode: 'non-json-completed' }));
+      assert.equal(verdicts(f).length, 0);
+      const body = f.state.posts.at(-1).body.body;
+      assert.match(body, /invalid JSONL protocol output/);
+      assert.doesNotMatch(body, /BANNER-SECRET/);
+    } finally { await f.close(); }
+  });
 });
 
 test('a 3000-file inventory stays navigable without inflating the initial prompt', async () => {

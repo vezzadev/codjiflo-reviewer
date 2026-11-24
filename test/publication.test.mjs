@@ -1073,7 +1073,7 @@ test('default CLI results preserve failed changes request and recover as COMMENT
       env: {
         ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
         CODJIFLO_RESULT_PATH: '', CODJIFLO_APPROVED_USERS: 'alice',
-        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: mode, FIXTURE_CAPTURE: f.capture,
+        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), CODJIFLO_AGY_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: mode, FIXTURE_CAPTURE: f.capture,
       },
     });
     const results = async () => (await readdir(f.temp)).filter(name => /^codjiflo-result-[a-f0-9-]+\.json$/.test(name));
@@ -1102,7 +1102,7 @@ test('default CLI results preserve failed changes request and recover as COMMENT
     assert.equal(approval.state, 'APPROVED');
     f.state.movement = 'head';
     const recover = () => runProcess(process.execPath, [cli, '--publish', join(f.temp, first)], {
-      env: { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' },
+      env: { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed', CODJIFLO_AGY_BIN: '/no-provider-needed' },
     });
     await recover();
     assert.equal(f.state.reviews.length, 2);
@@ -1127,7 +1127,7 @@ test('explicit result path remains caller-selected and may overwrite an earlier 
       env: {
         ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api,
         CODJIFLO_RESULT_PATH: join(f.temp, 'ignored-result.json'), CODJIFLO_APPROVED_USERS: 'alice',
-        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
+        CODJIFLO_OMP_BIN: join(f.temp, 'fake-cli.mjs'), CODJIFLO_AGY_BIN: join(f.temp, 'fake-cli.mjs'), FIXTURE_MODE: 'approve', FIXTURE_CAPTURE: f.capture,
       },
     });
     assert.notEqual(await readFile(path, 'utf8'), earlier);

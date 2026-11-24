@@ -47,7 +47,7 @@ async function gate({ repo = 'org/repo', author = 'alice', type = 'User', body =
     env: {
       ...process.env, GITHUB_OUTPUT: outputPath, GITHUB_STEP_SUMMARY: summaryPath,
       GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`, GITHUB_TOKEN: 'fixture-token-not-real', GH_TOKEN: '',
-      CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: '/nonexistent-reviewer', CODJIFLO_REDISPATCH_OF: redispatchOf,
+      CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: '/nonexistent-reviewer', CODJIFLO_AGY_BIN: '/nonexistent-reviewer', CODJIFLO_REDISPATCH_OF: redispatchOf,
     },
   });
   const read = path => readFile(path, 'utf8').catch(error => { if (error.code !== 'ENOENT') throw error; return ''; });
@@ -74,6 +74,9 @@ test('gate authorizes only the fetched comment author against the allowlist', as
 
 test('gate explains every decision in logs and the Actions summary without starting review work', async t => {
   const cases = [
+    { name: 'default review command uses neon-xhigh', body: '@codjiflo-reviewer review', allowed: true, reason: 'approved', provider: 'antigravity', preset: 'neon-xhigh', mode: 'incremental' },
+    { name: 'Neon alias full command', body: 'Please @codjiflo neon full', allowed: true, reason: 'approved', provider: 'antigravity', preset: 'neon-xhigh', mode: 'full' },
+    { name: 'Neon medium command', body: '@codjiflo neon-medium', allowed: true, reason: 'approved', provider: 'antigravity', preset: 'neon-medium', mode: 'incremental' },
     { name: 'embedded command', body: 'Owner authorized option (A). @codjiflo opus-medium', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-medium', mode: 'incremental' },
     { name: 'Claude full command', body: 'Please @codjiflo claude full', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-xhigh', mode: 'full' },
     { name: 'embedded command ends paragraph', body: 'Owner authorized option (A). @codjiflo opus-medium\n\nThanks for taking another look.', allowed: true, reason: 'approved', provider: 'anthropic', preset: 'opus-medium', mode: 'incremental' },
@@ -115,7 +118,7 @@ test('gate explains every decision in logs and the Actions summary without start
       // malformed command is answered on the PR, without echoing the comment.
       assert.equal(g.requests.filter(request => request.startsWith('GET ')).length, allowed ? 3 : 2);
       assert.ok(g.requests.every(request => request.endsWith(' Bearer fixture-token-not-real')));
-      assert.deepEqual(g.comments, scenario.fails ? ['Codjiflo Reviewer did not start: invalid review command. Use `@codjiflo review [opus-xhigh|opus-medium|claude] [full|incremental]` or `@codjiflo <preset> [full|incremental]`.'] : []);
+      assert.deepEqual(g.comments, scenario.fails ? ['Codjiflo Reviewer did not start: invalid review command. Use `@codjiflo review [neon-xhigh|neon-medium|neon|opus-xhigh|opus-medium|claude] [full|incremental]` or `@codjiflo <preset> [full|incremental]`.'] : []);
     } finally { await g.close(); }
   });
 });
@@ -133,7 +136,7 @@ test('a lost-runner retry gate yields only to a newer comment that would start a
   const newer = { id: 6451172900, user: user('ALICE'), body: 'Rebased. @codjiflo opus-medium' };
   // Posted in the dispatched comment's second: a `since` equal to its created_at would drop it.
   const sameSecond = { ...newer, updated_at: '2026-11-17T03:20:00Z' };
-  const approved = 'reason=approved provider=anthropic preset=opus-xhigh mode=incremental';
+  const approved = 'reason=approved provider=antigravity preset=neon-xhigh mode=incremental';
   const retry = { redispatchOf: '44009512925' };
   const notice = 'Codjiflo Reviewer did not run the automatic retry: it could not check this PR for newer review requests. Re-request the review if it is still needed.';
   for (const [name, options, reason, lookups, posted = []] of [

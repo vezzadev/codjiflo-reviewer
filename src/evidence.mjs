@@ -43,13 +43,14 @@ function scopeFiles(numstat) {
   return files;
 }
 
-export async function reviewInput({ options, temp, cwd, git }) {
-  const inline = prompt(options);
+export async function reviewInput({ preset, options, temp, cwd, git }) {
+  const promptOptions = { runner: preset?.runner ?? 'omp', ...options };
+  const inline = prompt(promptOptions);
   if (inline.length <= MAX_INLINE_INPUT) return inline;
   // Methodology is never hidden behind evidence reads. Refuse an oversized
   // custom recipe before invoking the provider, rather than truncate it.
-  if (prompt({ ...options, diff: '', currentDiff: '', priorFindings: [] }).length > MAX_INLINE_INPUT - 16000) {
-    throw new Error('Review instructions exceed the inline OMP input budget; no review completed and no instructions were truncated');
+  if (prompt({ ...promptOptions, diff: '', currentDiff: '', priorFindings: [] }).length > MAX_INLINE_INPUT - 16000) {
+    throw new Error('Review instructions exceed the inline input budget; no review completed and no instructions were truncated');
   }
   const parent = resolve(temp), checkout = resolve(cwd);
   const fromCheckout = relative(checkout, parent);
@@ -121,7 +122,7 @@ export async function reviewInput({ options, temp, cwd, git }) {
     writeFile(join(directory, 'read-evidence.mjs'), reader, { mode: 0o400 }),
   ]);
   const evidence = { directory, scopeFiles: scope.length, apiFiles: records.length, inventoryBytes: Buffer.byteLength(index), scopeBytes: byte, apiBytes: Buffer.byteLength(patches), priorFindingCount: (options.priorFindings ?? []).length, priorFindingBytes: Buffer.byteLength(priorFindings) };
-  const input = prompt({ ...options, evidence });
+  const input = prompt({ ...promptOptions, evidence });
   if (input.length > MAX_INLINE_INPUT) throw new Error('Navigable review prompt exceeds inline budget; no instructions or scope were truncated');
   return input;
 }
