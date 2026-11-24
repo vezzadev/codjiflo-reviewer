@@ -127,6 +127,7 @@ jobs:
           COMMENT_ID: ${{ inputs.comment-id }}
           GITHUB_TOKEN: ${{ steps.app.outputs.token }}
           CODJIFLO_APPROVED_USERS: ${{ vars.CODJIFLO_APPROVED_USERS }}
+          CODJIFLO_NEON_MODEL: ${{ vars.CODJIFLO_NEON_MODEL }}
           CODJIFLO_OPUS_MODEL: ${{ vars.CODJIFLO_OPUS_MODEL }}
           CODJIFLO_SOURCE_SUBMODULES: ${{ needs.gate.outputs.source-submodules }}
           CODJIFLO_LOG_STREAM: ${{ needs.gate.outputs.visibility == 'public' && 'live' || 'withheld' }}

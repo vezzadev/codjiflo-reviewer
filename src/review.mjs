@@ -194,8 +194,8 @@ export async function review({ request, github, env = process.env, reviewer = ru
     const diff = await git(['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--submodule=short', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', scope, head, '--']);
     const currentDiff = JSON.stringify([...files.values()].map(file => ({ filename: file.path, previous_filename: file.previousPath, patch: file.patch })), null, 2);
     const customInstructions = currentPromptBlob === undefined ? undefined : await git(['cat-file', 'blob', currentPromptBlob]);
-    const input = await reviewInput({ preset, options: { level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions, priorFindings }, cwd, temp, git });
-    const result = await reviewer({ preset, prompt: input, cwd, temp, env: reviewEnv, logStream });
+    const { prompt: input, evidenceDir } = await reviewInput({ preset, options: { level: preset.level, mode, base, head, scope, diff, currentDiff, customInstructions, priorFindings }, cwd, temp, git });
+    const result = await reviewer({ preset, prompt: input, evidenceDir, cwd, temp, env: reviewEnv, logStream });
     const comments = validateResult(result, files, preset.level === 'xhigh' ? 15 : 10, priorFindings);
     const publication = randomUUID();
     const resultPath = output ?? `codjiflo-result-${publication}.json`;

@@ -62,24 +62,28 @@ test('a mention by an unapproved author or without a command performs no review 
   });
 });
 
-test('under Actions, OMP output reaches the logs only on an explicit live decision', async t => {
-  for (const [setting, expected] of [['live', 'live'], ['withheld', 'withheld'], ['', 'withheld'], ['public', 'withheld']]) await t.test(setting || 'unset', async () => {
+test('under Actions, reviewer output reaches the logs only on an explicit live decision', async t => {
+  for (const [preset, started, withheld] of [
+    ['neon-xhigh', 'AGY agent started', 'Antigravity output withheld from logs'],
+    ['opus-xhigh', 'OMP agent started', 'OMP output withheld from logs'],
+  ]) for (const [setting, expected] of [['live', 'live'], ['withheld', 'withheld'], ['', 'withheld'], ['public', 'withheld']]) await t.test(`${preset}: ${setting || 'unset'}`, async () => {
     const f = await fixture();
     try {
-      const stdout = await f.run({ providerEnv: { GITHUB_ACTIONS: 'true', CODJIFLO_LOG_STREAM: setting } });
-      assert.equal(stdout.includes('OMP agent started'), expected === 'live');
+      const stdout = await f.run({ preset, providerEnv: { GITHUB_ACTIONS: 'true', CODJIFLO_LOG_STREAM: setting } });
+      assert.equal(stdout.includes(started), expected === 'live');
       assert.equal(stdout.includes('"type":'), false);
-      assert.equal(stdout.includes('OMP output withheld from logs'), expected === 'withheld');
+      assert.equal(stdout.includes('"event":'), false);
+      assert.equal(stdout.includes(withheld), expected === 'withheld');
       assert.equal(verdicts(f)[0].body.event, 'APPROVE');
     } finally { await f.close(); }
   });
 });
 
-test('OMP failures, malformed results and tool errors never approve', async t => {
-  for (const scenario of ['failure', 'malformed', 'error-result']) await t.test(scenario, async () => {
+test('reviewer failures, malformed results and tool errors never approve', async t => {
+  for (const preset of ['neon-xhigh', 'opus-xhigh']) for (const scenario of ['failure', 'malformed', 'error-result']) await t.test(`${preset}: ${scenario}`, async () => {
     const f = await fixture();
     try {
-      await assert.rejects(f.run({ mode: scenario }));
+      await assert.rejects(f.run({ preset, mode: scenario }));
       assert.equal(verdicts(f).length, 0);
       assert.match(f.state.posts.at(-1).body.body, /failed/);
     } finally { await f.close(); }
@@ -141,7 +145,7 @@ test('movement after snapshot validation makes either verdict neutral; closure r
           const marker = JSON.parse(/<!-- codjiflo-reviewer:v4 (\{[^\n]+\}) -->/.exec(result.body)[1]);
           assert.equal(marker.head, f.head);
           assert.equal(marker.base, f.base);
-          assert.equal(marker.preset, 'opus-xhigh');
+          assert.equal(marker.preset, 'neon-xhigh');
           assert.equal(marker.findings.length, mode === 'approve' ? 0 : 2);
           assert.equal(retained.payload.event, mode === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES');
           assert.equal(result.commit_id, retained.payload.commit_id);
@@ -150,7 +154,7 @@ test('movement after snapshot validation makes either verdict neutral; closure r
           assert.equal(retained.head, f.head);
           assert.equal(retained.base, f.base);
         }
-        assert.match(await readFile(f.capture, 'utf8'), /final_review/);
+        assert.match(await readFile(f.capture, 'utf8'), /enforced verdict, summary, findings and resolutions schema/);
       } finally { await f.close(); }
     });
   }
@@ -225,7 +229,7 @@ test('Claude structured stream produces native approval', async () => {
 });
 
 test('repository prompt replaces the default methodology with PR-head UTF-8 or empty text for every preset', async t => {
-  for (const preset of ['claude', 'opus-medium']) for (const instructions of ['Check résumé parsing and preserve café identifiers.\nFocus on concurrency.', '']) await t.test(`${preset}: ${instructions === '' ? 'empty' : 'UTF-8'}`, async () => {
+  for (const preset of ['neon', 'neon-medium', 'claude', 'opus-medium']) for (const instructions of ['Check résumé parsing and preserve café identifiers.\nFocus on concurrency.', '']) await t.test(`${preset}: ${instructions === '' ? 'empty' : 'UTF-8'}`, async () => {
     const f = await fixture({ basePrompt: 'Old base instructions.', headPrompt: instructions });
     try {
       // Neither the base revision nor uncommitted content in the clone source may win.
@@ -240,7 +244,7 @@ test('repository prompt replaces the default methodology with PR-head UTF-8 or e
       assert.ok(section.includes(`--- BEGIN REPOSITORY REVIEW INSTRUCTIONS ---\n${instructions}\n--- END REPOSITORY REVIEW INSTRUCTIONS ---`));
       for (const defaultText of ['e-code-review', 'independent angles', 'Target at least', 'Cap final findings', 'Conventions:', 'Do not run a verifier', 'do NOT spawn subagents', 'ReportFindings']) assert.ok(!captured.includes(defaultText), defaultText);
       assert.match(captured, /Review only; never edit repository files or publish to GitHub/);
-      assert.match(captured, /final_review/);
+      assert.match(captured, preset.startsWith('neon') ? /enforced verdict, summary, findings and resolutions schema/ : /final_review/);
       assert.ok(captured.includes(`PR head ${f.head}`));
       assert.equal(verdicts(f)[0].body.event, 'APPROVE');
     } finally { await f.close(); }
@@ -289,7 +293,7 @@ test('missing repository prompt preserves the default prompt, including after de
       await f.run({ full: true });
       const currentDiff = JSON.stringify(f.state.files.map(file => ({ filename: file.filename, patch: file.patch })), null, 2);
       assert.equal(await readFile(f.capture, 'utf8'), prompt({
-        level: 'xhigh', mode: 'full', base: f.base, head: f.head, scope: f.base, diff: f.localDiff, currentDiff,
+        runner: 'agy', level: 'xhigh', mode: 'full', base: f.base, head: f.head, scope: f.base, diff: f.localDiff, currentDiff,
       }));
       const captured = await readFile(f.capture, 'utf8');
       assert.ok(!captured.includes('Repository review instructions'));
@@ -302,7 +306,7 @@ test('missing repository prompt preserves the default prompt, including after de
 
 test('repository prompt rejects non-regular Git paths before provider launch or disclosure', async t => {
   for (const headPromptType of ['directory', 'symlink', 'parent-symlink', 'ancestor-symlink', 'submodule']) {
-    for (const preset of ['claude', 'opus-medium']) await t.test(`${headPromptType}: ${preset}`, async () => {
+    for (const preset of ['neon', 'neon-medium', 'claude', 'opus-medium']) await t.test(`${headPromptType}: ${preset}`, async () => {
       // Symlink targets are readable host files outside the repository, not dangling links.
       const f = await fixture({ headPromptType });
       try {
@@ -373,7 +377,7 @@ test('repository instruction identity governs successful incremental baselines',
   ]) await t.test(scenario, async () => {
     const f = await fixture(options);
     try {
-      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'opus-xhigh', findings: [], kickoffId: 1 })} -->` }];
+      f.state.reviews = [{ state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'neon-xhigh', findings: [], kickoffId: 1 })} -->` }];
       await f.run();
       const result = verdicts(f)[0].body;
       const captured = await readFile(f.capture, 'utf8');
@@ -428,7 +432,7 @@ test('legacy approvals cannot reuse an unchanged preexisting repository prompt',
 
 
 test('local aliases and mixed-case canonical names retain canonical publication and baseline scope', async t => {
-  for (const [input, preset] of [['CLAUDE', 'opus-xhigh'], ['OpUs-XhIgH', 'opus-xhigh'], ['OPUS-MEDIUM', 'opus-medium']]) await t.test(input, async () => {
+  for (const [input, preset] of [['NEON', 'neon-xhigh'], ['NeOn-XhIgH', 'neon-xhigh'], ['NEON-MEDIUM', 'neon-medium'], ['CLAUDE', 'opus-xhigh'], ['OpUs-XhIgH', 'opus-xhigh'], ['OPUS-MEDIUM', 'opus-medium']]) await t.test(input, async () => {
     const f = await fixture();
     try {
       f.state.reviews = [{ user: { type: 'Bot' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset, findings: [], kickoffId: 1 })} -->` }];
@@ -481,7 +485,7 @@ test('completed checkpoints, explicit full, same head and changed preset choose 
 test('a latest marked withheld-approval COMMENTED review prevents reuse of an earlier approval', async () => {
   const f = await fixture();
   try {
-    const marked = { commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'opus-xhigh', findings: [], kickoffId: 1 })} -->` };
+    const marked = { commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'neon-xhigh', findings: [], kickoffId: 1 })} -->` };
     f.state.reviews = [
       { ...marked, state: 'APPROVED' },
       { ...marked, state: 'COMMENTED' },
@@ -500,7 +504,7 @@ test('full and incremental native coordinates use API patches rather than local 
   for (const full of [false, true]) await t.test(String(full), async () => {
     const f = await fixture();
     try {
-      f.state.reviews = [{ user: { type: 'User' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'opus-xhigh', findings: [], kickoffId: 1 })} -->` }];
+      f.state.reviews = [{ user: { type: 'User' }, state: 'APPROVED', commit_id: f.previous, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head: f.previous, base: f.base, preset: 'neon-xhigh', findings: [], kickoffId: 1 })} -->` }];
       f.state.files[0].patch = '@@ -20,2 +20,2 @@\n-old\n-second\n+new\n+changed';
       await f.run({ mode: 'findings', full });
       const result = verdicts(f)[0].body;

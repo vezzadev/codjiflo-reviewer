@@ -1,11 +1,18 @@
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { presetRunner } from './commands.mjs';
 import { schema } from './prompt.mjs';
-import { secretRedactor } from './redaction.mjs';
+import { envSecrets, secretRedactor } from './redaction.mjs';
 import { ompLogFormatter } from './omp-log.mjs';
+import { agyLogFormatter } from './agy-log.mjs';
 import { MAX_INLINE_INPUT } from './input-budget.mjs';
+
+const CONVERSATION_ID_FIELD = /"conversation_id"\s*:\s*"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"/gi;
+const AGY_MODEL_SLUG = /^[a-z0-9][a-z0-9._-]*$/i;
+const AGY_EFFORT_SUFFIX = /-(?:low|medium|high|xhigh|max)$/i;
 
 // Only protocol error fields are diagnostics; never publish raw model/tool
 // output or stderr. Intermediate provider failures may recover inside OMP.
@@ -18,6 +25,19 @@ function ompDiagnostics(stdout, redact) {
       ? event.messages.filter(message => message?.role === 'assistant').at(-1) : undefined;
     const message = assistant?.errorMessage;
     if (typeof message === 'string') messages.push(redact(message));
+  }
+  return messages.join('\n').slice(-1200);
+}
+
+// Only terminal protocol error fields are diagnostics; never publish raw model
+// responses, tool output or stderr.
+function agyDiagnostics(stdout, redact) {
+  const messages = [];
+  for (const line of (stdout ?? '').split('\n')) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    const message = event?.event === 'result' ? event.result?.error : undefined;
+    if (typeof message === 'string' && message.trim()) messages.push(redact(message));
   }
   return messages.join('\n').slice(-1200);
 }
@@ -85,6 +105,44 @@ export function parseOmpReview(stdout) {
   return starts[0].args;
 }
 
+export function parseAgyReview(stdout) {
+  let events;
+  try { events = stdout.split('\n').filter(line => line.trim()).map(line => JSON.parse(line)); }
+  catch { throw new Error('Antigravity review failed: invalid JSONL protocol output. See process logs for details.'); }
+  if (events.some(event => !event || typeof event !== 'object' || Array.isArray(event) || typeof event.event !== 'string')) {
+    throw new Error('Antigravity review failed: invalid JSONL protocol output.');
+  }
+  const results = events.filter(event => event.event === 'result');
+  const terminal = results[0];
+  const terminalIndex = terminal ? events.indexOf(terminal) : -1;
+  const result = terminal?.result;
+  const badFinish = result?.finished_reason != null && result.finished_reason !== ''
+    && (typeof result.finished_reason !== 'string' || !['stop', 'success'].includes(result.finished_reason.toLowerCase()));
+  if (results.length !== 1 || !result || typeof result !== 'object' || Array.isArray(result)
+      || result.status !== 'SUCCESS' || result.error || badFinish
+      || events.slice(terminalIndex + 1).some(event => ['init', 'step_update', 'result'].includes(event.event))) {
+    throw new Error('Antigravity review did not complete successfully (missing, duplicate, or unsuccessful terminal result).');
+  }
+  if (!matchesSchema(result.structured_output, schema)) {
+    throw new Error('Antigravity review failed: missing or malformed structured_output result.');
+  }
+  return result.structured_output;
+}
+
+export const AGY_REVIEW_SETTINGS = {
+  agentMode: 'auto',
+  enableTerminalSandbox: true,
+  allowNonWorkspaceAccess: false,
+  disableSlashCommands: true,
+  showTips: false,
+  showFeedbackSurvey: false,
+  notifications: false,
+  permissions: {
+    allow: ['read_file(*)', 'command(*)'],
+    deny: ['write_file(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)'],
+  },
+};
+
 // Disable capability discovery, not model providers or the shared auth store.
 // These are exact OMP settings (docs/context-files.md and domain settings.ts).
 export const OMP_REVIEW_CONFIG = {
@@ -145,24 +203,127 @@ export async function runProcess(command, args, { cwd, env = process.env, input,
   });
 }
 
-export async function runReviewer({ preset, prompt, cwd, temp, env = process.env, logStream = 'live' }) {
-  if (prompt.length > MAX_INLINE_INPUT) throw new Error('OMP review input exceeds inline budget; structured evidence preparation is required');
+async function validateEvidenceDir(evidenceDir, parent) {
+  if (evidenceDir === undefined) return undefined;
+  if (typeof evidenceDir !== 'string' || !evidenceDir) {
+    throw new Error('Staged evidence directory must be a non-empty path inside the review temp directory');
+  }
+  const resolved = await realpath(evidenceDir);
+  if (dirname(resolved) !== parent || !basename(resolved).startsWith('review-evidence-')) {
+    throw new Error('Staged evidence directory must be a direct review-evidence-* child of the review temp directory');
+  }
+  return resolved;
+}
+
+async function cleanupAgyConversations(stdout, env) {
+  if (typeof stdout !== 'string' || !stdout) return;
+  let home;
+  try { home = env?.HOME || env?.USERPROFILE || homedir(); }
+  catch { return; }
+  if (typeof home !== 'string' || !home) return;
+  const ids = new Set();
+  for (const match of stdout.matchAll(CONVERSATION_ID_FIELD)) ids.add(match[1]);
+  if (!ids.size) return;
+  const root = join(home, '.gemini', 'antigravity-cli');
+  await Promise.all([...ids].flatMap(id => [
+    rm(join(root, 'brain', id), { recursive: true, force: true }).catch(() => {}),
+    rm(join(root, 'conversations', `${id}.db`), { force: true }).catch(() => {}),
+    rm(join(root, 'conversations', `${id}.db-wal`), { force: true }).catch(() => {}),
+    rm(join(root, 'conversations', `${id}.db-shm`), { force: true }).catch(() => {}),
+    rm(join(root, 'presence', `${id}.lock`), { force: true }).catch(() => {}),
+  ]));
+}
+
+function runtimeScratchEnv(base) {
+  return {
+    TMPDIR: join(base, 'tmp'), TMP: join(base, 'tmp'), TEMP: join(base, 'tmp'),
+    XDG_CACHE_HOME: join(base, 'cache'), UV_CACHE_DIR: join(base, 'uv-cache'),
+    UV_PROJECT_ENVIRONMENT: join(base, 'venv'), PYTHONPYCACHEPREFIX: join(base, 'pycache'),
+  };
+}
+
+function failureStatus(error) {
+  return error.termination === 'timeout' ? 'timed out'
+    : error.termination === 'exit' ? `failed (exit ${error.exitCode})`
+    : error.termination === 'signal' ? `failed (${error.signal})`
+    : 'could not run';
+}
+
+async function runAgyReviewer({ preset, prompt, evidenceDir, cwd, parent, env, logStream }) {
+  const model = env.CODJIFLO_NEON_MODEL || preset.model;
+  if (preset.provider !== 'antigravity' || typeof model !== 'string'
+      || !AGY_MODEL_SLUG.test(model) || AGY_EFFORT_SUFFIX.test(model)) {
+    throw new Error('Antigravity review model must be a base Antigravity model slug without provider prefix or effort suffix');
+  }
+  const verifiedEvidence = await validateEvidenceDir(evidenceDir, parent);
+  const scratch = await mkdtemp(join(parent, 'review-runtime-'));
+  // Isolate writable tool caches/temp dirs from the ephemeral schema/settings files,
+  // and pass workScratch via --add-dir so --sandbox mounts it writable even when temp is outside /tmp.
+  const workScratch = join(scratch, 'work');
+  const runtimeEnv = runtimeScratchEnv(workScratch);
+  const secrets = envSecrets(env);
+  if (logStream === 'withheld') console.log('Antigravity output withheld from logs: the reviewed repository is private.');
+  const out = secretRedactor(secrets, text => { if (logStream === 'live') process.stdout.write(text); });
+  const err = secretRedactor(secrets, text => { if (logStream === 'live') process.stderr.write(text); });
+  const transcript = logStream === 'live' ? agyLogFormatter(text => out.write(text), secrets) : undefined;
+  let stdout = '';
+  try {
+    await mkdir(workScratch, { mode: 0o700 });
+    await Promise.all([...new Set(Object.values(runtimeEnv))].map(directory => mkdir(directory, { mode: 0o700 })));
+    const schemaPath = join(scratch, 'schema.json');
+    const settingsPath = join(scratch, 'settings.json');
+    await Promise.all([
+      writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600 }),
+      writeFile(settingsPath, JSON.stringify(AGY_REVIEW_SETTINGS), { mode: 0o600 }),
+    ]);
+    const input = `${JSON.stringify({ event: 'user', message: { content: prompt } })}\n`;
+    // Do not override HOME or copy credentials: agy owns its signed-in Google
+    // account session and token refresh. Ephemeral settings and schema stay in scratch.
+    stdout = await runProcess(env.CODJIFLO_AGY_BIN || 'agy', [
+      '--input-format', 'stream-json', '--output-format', 'stream-json',
+      '--model', model, '--effort', preset.effort,
+      '--json-schema', schemaPath, '--settings', settingsPath,
+      '--disable-slash-commands', '--sandbox', '--print-timeout', '45m',
+      '--add-dir', workScratch,
+      ...(verifiedEvidence ? ['--add-dir', verifiedEvidence] : []),
+    ], { cwd, env: { ...env, ...runtimeEnv }, input, stream: true,
+      streamOutput: { stdout: chunk => transcript?.write(chunk), stderr: chunk => err.write(chunk) }, timeoutMs: 45 * 60 * 1000 });
+  } catch (error) {
+    stdout = error.stdout ?? stdout;
+    const diagnostic = agyDiagnostics(stdout, out.redact);
+    const logs = logStream === 'live' ? 'See process logs for details.' : 'Antigravity output was withheld from the logs; rerun the review locally for details.';
+    throw new Error(`Antigravity review ${failureStatus(error)}.${diagnostic ? `\n${diagnostic}` : ` ${logs}`}`);
+  } finally {
+    transcript?.end();
+    out.end();
+    err.end();
+    await cleanupAgyConversations(stdout, env).catch(() => {});
+    await rm(scratch, { recursive: true, force: true });
+  }
+  try { return parseAgyReview(stdout); }
+  catch (error) {
+    const diagnostic = agyDiagnostics(stdout, out.redact);
+    throw new Error(`${error.message}${diagnostic ? `\n${diagnostic}` : ''}`);
+  }
+}
+
+export async function runReviewer({ preset, prompt, evidenceDir, cwd, temp, env = process.env, logStream = 'live' }) {
+  if (prompt.length > MAX_INLINE_INPUT) throw new Error('Review input exceeds inline budget; structured evidence preparation is required');
+  const parent = await realpath(temp), checkout = await realpath(cwd);
+  const fromCheckout = relative(checkout, parent);
+  if (fromCheckout === '' || (fromCheckout !== '..' && !fromCheckout.startsWith('..' + sep) && !isAbsolute(fromCheckout))) {
+    throw new Error('Reviewer runtime scratch must be outside the checkout');
+  }
+  if (presetRunner(preset) === 'agy') {
+    return runAgyReviewer({ preset, prompt, evidenceDir, cwd, parent, env, logStream });
+  }
   const model = env.CODJIFLO_OPUS_MODEL || preset.model;
   if (preset.provider !== 'anthropic' || !model.startsWith(`${preset.provider}/`) || !model.slice(preset.provider.length + 1)) {
     throw new Error('OMP review model must be explicitly provider-qualified and match its preset provider');
   }
-  const parent = await realpath(temp), checkout = await realpath(cwd);
-  const fromCheckout = relative(checkout, parent);
-  if (fromCheckout === '' || (fromCheckout !== '..' && !fromCheckout.startsWith('..' + sep) && !isAbsolute(fromCheckout))) {
-    throw new Error('OMP runtime scratch must be outside the checkout');
-  }
   const scratch = await mkdtemp(join(parent, 'review-runtime-'));
-  const runtimeEnv = {
-    TMPDIR: join(scratch, 'tmp'), TMP: join(scratch, 'tmp'), TEMP: join(scratch, 'tmp'),
-    XDG_CACHE_HOME: join(scratch, 'cache'), UV_CACHE_DIR: join(scratch, 'uv-cache'),
-    UV_PROJECT_ENVIRONMENT: join(scratch, 'venv'), PYTHONPYCACHEPREFIX: join(scratch, 'pycache'),
-  };
-  const secrets = Object.entries(env).filter(([name]) => /TOKEN|SECRET|PASSWORD|API_KEY|AUTHORIZATION/i.test(name)).map(([, value]) => value);
+  const runtimeEnv = runtimeScratchEnv(scratch);
+  const secrets = envSecrets(env);
   if (logStream === 'withheld') console.log('OMP output withheld from logs: the reviewed repository is private.');
   const out = secretRedactor(secrets, text => { if (logStream === 'live') process.stdout.write(text); });
   const err = secretRedactor(secrets, text => { if (logStream === 'live') process.stderr.write(text); });
@@ -185,9 +346,8 @@ export async function runReviewer({ preset, prompt, cwd, temp, env = process.env
       streamOutput: { stdout: chunk => transcript?.write(chunk), stderr: chunk => err.write(chunk) }, timeoutMs: 45 * 60 * 1000 });
   } catch (error) {
     const diagnostic = ompDiagnostics(error.stdout, out.redact);
-    const status = error.termination === 'timeout' ? 'timed out' : error.termination === 'exit' ? `failed (exit ${error.exitCode})` : error.termination === 'signal' ? `failed (${error.signal})` : 'could not run';
     const logs = logStream === 'live' ? 'See process logs for details.' : 'OMP output was withheld from the logs; rerun the review locally for details.';
-    throw new Error(`OMP review ${status}.${diagnostic ? `\n${diagnostic}` : ` ${logs}`}`);
+    throw new Error(`OMP review ${failureStatus(error)}.${diagnostic ? `\n${diagnostic}` : ` ${logs}`}`);
   } finally {
     transcript?.end();
     out.end();

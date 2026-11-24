@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile, appendFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
-import { COMMAND_SYNTAX, commentEvent, eventDecision, isApproved, normalizePreset, PRESETS, supersedingComment } from '../src/commands.mjs';
+import { COMMAND_SYNTAX, DEFAULT_PRESET, commentEvent, eventDecision, isApproved, normalizePreset, PRESETS, supersedingComment } from '../src/commands.mjs';
 import { GitHub } from '../src/github.mjs';
 import { review } from '../src/review.mjs';
 import { publishReview, reportPublicationFailure } from '../src/publication.mjs';
@@ -47,7 +47,7 @@ try {
     publish: { type: 'string' }, output: { type: 'string' },
   } });
   if (values.help) {
-    console.log('Usage: node bin/codjiflo-reviewer.mjs\nMention mode: --repo owner/repo --comment ID [--gate] [--output FILE] (authorizes the comment author against CODJIFLO_APPROVED_USERS)\nLocal mode: --repo owner/repo --pr N --requester login [--preset opus-xhigh|opus-medium|claude] [--full] [--output FILE]\nPublication-only recovery: --publish FILE');
+    console.log('Usage: node bin/codjiflo-reviewer.mjs\nMention mode: --repo owner/repo --comment ID [--gate] [--output FILE] (authorizes the comment author against CODJIFLO_APPROVED_USERS)\nLocal mode: --repo owner/repo --pr N --requester login [--preset neon-xhigh|neon-medium|neon|opus-xhigh|opus-medium|claude] [--full] [--output FILE]\nPublication-only recovery: --publish FILE');
   } else if (values.publish) {
     if (values.gate || values.repo || values.pr || values.requester || values.comment || values.full || values.output) throw new Error('--publish cannot be combined with review options');
     const envelope = JSON.parse(await readFile(values.publish, 'utf8'));
@@ -91,7 +91,7 @@ try {
       request = decision.request;
     } else {
       if (values.gate) throw new Error('Gate requires --comment');
-      const preset = normalizePreset(values.preset ?? 'opus-xhigh');
+      const preset = normalizePreset(values.preset ?? DEFAULT_PRESET);
       if (!values.repo || !/^\d+$/.test(values.pr ?? '') || Number(values.pr) < 1 || !isApproved(values.requester, process.env.CODJIFLO_APPROVED_USERS) || !preset) throw new Error('Valid --repo, --pr, --requester and approved-user configuration required');
       request = { repo: values.repo, number: Number(values.pr), requester: values.requester, preset, mode: values.full ? 'full' : 'incremental' };
     }

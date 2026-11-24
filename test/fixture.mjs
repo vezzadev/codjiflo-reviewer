@@ -103,8 +103,10 @@ export async function fixture({ filename = 'a.js', previousFilename = filename, 
   await writeFile(fake, `#!/usr/bin/env node
 import { writeFile, cp } from 'node:fs/promises';
 process.stdin.setEncoding('utf8');
-let input = ''; for await (const chunk of process.stdin) input += chunk;
-await writeFile(process.env.FIXTURE_CAPTURE + '.stdin', input);
+let rawStdin = ''; for await (const chunk of process.stdin) rawStdin += chunk;
+const isAgy = process.argv.includes('--input-format');
+const input = isAgy ? JSON.parse(rawStdin.trim()).message.content : rawStdin;
+await writeFile(process.env.FIXTURE_CAPTURE + '.stdin', rawStdin);
 await writeFile(process.env.FIXTURE_CAPTURE + '.cwd', process.cwd(), 'utf8');
 if (process.env.FIXTURE_INSPECT_GIT === '1') {
  const { execFileSync } = await import('node:child_process');
@@ -121,25 +123,58 @@ if (manifestLine) {
  await cp(manifest.directory, process.env.FIXTURE_CAPTURE + '.evidence', { recursive: true, force: true });
 }
 await writeFile(process.env.FIXTURE_CAPTURE, input);
-console.log(JSON.stringify({type:'agent_start'}));
-process.stderr.write('fixture stderr streaming live\\n');
-if (process.env.FIXTURE_MODE === 'failure') process.exit(9);
-if (process.env.FIXTURE_MODE === 'publication-secret-failure') {
- // Fake publication credentials are intentionally embedded, not inherited by
- // this reviewer. Model/tool access can supply diagnostics from outside env.
- console.log(JSON.stringify({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'Fixture publication diagnostic github=fixture-token-not-real gh=fixture-gh-token-not-real mixed=fixture-mixed-token-not-real provider=' + process.env.OPENAI_API_KEY}]}));
- process.exit(1);
-}
-const findings = process.env.FIXTURE_MODE === 'findings' ? [
+const emit = event => console.log(JSON.stringify(event));
+const mode = process.env.FIXTURE_MODE;
+const findings = mode === 'findings' ? [
  {path:'a.js',side:'LEFT',start_line:1,line:1,priority:'P1',disposition:'blocking',title:'Old-side bug',body:'Concrete failure scenario.'},
  {path:'a.js',side:'RIGHT',start_line:1,line:2,priority:'P2',disposition:'blocking',title:'Range bug',body:'Concrete failure scenario.'}
 ] : [];
-const result = process.env.FIXTURE_MODE === 'incomplete-input'
+const result = mode === 'incomplete-input'
  ? {verdict:'INCOMPLETE',summary:'A required review scope range could not be processed.',findings:[],resolutions:[]}
  : process.env.FIXTURE_RESULT ? JSON.parse(process.env.FIXTURE_RESULT)
  : {verdict: findings.length ? 'REQUEST_CHANGES' : 'APPROVE',summary:'Fixture review complete.',findings,resolutions:[]};
-const emit = event => console.log(JSON.stringify(event));
-const mode = process.env.FIXTURE_MODE;
+if (isAgy) {
+ emit({event:'init',conversation_id:'11111111-2222-4333-8444-555555555555',init:{model:'gemini-4-neon-high',cwd:process.cwd(),tools:['read_file','run_command']}});
+ process.stderr.write('fixture stderr streaming live\\n');
+ if (mode === 'failure') process.exit(9);
+ if (mode === 'publication-secret-failure') {
+  emit({event:'result',result:{conversation_id:'11111111-2222-4333-8444-555555555555',status:'ERROR',error:'Fixture publication diagnostic github=fixture-token-not-real gh=fixture-gh-token-not-real mixed=fixture-mixed-token-not-real provider=' + process.env.OPENAI_API_KEY}});
+  process.exit(1);
+ }
+ if (mode === 'raw-exit') {
+  console.log('RAW-STDOUT-SECRET-do-not-publish');
+  process.stderr.write('STDERR-HOST-SECRET-do-not-publish'.repeat(100));
+  process.exit(7);
+ }
+ if (mode === 'non-json-completed') console.log('BANNER-SECRET-do-not-publish');
+ if (mode === 'truncated') {
+  process.stdout.write('{"event":"result"');
+  process.exit(0);
+ }
+ if (mode === 'fatal-exit') {
+  emit({event:'step_update',step_update:{step_index:1,state:'DONE',step_type:'tool',tool_name:'run_command',tool_info:{output:'HOST-TOOL-SECRET-do-not-publish'}}});
+  emit({event:'step_update',step_update:{step_index:2,state:'DONE',step_type:'agent_response',text_delta:'PRIVATE-MODEL-TEXT-do-not-publish'}});
+  process.stderr.write('x'.repeat(2200) + '\\nFixture verbose CLI stderr detail STDERR-HOST-SECRET-do-not-publish\\n');
+ }
+ if (mode !== 'missing-completion') {
+  const structured = mode === 'missing-result' ? undefined : mode === 'malformed' ? {verdict:'APPROVE'} : result;
+  const status = ['fatal-error','fatal-exit','error-result'].includes(mode) ? 'ERROR' : mode === 'aborted' ? 'CANCELED' : 'SUCCESS';
+  const payload = {conversation_id:'11111111-2222-4333-8444-555555555555',status,num_turns:1,usage:{input_tokens:10,output_tokens:5,thinking_tokens:2,cache_read_tokens:0},...(structured === undefined ? {} : {structured_output:structured}),...(['fatal-error','fatal-exit'].includes(mode) ? {error:'Fixture safe terminal diagnostic token=' + process.env.OPENAI_API_KEY} : {}),...(mode === 'length' ? {finished_reason:'max_tokens'} : {})};
+  emit({event:'result',result:payload});
+  if (mode === 'duplicate-result') emit({event:'result',result:payload});
+ }
+ if (mode === 'fatal-exit') process.exit(1);
+ process.exit(0);
+}
+emit({type:'agent_start'});
+process.stderr.write('fixture stderr streaming live\\n');
+if (mode === 'failure') process.exit(9);
+if (mode === 'publication-secret-failure') {
+ // Fake publication credentials are intentionally embedded, not inherited by
+ // this reviewer. Model/tool access can supply diagnostics from outside env.
+ emit({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'Fixture publication diagnostic github=fixture-token-not-real gh=fixture-gh-token-not-real mixed=fixture-mixed-token-not-real provider=' + process.env.OPENAI_API_KEY}]});
+ process.exit(1);
+}
 if (mode === 'raw-exit') {
  console.log('RAW-STDOUT-SECRET-do-not-publish');
  process.stderr.write('STDERR-HOST-SECRET-do-not-publish'.repeat(100));
@@ -219,13 +254,13 @@ if (mode === 'fatal-exit') process.exit(1);
       return state.head;
     },
     // `mention: true` drives the workflow path: the request comes from state.mention.
-    async run({ mode = 'approve', preset = 'opus-xhigh', approved = 'alice', requester = 'Alice', full = false, mention = false, providerEnv = {}, timeoutMs, streamOutput } = {}) {
+    async run({ mode = 'approve', preset = 'neon-xhigh', approved = 'alice', requester = 'Alice', full = false, mention = false, providerEnv = {}, timeoutMs, streamOutput } = {}) {
       const request = mention ? ['--comment', '900'] : ['--pr', '1', '--requester', requester, '--preset', preset, ...(full ? ['--full'] : [])];
       return runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--repo', 'org/repo', ...request], {
         timeoutMs,
         stream: streamOutput !== undefined,
         streamOutput,
-        env: { ...env, GITHUB_ACTIONS: '', GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: fake, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
+        env: { ...env, GITHUB_ACTIONS: '', GITHUB_TOKEN: 'fixture-token-not-real', OPENAI_API_KEY: '', GITHUB_API_URL: api, CODJIFLO_RESULT_PATH: join(temp, 'publication.json'), CODJIFLO_APPROVED_USERS: approved, CODJIFLO_OMP_BIN: fake, CODJIFLO_AGY_BIN: fake, FIXTURE_MODE: mode, FIXTURE_CAPTURE: capture, ...providerEnv },
       });
     },
     async close() { await new Promise(resolve => server.close(resolve)); await rm(temp, { recursive: true, force: true }); },

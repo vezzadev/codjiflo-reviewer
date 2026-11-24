@@ -14,7 +14,7 @@ import { latestCheckpoint } from '../src/checkpoints.mjs';
 
 const finding = { path: 'old-deleted.js', side: 'LEFT', start_line: 400, line: 402, priority: 'P1', disposition: 'blocking', title: 'Original blocker', body: 'The original failure remains reproducible.' };
 const entry = (head, overrides = {}) => ({ ...finding, id: randomUUID(), originHead: head, ...overrides });
-const marker = (head, base, findings, preset = 'opus-xhigh', kickoffId = 1) => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings, kickoffId })} -->`;
+const marker = (head, base, findings, preset = 'neon-xhigh', kickoffId = 1) => `<!-- codjiflo-reviewer:v4 ${JSON.stringify({ head, base, preset, findings, kickoffId })} -->`;
 const priorReview = (f, findings, overrides = {}) => ({ state: 'CHANGES_REQUESTED', commit_id: f.previous, body: marker(f.previous, f.base, findings), ...overrides });
 const posts = f => f.state.posts.filter(post => post.path.endsWith('/reviews'));
 
@@ -137,7 +137,7 @@ test('full scans retain the latest valid outstanding ledger across checkpoint in
       const base = scenario === 'base' ? 'c'.repeat(40) : f.base;
       const state = scenario === 'superseded' ? 'COMMENTED' : scenario === 'dismissed' ? 'DISMISSED' : 'CHANGES_REQUESTED';
       f.state.reviews = [priorReview(f, [old], { state, commit_id: head, body: marker(head, base, [old]) })];
-      await run(f, result([resolution(old)]), { full: scenario === 'explicit-full', preset: scenario === 'preset' ? 'opus-medium' : 'opus-xhigh' });
+      await run(f, result([resolution(old)]), { full: scenario === 'explicit-full', preset: scenario === 'preset' ? 'neon-medium' : 'neon-xhigh' });
       const published = posts(f).at(-1).body;
       assert.match(published.body, /Scope: \*\*full\*\*/);
       assert.equal(published.event, 'REQUEST_CHANGES');
@@ -159,7 +159,7 @@ test('newer legacy and malformed markers force a full transition scan instead of
       if (scenario === 'commit-mismatch') latest.commit_id = f.head;
       if (scenario === 'duplicate-id') latest.body = marker(f.previous, f.base, [old, old]);
       f.state.reviews = [priorReview(f, [old]), latest];
-      assert.equal(baseline(f.state.reviews, f.base, 'opus-xhigh'), null);
+      assert.equal(baseline(f.state.reviews, f.base, 'neon-xhigh'), null);
       assert.deepEqual(outstandingFindings(f.state.reviews), []);
       await run(f, result([], 'APPROVE'));
       assert.match(posts(f).at(-1).body.body, /Scope: \*\*full\*\*/);
@@ -173,12 +173,12 @@ test('malformed ledger fields cannot coerce metadata or revive an earlier valid 
   const base = 'b'.repeat(40);
   const old = entry(head);
   const valid = { state: 'CHANGES_REQUESTED', commit_id: head, body: marker(head, base, [old]) };
-  const payload = { head, base, preset: 'opus-xhigh', findings: [old], kickoffId: 1 };
+  const payload = { head, base, preset: 'neon-xhigh', findings: [old], kickoffId: 1 };
   const invalid = [
     ...[undefined, null, 0, -1, 1.5, '1', [1], Number.MAX_SAFE_INTEGER + 1].map(kickoffId => ({ ...payload, kickoffId })),
     { ...payload, head: [head] },
     { ...payload, base: [base] },
-    { ...payload, preset: ['opus-xhigh'] },
+    { ...payload, preset: ['neon-xhigh'] },
     { ...payload, findings: [{ ...old, id: [old.id] }] },
     { ...payload, findings: [{ ...old, originHead: [head] }] },
     { ...payload, findings: [{ ...old, id: 'not-a-uuid' }] },
@@ -188,14 +188,14 @@ test('malformed ledger fields cannot coerce metadata or revive an earlier valid 
   ];
   for (const value of invalid) {
     const latest = { ...valid, body: `<!-- codjiflo-reviewer:v4 ${JSON.stringify(value)} -->` };
-    assert.equal(baseline([valid, latest], base, 'opus-xhigh'), null);
+    assert.equal(baseline([valid, latest], base, 'neon-xhigh'), null);
     assert.deepEqual(outstandingFindings([valid, latest]), []);
   }
   for (const latest of [
     { ...valid, state: 'APPROVED' },
     { ...valid, body: marker(head, base, []) },
   ]) {
-    assert.equal(baseline([valid, latest], base, 'opus-xhigh'), null);
+    assert.equal(baseline([valid, latest], base, 'neon-xhigh'), null);
     assert.deepEqual(outstandingFindings([valid, latest]), []);
   }
 });
@@ -376,13 +376,13 @@ test('delayed recovery cannot replace a newer review generation or erase its blo
       assert.ok(newer.kickoffId > older.kickoffId);
       assert.notEqual(blocker.id, older.findings[0]?.id);
       await runProcess(process.execPath, [resolve('bin/codjiflo-reviewer.mjs'), '--publish', savedPath], {
-        env: { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed' },
+        env: { ...f.env, GITHUB_EVENT_PATH: '', GITHUB_TOKEN: 'fixture-token-not-real', GITHUB_API_URL: f.api, CODJIFLO_APPROVED_USERS: 'alice', CODJIFLO_OMP_BIN: '/no-provider-needed', CODJIFLO_AGY_BIN: '/no-provider-needed' },
       });
       assert.equal(f.state.reviews.at(-1).state, 'COMMENTED');
       assert.equal(f.state.reviews.at(-1).commit_id, older.head);
       assert.equal(await readFile(savedPath, 'utf8'), saved);
       assert.deepEqual(outstandingFindings(f.state.reviews), [blocker]);
-      assert.equal(baseline(f.state.reviews, f.base, 'opus-xhigh').head, newerHead);
+      assert.equal(baseline(f.state.reviews, f.base, 'neon-xhigh').head, newerHead);
       await f.advance({ 'a.js': 'new\nthird generation\n' });
       const before = posts(f).length;
       await assert.rejects(run(f, result([], 'APPROVE')));
@@ -416,7 +416,7 @@ test('a recovered older blocker cannot resurrect findings resolved by a newer ap
     });
     assert.equal(f.state.reviews.at(-1).state, 'COMMENTED');
     assert.deepEqual(outstandingFindings(f.state.reviews), []);
-    assert.equal(baseline(f.state.reviews, f.base, 'opus-xhigh').head, newerHead);
+    assert.equal(baseline(f.state.reviews, f.base, 'neon-xhigh').head, newerHead);
     await f.advance({ 'a.js': 'new\nstill fixed\n' });
     await run(f, result([], 'APPROVE'));
     assert.match(posts(f).at(-1).body.body, /Scope: \*\*incremental\*\*/);
@@ -535,7 +535,7 @@ test('whitespace-only Git filenames publish inline and survive checkpoint reconc
     const checkpoint = ledger(first.body);
     assert.equal(checkpoint.findings[0].path, filename);
     assert.deepEqual(outstandingFindings(f.state.reviews), checkpoint.findings);
-    assert.equal(baseline(f.state.reviews, f.base, 'opus-xhigh').head, f.head);
+    assert.equal(baseline(f.state.reviews, f.base, 'neon-xhigh').head, f.head);
     await f.advance({ [filename]: 'new\nwhitespace filename next round\n' });
     await run(f, result(checkpoint.findings.map(item => resolution(item))));
     assert.match(posts(f).at(-1).body.body, /Scope: \*\*incremental\*\*/);

@@ -18,16 +18,19 @@ test('authorization denies empty, absent and non-exact users; normalizes login c
   assert.equal(isApproved('Alice', 'bob, ALICE\ncarol'), true);
   assert.equal(isApproved(undefined, 'alice'), false);
 });
-test('commands support two presets, alias, explicit full and default incremental', () => {
-  assert.deepEqual(Object.keys(PRESETS), ['opus-xhigh', 'opus-medium']);
-  assert.deepEqual(parseCommand('@codjiflo-reviewer review'), { preset: 'opus-xhigh', mode: 'incremental' });
+test('commands support four presets, aliases, explicit full and default incremental', () => {
+  assert.deepEqual(Object.keys(PRESETS), ['neon-xhigh', 'neon-medium', 'opus-xhigh', 'opus-medium']);
+  assert.deepEqual(parseCommand('@codjiflo-reviewer review'), { preset: 'neon-xhigh', mode: 'incremental' });
   for (const preset of Object.keys(PRESETS)) assert.deepEqual(parseCommand(`@codjiflo review ${preset} full`), { preset, mode: 'full' });
-  const [alias, preset] = ['CLAUDE', 'opus-xhigh'];
-  assert.deepEqual(parseCommand(`@codjiflo review ${alias}`), { preset, mode: 'incremental' });
-  assert.deepEqual(parseCommand(`@codjiflo review FULL ${alias}`), { preset, mode: 'full' });
-  for (const options of [`${alias} ${preset}`, `${preset} ${alias}`, `${alias} ${alias}`, `${alias} opus-medium`]) {
-    assert.throws(() => parseCommand(`@codjiflo review ${options}`));
+  for (const [alias, preset, other] of [['NEON', 'neon-xhigh', 'neon-medium'], ['CLAUDE', 'opus-xhigh', 'opus-medium']]) {
+    assert.deepEqual(parseCommand(`@codjiflo review ${alias}`), { preset, mode: 'incremental' });
+    assert.deepEqual(parseCommand(`@codjiflo review FULL ${alias}`), { preset, mode: 'full' });
+    for (const options of [`${alias} ${preset}`, `${preset} ${alias}`, `${alias} ${alias}`, `${alias} ${other}`]) {
+      assert.throws(() => parseCommand(`@codjiflo review ${options}`));
+    }
   }
+  assert.throws(() => parseCommand('@codjiflo review neon claude'));
+  assert.throws(() => parseCommand('@codjiflo review neon-xhigh opus-xhigh'));
   assert.throws(() => parseCommand('@codjiflo review opus-xhigh opus-medium'));
   assert.throws(() => parseCommand('@codjiflo review opus-high'));
   assert.equal(parseCommand('not a review'), null);
@@ -43,13 +46,13 @@ test('codex and sol presets are rejected like unknown presets', () => {
   }
 });
 test('profile shorthand normalizes aliases and canonical names with optional mode', () => {
-  for (const [name, preset] of [...Object.keys(PRESETS).map(preset => [preset, preset]), ['claude', 'opus-xhigh']]) {
+  for (const [name, preset] of [...Object.keys(PRESETS).map(preset => [preset, preset]), ['neon', 'neon-xhigh'], ['claude', 'opus-xhigh']]) {
     for (const mention of ['@codjiflo', '@codjiflo-reviewer']) {
       assert.deepEqual(parseCommand(`${mention} ${name}`), { preset, mode: 'incremental' });
       assert.deepEqual(parseCommand(`Context\n \t${mention.toUpperCase()} ${name.toUpperCase()} FULL\nThanks`), { preset, mode: 'full' });
       assert.deepEqual(parseCommand(`${mention} ${name} incremental`), { preset, mode: 'incremental' });
     }
-    for (const options of [`${name} ${name}`, `${name} ${preset}`, `${name} claude`, `${name} full incremental`, `${name} full full`, `${name} turbo`, `${name} review`]) {
+    for (const options of [`${name} ${name}`, `${name} ${preset}`, `${name} neon`, `${name} claude`, `${name} full incremental`, `${name} full full`, `${name} turbo`, `${name} review`]) {
       assert.throws(() => parseCommand(`@codjiflo ${options}`));
     }
   }
@@ -59,9 +62,10 @@ test('explicit commands work after prose while casual mentions and quoted exampl
     assert.equal(parseCommand(body), null);
   }
   assert.deepEqual(parseCommand('@codjiflo thanks\n@codjiflo opus-medium'), { preset: 'opus-medium', mode: 'incremental' });
-  assert.deepEqual(parseCommand('@codjiflo review'), { preset: 'opus-xhigh', mode: 'incremental' });
-  assert.deepEqual(parseCommand('@codjiflo review FULL'), { preset: 'opus-xhigh', mode: 'full' });
-  assert.deepEqual(parseCommand('Please @CODJIFLO-REVIEWER review'), { preset: 'opus-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('@codjiflo review'), { preset: 'neon-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('@codjiflo review FULL'), { preset: 'neon-xhigh', mode: 'full' });
+  assert.deepEqual(parseCommand('Please @CODJIFLO-REVIEWER review'), { preset: 'neon-xhigh', mode: 'incremental' });
+  assert.deepEqual(parseCommand('Owner authorized. @codjiflo neon full'), { preset: 'neon-xhigh', mode: 'full' });
   for (const body of ['Owner authorized option (A) (...). @codjiflo opus-medium', 'Thanks @codjiflo opus-medium', '```text\n@codjiflo claude\n```\nPlease @codjiflo opus-medium', '> @codjiflo claude\nPlease @codjiflo opus-medium', '`example` @codjiflo opus-medium']) {
     assert.deepEqual(parseCommand(body), { preset: 'opus-medium', mode: 'incremental' });
   }
